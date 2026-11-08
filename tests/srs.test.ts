@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import fc from "fast-check";
-import { Rating } from "ts-fsrs";
+import { createEmptyCard, fsrs, Rating } from "ts-fsrs";
 import { gradeOf, ratingOf, replay, retrievabilityAt, type ReviewEvent, type ReviewOutcome, type ReviewRung } from "../src/core/srs/index.ts";
 
 const outcomes: ReviewOutcome[] = ["solved", "solvedWithHints", "movedOn", "surrendered", "dismissed"];
@@ -69,7 +69,7 @@ describe("srs replay", () => {
 	it("property: replay is deterministic", () => {
 		fc.assert(fc.property(historyArb, (h) => assert.deepEqual(replay(h), replay(structuredClone(h)))));
 	});
-	it("property: replay is order-sensitive (a good-then-lapse differs from lapse-then-good)", () => {
+	it("example: replay is order-sensitive (good-then-lapse differs from lapse-then-good)", () => {
 		const good: ReviewEvent = { id: "g", at: new Date(T0).toISOString(), outcome: "solved", rung: "R0" };
 		const again = (days: number): ReviewEvent => ({ id: "a", at: new Date(T0 + days * 86_400_000).toISOString(), outcome: "surrendered", rung: null });
 		const goodLater = { ...good, at: new Date(T0 + 10 * 86_400_000).toISOString() };
@@ -82,9 +82,28 @@ describe("srs replay", () => {
 				const mk = (outcome: ReviewOutcome, rung: ReviewRung): ReviewEvent => ({ ...last, outcome, rung, confidence: undefined });
 				const bad = replay([...h.slice(0, -1), mk("surrendered", null)])!;
 				const good = replay([...h.slice(0, -1), mk("solved", "R0")])!;
-				assert.ok(bad.due.getTime() <= good.due.getTime());
+				assert.ok(bad.due.getTime() < good.due.getTime());
 			}),
 		);
+	});
+	it("a shaky solve is due strictly earlier than the same solve with no confidence", () => {
+		const ev = (confidence?: number): ReviewEvent => ({ id: "s", at: new Date(T0).toISOString(), outcome: "solved", rung: "R0", confidence });
+		assert.ok(replay([ev(49)])!.due.getTime() < replay([ev()])!.due.getTime());
+	});
+	it("matches an independent ts-fsrs fold of a fixed history (grades hand-listed, order and confidence matter)", () => {
+		const day = (n: number) => new Date(T0 + n * 86_400_000);
+		const history: [ReviewEvent["outcome"], ReviewEvent["rung"], number | undefined, number, Rating.Again | Rating.Hard | Rating.Good][] = [
+			["solved", "R0", undefined, 0, Rating.Good],
+			["solved", "R0", 30, 2, Rating.Hard], // right but unsure
+			["surrendered", null, undefined, 9, Rating.Again],
+			["solved", "R2", undefined, 12, Rating.Hard],
+			["solvedWithHints", "R1", 90, 20, Rating.Good],
+		];
+		const f = fsrs({ request_retention: 0.9, maximum_interval: 36500, enable_fuzz: false, enable_short_term: true, learning_steps: ["1m", "10m"], relearning_steps: ["10m"] });
+		let expected = createEmptyCard(day(0));
+		for (const [, , , d, grade] of history) expected = f.next(expected, day(d), grade).card;
+		const events = history.map(([outcome, rung, confidence, d], i): ReviewEvent => ({ id: `f${i}`, at: day(d).toISOString(), outcome, rung, confidence }));
+		assert.deepEqual(replay(events), expected);
 	});
 	it("property: retrievability is a probability and decays with time", () => {
 		fc.assert(
