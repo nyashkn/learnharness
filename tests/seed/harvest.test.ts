@@ -4,7 +4,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { describe, it, mock } from "node:test";
 import fc from "fast-check";
-import { clipSnippet, createAllowEgress, MAX_SNIPPET_CHARS } from "../../src/seed/egress";
+import { canonProject, clipSnippet, createAllowEgress, MAX_SNIPPET_CHARS } from "../../src/seed/egress";
 import { redact } from "../../src/seed/redact";
 import { findRepeats, tagSignal } from "../../src/seed/signals";
 import { claudeHistorySource } from "../../src/seed/sources/claude-history";
@@ -322,6 +322,18 @@ describe("allowEgress", () => {
 	});
 	it("ignores blank entries instead of blocking everything", () => {
 		assert.equal(createAllowEgress([""," "])("~/anything"), true);
+	});
+	it("canonProject flattens paths, slugs and punctuation to one form", () => {
+		assert.equal(canonProject("/Users/alice/work/client_x"), "work-client-x");
+		assert.equal(canonProject("~/work/client-x"), "work-client-x");
+		assert.equal(canonProject("-Users-alice-work-client-x"), "work-client-x");
+		assert.equal(canonProject("Client.X "), "client-x");
+		assert.equal(canonProject("  / _ "), "");
+		assert.equal(canonProject("Caf\u0065\u0301"), "caf\u00e9");
+	});
+	it("blank projects count as null", () => {
+		assert.equal(createAllowEgress(["secretco"])(""), true);
+		assert.equal(createAllowEgress(["secretco"])("  "), true);
 	});
 	it("clips snippets to the cap", () => {
 		assert.equal(MAX_SNIPPET_CHARS, 300);

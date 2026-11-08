@@ -122,7 +122,8 @@ const decisionOf = (r: ReturnType<typeof rig>, title: string) => {
 
 describe("composeAllowEgress", () => {
 	const entry = fc.stringMatching(/^[a-z0-9]{2,8}$/);
-	const proj = fc.stringMatching(/^[A-Za-z0-9/_-]{1,20}$/);
+	// a path with a home segment is redacted before matching, so the oracle below only holds without one
+	const proj = fc.stringMatching(/^[A-Za-z0-9/_-]{1,20}$/).filter((p) => !/Users|home/.test(p));
 	it("an empty list allows null and every project", () => {
 		fc.assert(fc.property(proj, (p) => composeAllowEgress([])(null) === true && composeAllowEgress(["", "  "])(p) === true));
 	});
@@ -132,7 +133,8 @@ describe("composeAllowEgress", () => {
 	it("opted-out projects are refused, others allowed", () => {
 		fc.assert(
 			fc.property(fc.array(entry, { minLength: 1 }), proj, (list, p) => {
-				const blocked = list.some((e) => p.toLowerCase().includes(e));
+				const blank = /^[/_-]+$/.test(p); // no letter or digit left: treated as null, refused once a list exists
+				const blocked = blank || list.some((e) => p.toLowerCase().includes(e));
 				assert.equal(composeAllowEgress(list)(p), !blocked);
 			}),
 		);
@@ -158,6 +160,48 @@ describe("end-to-end egress through scan", () => {
 		assert.equal(reach(r, "ZQXNULLMARK"), true);
 		assert.equal(r.wire.some((w) => w.includes("ZQXNULLMARK")), true);
 		assert.equal(r.prompts.some((p) => p.includes("ZQXNULLMARK")), true);
+	});
+});
+
+describe("opt-out entries meet redacted projects (lh-an0)", () => {
+	const reach = (r: ReturnType<typeof rig>, marker: string) => r.wire.some((w) => w.includes(marker)) || r.prompts.some((p) => p.includes(marker));
+	const marked = (project: string | null) => raw("o1", "why does ZQXOPTMARK alpha fail", { project });
+	// entry written one way, project arriving another: path vs path, punctuation vs hyphens, path vs omp memory slug
+	const cases: [string, string][] = [
+		["/Users/alice/work/client_x", "/Users/alice/work/client_x/src"],
+		["/Users/alice/work/client_x", "/Users/bob/work/client_x"],
+		["client_x", "-Users-alice-work-client-x"],
+		["client.x", "-Users-alice-work-client-x"],
+		["client x", "/Users/alice/work/client-x"],
+		["Client_X", "/home/carol/code/CLIENT.x"],
+		["/Users/alice/work/client_x", "-Users-alice-work-client-x"],
+	];
+	for (const [entry, project] of cases) {
+		it(`entry ${JSON.stringify(entry)} blocks project ${JSON.stringify(project)} through scan`, async () => {
+			const r = rig({ items: [marked(project), ...ALPHA], optOut: [entry] });
+			assert.equal(await r.run("scan"), 0);
+			assert.equal(reach(r, "ZQXOPTMARK"), false);
+			assert.ok(r.wire.length > 0, "unrelated items still go out");
+		});
+	}
+	it("an unrelated project is not blocked by those entries", async () => {
+		const r = rig({ items: [marked("/Users/alice/work/other"), ...ALPHA], optOut: ["/Users/alice/work/client_x"] });
+		await r.run("scan");
+		assert.equal(reach(r, "ZQXOPTMARK"), true);
+	});
+	it("a blank or whitespace project is refused once a list exists, allowed without one", async () => {
+		for (const project of ["", "   ", "\t", "/"]) {
+			const withList = rig({ items: [marked(project), ...ALPHA], optOut: ["secretco"] });
+			await withList.run("scan");
+			assert.equal(reach(withList, "ZQXOPTMARK"), false, JSON.stringify(project));
+			const without = rig({ items: [marked(project), ...ALPHA], optOut: [] });
+			await without.run("scan");
+			assert.equal(reach(without, "ZQXOPTMARK"), true, JSON.stringify(project));
+		}
+	});
+	it("an entry that canonicalises to nothing is dropped, not a block-all", () => {
+		assert.equal(composeAllowEgress(["/Users/alice"])("~/work/app"), true);
+		assert.equal(composeAllowEgress(["/Users/alice"])(null), true);
 	});
 });
 

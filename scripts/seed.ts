@@ -13,7 +13,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { PATHS } from "../config.ts";
 import { HELP, parseCommand, runCli, type SeedPolicy } from "../src/seed/cli.ts";
-import { createAllowEgress } from "../src/seed/egress.ts";
+import { canonProject, createAllowEgress } from "../src/seed/egress.ts";
 import { createConfiguredLlmJudge } from "../src/seed/judge/configured-llm.ts";
 import { createJevApiJudge, type ProfileName } from "../src/seed/judge/jev-api.ts";
 import type { JudgePort } from "../src/seed/judge/port.ts";
@@ -59,8 +59,8 @@ export function loadSeedConfig(file: string, read: (file: string) => string = (f
  */
 export function composeAllowEgress(optOut: readonly string[]): AllowEgress {
 	const inner = createAllowEgress(optOut);
-	const listed = optOut.some((entry) => entry.trim() !== "");
-	return (project) => (project === null ? !listed : inner(project));
+	const listed = optOut.some((entry) => canonProject(entry) !== "");
+	return (project) => (project === null || canonProject(project) === "" ? !listed : inner(project));
 }
 
 export function parseOptOut(text: string): string[] {
