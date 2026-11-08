@@ -145,6 +145,11 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 		f.out("cannot read seed-optout.txt: refusing to run without knowing the opt-out list");
 		return 1;
 	}
+	if (parsed.kind === "scan" || parsed.kind === "propose") {
+		// data/ is per-worktree, so a list kept elsewhere reads as "allow all": say which file was used before anything leaves.
+		const file = path.resolve(f.dataDir, "seed-optout.txt");
+		f.out(optOut.length === 0 && !existsSync(file) ? `opt-out: 0 entries, file not found at ${file}` : `opt-out: ${optOut.length} entries from ${file}`);
+	}
 	const allowEgress = composeAllowEgress(optOut);
 
 	const db = f.openStore(path.join(f.dataDir, "seeds.sqlite"));

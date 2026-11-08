@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import fc from "fast-check";
 import { calibration, breakCycles, runCli, topoOrder, type CliDeps, type Edge, type LabelledRow } from "../../src/seed/cli";
@@ -705,6 +707,81 @@ describe("scripts/seed main", () => {
 		assert.deepEqual(await readOptOut("/x", async () => Promise.reject(Object.assign(new Error("n"), { code: "ENOENT" }))), []);
 		assert.deepEqual(parseOptOut("# client\n\nPivot\n  dockblocks  \n"), ["Pivot", "dockblocks"]);
 		await assert.rejects(readOptOut("/x", async () => Promise.reject(Object.assign(new Error("n"), { code: "EACCES" }))));
+	});
+	describe("opt-out line (lh-h9y)", () => {
+		const NOTE = "opt-out:";
+		// real file reads in a temp dir; the store is in memory; the first outbound call snapshots what was printed so far
+		async function ordering(command: "scan" | "propose", optOutText: string | null, extra: string[] = []) {
+			const dir = mkdtempSync(join(tmpdir(), "seed-optout-"));
+			try {
+				if (optOutText !== null) writeFileSync(join(dir, "seed-optout.txt"), optOutText);
+				const lines: string[] = [];
+				const atFirstCall: string[][] = [];
+				const mark = () => atFirstCall.push([...lines]);
+				const item = { id: "i1", source: "claude-history" as const, project: "/work/app", sessionId: "s1", at: RECENT, signal: "confusion" as const, textRedacted: "why does alpha borrowing fail" };
+				const shared = openNodeSqlite(":memory:");
+				migrate(shared, { ...seedMigration, lhVersion: "t" });
+				const seed = createSeedStore(shared);
+				seed.upsertItems([item]);
+				if (command === "propose") {
+					seed.saveProposals([{ id: "p1", title: "Alpha", why: "w", kind: "concept", prereqOf: null, firstSeen: RECENT, lastSeen: RECENT, nItems: 1, nProjects: 1, rankScore: 1, status: "proposed", mergedInto: null, evidenceIds: ["i1"] }]);
+					seed.setLabel("p1", "learn", NOW);
+				}
+				const src: SessionSource = { name: "fake", stats: { skipped: 0 }, async *items() { yield raw("a1", item.textRedacted); } };
+				const code = await main([command, ...extra], {
+					dataDir: dir,
+					configFile: new URL("../../scripts/seed-config.json", import.meta.url).pathname,
+					lhVersion: () => "t",
+					openStore: () => shared,
+					buildSources: () => ({ sources: [src], close() {} }),
+					buildLlm: async () => (mark(), { complete: async () => Promise.reject(new Error("no model")) }),
+					env: () => "x",
+					fetch: (async () => (mark(), Response.json({ id: "c1" }, { status: command === "propose" ? 200 : 500 }))) as unknown as typeof fetch,
+					out: (l) => lines.push(l),
+				}).catch(() => -1);
+				return { dir, code, lines, atFirstCall };
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}
+		const optLines = (ls: string[]) => ls.filter((l) => l.startsWith(NOTE));
+		for (const command of ["scan", "propose"] as const) {
+			it(`${command}: found file prints count and absolute path before the first outbound call`, async () => {
+				const r = await ordering(command, "# note\nclient_x\nother\n");
+				const file = join(r.dir, "seed-optout.txt");
+				assert.ok(r.atFirstCall.length >= 1, "an outbound call happened");
+				assert.deepEqual(optLines(r.atFirstCall[0]!), [`opt-out: 2 entries from ${file}`]);
+				assert.deepEqual(optLines(r.lines), [`opt-out: 2 entries from ${file}`]);
+			});
+			it(`${command}: missing file says so before the first outbound call`, async () => {
+				const r = await ordering(command, null);
+				assert.ok(r.atFirstCall.length >= 1);
+				assert.deepEqual(optLines(r.atFirstCall[0]!), [`opt-out: 0 entries, file not found at ${join(r.dir, "seed-optout.txt")}`]);
+			});
+			it(`${command}: empty file prints zero entries from the path, not "not found"`, async () => {
+				const r = await ordering(command, "\n# only a comment\n");
+				assert.ok(r.atFirstCall.length >= 1);
+				assert.deepEqual(optLines(r.atFirstCall[0]!), [`opt-out: 0 entries from ${join(r.dir, "seed-optout.txt")}`]);
+			});
+		}
+		it("scan with the configured-llm judge prints it before the model is built", async () => {
+			const r = await ordering("scan", "x\n", ["--judge", "configured-llm"]);
+			assert.ok(r.atFirstCall.length >= 1, "the model was built");
+			assert.deepEqual(optLines(r.atFirstCall[0]!).length, 1);
+		});
+		it("list, report, label and --help print no opt-out line", async () => {
+			for (const argv of [["list"], ["report"], ["label", "x", "skip"], ["--help"]]) {
+				const dir = mkdtempSync(join(tmpdir(), "seed-optout-"));
+				try {
+					const lines: string[] = [];
+					const shared = openNodeSqlite(":memory:");
+					await main(argv, { dataDir: dir, configFile: new URL("../../scripts/seed-config.json", import.meta.url).pathname, lhVersion: () => "t", openStore: () => shared, out: (l) => lines.push(l) });
+					assert.deepEqual(optLines(lines), [], argv.join(" "));
+				} finally {
+					rmSync(dir, { recursive: true, force: true });
+				}
+			}
+		});
 	});
 	it("scripts/seed.ts hard-codes no token", () => {
 		const text = readFileSync(new URL("../../scripts/seed.ts", import.meta.url), "utf8");
