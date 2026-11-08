@@ -126,6 +126,7 @@ function memoryLedgers() {
 			if (next.checkpoints) checkpoints.splice(0, checkpoints.length, ...next.checkpoints.map((c) => ({ ...c })));
 		},
 		transact: (_label, fn) => fn(),
+		revision: () => 0,
 	} satisfies GraphStore;
 }
 

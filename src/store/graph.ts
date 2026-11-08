@@ -131,14 +131,73 @@ function transact<T>(label: string, fn: () => T): T {
 	return result;
 }
 
+/** True when `file` is absent, empty or ends in a newline. */
+function endsClean(file: string): boolean {
+	let fd: number;
+	try {
+		fd = fs.openSync(file, "r");
+	} catch {
+		return true;
+	}
+	try {
+		const size = fs.fstatSync(fd).size;
+		if (size === 0) return true;
+		const last = Buffer.alloc(1);
+		fs.readSync(fd, last, 0, 1, size - 1);
+		return last[0] === 0x0a;
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
 function appendLine<T>(file: string, record: T): void {
+	assertGraphFormat(); // a newer-stamped dir refuses writes too, even inside a transact
 	if (txn) {
 		txn.ops.push({ t: "append", file, record: viaDisk(record) });
 		return;
 	}
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	ensureGraphFormat(); // the lazy format stamp (graph-format.ts)
-	fs.appendFileSync(file, `${JSON.stringify(record)}\n`, "utf-8");
+	// A torn tail (crash mid-append) must stay its own corrupt line, not swallow this record.
+	const prefix = endsClean(file) ? "" : "\n";
+	stamped(file, () => fs.appendFileSync(file, `${prefix}${JSON.stringify(record)}\n`, "utf-8"));
+}
+
+// ─── revision: the fs IS the counter ────────────────────────────────────────
+
+/** The newest mtime across the four ledgers and sources.json (0 if none exist).
+ *  positions.json and render settings are deliberately outside it: contract N7
+ *  keeps a rolled-back transact from moving it, and SQL revisions cannot see them. */
+function revisionNow(): number {
+	let revision = 0;
+	for (const file of [LEDGER_FILES.nodes, LEDGER_FILES.chains, LEDGER_FILES.sessions, LEDGER_FILES.coverage, SOURCES_FILE]) {
+		try {
+			revision = Math.max(revision, fs.statSync(file).mtimeMs);
+		} catch {
+			/* absent — nothing has ever written it */
+		}
+	}
+	return revision;
+}
+
+/** Run a write to `file`, then make sure its mtime is strictly above the revision
+ *  from before the write. Filesystems with coarse timestamps (~4 ms on Linux CI) or a
+ *  future-dated file would otherwise let a real write leave the revision unchanged. */
+function stamped(file: string, write: () => void): void {
+	const before = revisionNow();
+	write();
+	if (fs.statSync(file).mtimeMs > before) return;
+	const next = new Date(Math.ceil(before) + 1);
+	fs.utimesSync(file, next, next);
+}
+
+/** Content-identical to what is on disk (an absent file is never identical). */
+function sameOnDisk(file: string, body: string): boolean {
+	try {
+		return fs.readFileSync(file, "utf-8") === body;
+	} catch {
+		return false;
+	}
 }
 
 function readRawLines(file: string): unknown[] {
@@ -317,6 +376,7 @@ export const graphStore: GraphStore = {
 			coverage: LEDGER_FILES.coverage,
 			checkpoints: LEDGER_FILES.sessions,
 		} as const;
+		assertGraphFormat();
 		for (const [key, records] of Object.entries(next) as [keyof typeof files, unknown[]][]) {
 			if (txn) txn.ops.push({ t: "rewrite", file: files[key], records: records.map(viaDisk) });
 			else rewriteFile(files[key], records);
@@ -324,6 +384,7 @@ export const graphStore: GraphStore = {
 	},
 
 	transact,
+	revision: revisionNow,
 };
 
 /** JSONL: one record per line, trailing newline — the reader must see
@@ -331,12 +392,14 @@ export const graphStore: GraphStore = {
 function rewriteFile(file: string, records: unknown[]): void {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const body = records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : "");
-	writeFileAtomicSync(file, body);
+	if (!sameOnDisk(file, body)) stamped(file, () => writeFileAtomicSync(file, body)); // a no-op rewrite must not move the revision
 	removeLeftoverTemps(file); // crash leftovers would still hold the purged records
 }
 
 function deleteSourceMap(map: Record<string, NotesSource>): void {
-	writeFileAtomicSync(SOURCES_FILE, JSON.stringify(map, null, "\t"));
+	assertGraphFormat();
+	const body = JSON.stringify(map, null, "\t");
+	if (!sameOnDisk(SOURCES_FILE, body)) stamped(SOURCES_FILE, () => writeFileAtomicSync(SOURCES_FILE, body));
 	removeLeftoverTemps(SOURCES_FILE); // crash leftovers would still hold the deleted sources
 }
 
@@ -403,6 +466,7 @@ function readSourceMap(): Record<string, NotesSource> {
 }
 
 function writeSourceMap(map: Record<string, NotesSource>, deleting = false): void {
+	assertGraphFormat();
 	if (txn) {
 		txn.ops.push({ t: "sources", map: viaDisk(map), deleting });
 		return;
@@ -410,7 +474,9 @@ function writeSourceMap(map: Record<string, NotesSource>, deleting = false): voi
 	if (deleting) return deleteSourceMap(map);
 	fs.mkdirSync(path.dirname(SOURCES_FILE), { recursive: true });
 	ensureGraphFormat(); // the lazy format stamp (graph-format.ts)
-	writeFileAtomicSync(SOURCES_FILE, JSON.stringify(map, null, "\t"), { allowInPlaceFallback: true });
+	const body = JSON.stringify(map, null, "\t");
+	if (sameOnDisk(SOURCES_FILE, body)) return; // a no-op write must not move the revision
+	stamped(SOURCES_FILE, () => writeFileAtomicSync(SOURCES_FILE, body, { allowInPlaceFallback: true }));
 }
 
 // ─── one-way purges at adapter load: dead ledgers are exactly the confusion

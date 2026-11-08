@@ -150,6 +150,13 @@ export interface GraphStore {
 	 *  and rejected only at its first return; work it does after an `await`
 	 *  runs outside the transaction and is not undone. */
 	transact<T>(label: string, fn: () => T): T;
+
+	/** Opaque change counter (item 9): moves on every committed write that
+	 *  changed something, never on reads, no-op writes or a rolled-back
+	 *  transact, and never goes backwards. Covers the four ledgers and the
+	 *  sources map; positions and render settings are outside it. Compare for
+	 *  equality only. */
+	revision(): number;
 }
 
 /** Separate from graph ledgers and source identity, for future shared views. */

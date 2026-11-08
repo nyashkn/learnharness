@@ -28,7 +28,7 @@ let bound: ReturnType<typeof bind> | undefined;
 
 const factory: AdapterFactory = {
 	name: "file",
-	capabilities: { revision: false, corruptLines: false, refusesAtOpen: false },
+	capabilities: { revision: true, corruptLines: false, refusesAtOpen: false },
 	async open(dir): Promise<StoreBundle> {
 		fs.rmSync(slot, { force: true });
 		fs.symlinkSync(dir, slot, "dir");
