@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import fc from "fast-check";
-import { createEmptyCard, fsrs, Rating } from "ts-fsrs";
+import { createEmptyCard, fsrs, Rating, type Grade } from "ts-fsrs";
 import { gradeOf, ratingOf, replay, retrievabilityAt, type ReviewEvent, type ReviewOutcome, type ReviewRung } from "../src/core/srs/index.ts";
 
 const outcomes: ReviewOutcome[] = ["solved", "solvedWithHints", "movedOn", "surrendered", "dismissed"];
@@ -92,7 +92,7 @@ describe("srs replay", () => {
 	});
 	it("matches an independent ts-fsrs fold of a fixed history (grades hand-listed, order and confidence matter)", () => {
 		const day = (n: number) => new Date(T0 + n * 86_400_000);
-		const history: [ReviewEvent["outcome"], ReviewEvent["rung"], number | undefined, number, Rating.Again | Rating.Hard | Rating.Good][] = [
+		const history: [ReviewEvent["outcome"], ReviewEvent["rung"], number | undefined, number, Grade][] = [
 			["solved", "R0", undefined, 0, Rating.Good],
 			["solved", "R0", 30, 2, Rating.Hard], // right but unsure
 			["surrendered", null, undefined, 9, Rating.Again],
