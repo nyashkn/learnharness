@@ -23,12 +23,29 @@ const PATH_SECRET_URL =
 const INLINE_ENV = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]+[ \t]*=(?![=>])[ \t]*)(?!\[redacted:)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g;
 const KEY_VALUE =
 	/(?<![A-Za-z0-9])([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credentials?)["']?[ \t]*[:=][ \t]*)(?!\[redacted:)(?:"[^"\n]*"|'[^'\n]*'|[^\s"',;&)}\]]+)/gi;
-// shortcut: alnum-only runs, so a secret broken by "-" or "_" into pieces under 32 chars survives; the digit+letter test keeps long identifiers and UUIDs out.
+// Alnum-only runs: hex digests and similar; the digit+letter test keeps long identifiers out.
 const OPAQUE_RUN = /(?<![A-Za-z0-9])(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{32,}(?![A-Za-z0-9])/g;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const ENV_LINE = /^([ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]+)=[^\n]*/gm;
 const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const SPLIT_RUN = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/g;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Measured: slugs and hyphenated English sit below this, random base64url above it.
+const MIN_ENTROPY = 4.4;
+
+function entropy(run: string): number {
+	const counts = new Map<string, number>();
+	for (const c of run) counts.set(c, (counts.get(c) ?? 0) + 1);
+	let h = 0;
+	for (const n of counts.values()) h -= (n / run.length) * Math.log2(n / run.length);
+	return h;
+}
+
+/** Tokens split by "-" or "_" escape the alnum rule; entropy tells them from slugs and compounds. */
+function redactSplitRun(run: string): string {
+	return /\d/.test(run) && !UUID.test(run) && entropy(run) >= MIN_ENTROPY ? "[redacted:secret]" : run;
+}
 const HOME_PATHS: readonly RegExp[] = [
 	/\/(?:Users|home)\/[^/\s]+/g,
 	/[A-Za-z]:\\Users\\[^\\\s]+/g,
@@ -49,6 +66,7 @@ export function redact(text: string): string {
 	out = out.replace(INLINE_ENV, "$1[redacted:env]");
 	out = out.replace(KEY_VALUE, "$1[redacted:secret]");
 	out = out.replace(OPAQUE_RUN, "[redacted:secret]");
+	out = out.replace(SPLIT_RUN, redactSplitRun);
 	out = out.replace(EMAIL, "[redacted:email]");
 	for (const re of HOME_PATHS) out = out.replace(re, "~");
 	return out;

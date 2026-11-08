@@ -78,7 +78,10 @@ const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: str
 	// opaque catch-all
 	["opaque run", "blob 9fA3kLq0ZxV7bN2mC5dR8sT1yW4uE6iO end", "blob [redacted:secret] end"],
 	["opaque hex digest", "sha 0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091 end", "sha [redacted:secret] end"],
+	["split token", "tok aB3-dE9_fG2-hJ7_kL4-mN8_pQ1-rS5_tU6-vW0 end", "tok [redacted:secret] end"],
 	// must survive
+	["slug with a digit", "cwd -Users-someone-Documents-dev_work-client-x2 ok", "cwd ~-Documents-dev_work-client-x2 ok"],
+	["long slug with digits", "-opt-work-client-x2-learn-harness-fork-feature-lh-epic-2026", "-opt-work-client-x2-learn-harness-fork-feature-lh-epic-2026"],
 	["maths", "x = n^2", "x = n^2"],
 	["short upper assignment", "N=5", "N=5"],
 	["big-O", "O(n log n)", "O(n log n)"],
