@@ -594,7 +594,7 @@ export function registerContract(f: AdapterFactory): void {
 			eq(b.graph.readNodes(), items.flatMap((x) => ("v" in x ? [x.v] : [])));
 			const cl = need(corruptOf(b), "GraphStore.corruptLines");
 			eq(cl(), items.filter((x) => "g" in x).length);
-		}, f.capabilities.corruptLines ? {} : { todo: "lh-hbv" });
+		}, f.capabilities.corruptLines ? {} : { todo: "lh-bhc" });
 
 		it("N3 a newer-format store is refused AT OPEN with a StorageVersionError (item 5)", { timeout: A.PROPERTY_TIMEOUT_MS, ...(f.capabilities.refusesAtOpen ? {} : { todo: "lh-hbv" }) }, async () => {
 			const b = await fresh();
@@ -674,6 +674,20 @@ export function registerContract(f: AdapterFactory): void {
 		P("N10", "nested transact (item 11) joins the outer: one commit, call order kept", count, (b, n) => {
 			b.graph.transact("outer", () => { b.graph.appendNode(nodeAt(0)); b.graph.transact("inner", () => { for (let i = 1; i <= n; i++) b.graph.appendNode(nodeAt(i)); }); b.graph.appendNode(nodeAt(99)); });
 			eq(b.graph.readNodes().map((x) => x.statement), ["s0", ...Array.from({ length: n }, (_, i) => `s${i + 1}`), "s99"]);
+		});
+
+		// Item 10 for adapters that emit: the listener runs when the event fires, so what it can read shows whether the write came first.
+		T("N17", "events after the write (item 10): chats-changed fires once, and a listener already sees the new chat", (b) => {
+			const seen: number[] = [];
+			const off = b.events.subscribe((e) => { if (e.type === "chats-changed") seen.push(b.chats.listChats().length); });
+			try { b.chats.createChat("a"); } finally { off(); }
+			assert.deepEqual(seen, [1]);
+		});
+		T("N18", "events after the write (item 10): jobs-changed fires once, and a listener already sees the new job", (b) => {
+			const seen: number[] = [];
+			const off = b.events.subscribe((e) => { if (e.type === "jobs-changed") seen.push(b.jobs.listJobs("c1").length); });
+			try { b.jobs.createJob({ kind: "probe", chatId: "c1", toolCallId: "t1" } as never); } finally { off(); }
+			assert.deepEqual(seen, [1]);
 		});
 
 		T("N11", "positions and render settings stay OUTSIDE the transaction (item 13): they survive a rollback", (b) => {
