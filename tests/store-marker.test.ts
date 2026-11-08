@@ -331,6 +331,26 @@ describe("the store lock", () => {
 		assert.equal(s.chatStore.listChats().length, 0, "reads still work while another process holds the lock");
 	});
 
+	// Delete paths are writes too (lh-7km): each must take the lock before removing anything.
+	const DELETES: Record<string, { seed: (s: S) => unknown; del: (s: S, seeded: unknown) => unknown }> = {
+		deleteChat: { seed: (s) => s.chatStore.createChat("hello"), del: (s, c) => s.chatStore.deleteChat((c as { id: string }).id) },
+		deleteJobsForChat: { seed: (s) => s.jobStore.createJob({ kind: "research", chatId: "chat_a", toolCallId: "t1" } as never), del: (s) => s.jobStore.deleteJobsForChat("chat_a") },
+		deleteOverride: { seed: (s) => s.promptOverrides.writeOverride("system-prompt.md", "x"), del: (s) => s.promptOverrides.deleteOverride("system-prompt.md") },
+		deleteSourceMap: { seed: (s) => s.graphStore.upsertSource({ id: "src_1", filePath: "/x", importedAt: "t" } as never), del: (s) => s.graphStore.deleteSources(new Set(["src_1"])) },
+	};
+	for (const [name, { seed, del }] of Object.entries(DELETES)) {
+		it(`${name}: refused while another host holds the lock; nothing is removed`, () => {
+			const dir = fresh();
+			const s = createFileStores(dir, auth(dir));
+			const seeded = seed(s);
+			marker.releaseStoreLock(dir); // our lock goes away; another machine now holds the store
+			acquireStoreLock(path.join(dir, "storage.json"), { pid: 4242, host: "other-machine" });
+			const before = snapshot(dir);
+			assert.throws(() => del(s, seeded), (e: unknown) => e instanceof StoreLockedError && e.holder?.pid === 4242, name);
+			assert.equal(snapshot(dir), before);
+		});
+	}
+
 	it("scripts take the lock: refused while a live holder has it (holder named), run and release when it is stale", async () => {
 		const dir = fresh();
 		fs.mkdirSync(dir);
