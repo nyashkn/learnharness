@@ -29,6 +29,26 @@ jobs:
           node-version: "26"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The Electron binary is fetched lazily from github.com (pnpm skips its postinstall).
+      # Cache it per version/OS, then fetch with backoff on a cold cache.
+      - id: electron
+        shell: bash
+        run: echo "version=$(node -p "require('electron/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/electron-cache
+          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ steps.electron.outputs.version }}
+      - name: Fetch Electron binary (retry with backoff)
+        shell: bash
+        env:
+          electron_config_cache: ${{ runner.temp }}/electron-cache
+        run: |
+          for delay in 0 15 45 90 180; do
+            sleep "$delay"
+            node node_modules/electron/install.js && exit 0
+          done
+          echo "::error::Electron binary download failed after 5 attempts (GitHub outage?)"
+          exit 1
       - run: pnpm run ci
 
   standalone:
@@ -57,6 +77,26 @@ jobs:
           node-version: "26"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The Electron binary is fetched lazily from github.com (pnpm skips its postinstall).
+      # Cache it per version/OS, then fetch with backoff on a cold cache.
+      - id: electron
+        shell: bash
+        run: echo "version=$(node -p "require('electron/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/electron-cache
+          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ steps.electron.outputs.version }}
+      - name: Fetch Electron binary (retry with backoff)
+        shell: bash
+        env:
+          electron_config_cache: ${{ runner.temp }}/electron-cache
+        run: |
+          for delay in 0 15 45 90 180; do
+            sleep "$delay"
+            node node_modules/electron/install.js && exit 0
+          done
+          echo "::error::Electron binary download failed after 5 attempts (GitHub outage?)"
+          exit 1
       - name: Native renderer tests on this OS
         run: pnpm exec electron --import tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
         env:
