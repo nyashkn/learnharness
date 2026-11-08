@@ -4,7 +4,7 @@ import { test } from "node:test";
 
 const root = new URL("..", import.meta.url).pathname;
 
-const STORE_IMPORT = /\b(?:from|import)\s*\(?\s*["'](?:(?:\.\.\/)+|@\/src\/)store\/([^"']+)["']/g;
+const STORE_IMPORT = /\b(?:from|import)\s*\(?\s*["'`](?:(?:\.\.\/)+|@\/src\/)store\/([^"'`]+)["'`]/g;
 
 const leaksIn = (file: string, source: string) => [...source.matchAll(STORE_IMPORT)].map((m) => `${file} -> ${m[1]}`);
 
@@ -16,8 +16,10 @@ test("leaksIn finds every import form, one entry per line", () => {
 		'const c = await import("../store/c.ts");',
 		'import { d } from "@/src/store/d.ts";',
 		'import { e } from "../core/e.ts";',
+		"const f = await import(`../store/f.ts`);",
+		"const g = await import(`../store/${name}.ts`);",
 	].join("\n");
-	assert.deepEqual(leaksIn("f.ts", source), ["f.ts -> a.ts", "f.ts -> b.ts", "f.ts -> a.ts", "f.ts -> c.ts", "f.ts -> d.ts"]);
+	assert.deepEqual(leaksIn("f.ts", source), ["f.ts -> a.ts", "f.ts -> b.ts", "f.ts -> a.ts", "f.ts -> c.ts", "f.ts -> d.ts", "f.ts -> f.ts", "f.ts -> ${name}.ts"]);
 });
 
 test("the allowlist is exactly the store imports that still leak, and it only shrinks", async () => {
@@ -27,5 +29,6 @@ test("the allowlist is exactly the store imports that still leak, and it only sh
 	assert.ok(files.includes("src/server/index.ts"), "the file walk found nothing real");
 	const actual = files.flatMap((file) => leaksIn(file, readFileSync(`${root}${file}`, "utf8"))).sort();
 	assert.deepEqual(actual, leakAllowlist.map((leak) => `${leak.file} -> ${leak.module}`).sort());
+	assert.equal(maxLeaks, 0, "the allowlist is empty: the ratchet cannot be raised");
 	assert.equal(leakAllowlist.length, maxLeaks, "lower maxLeaks with each removed entry; new leaks go through src/server/stores.ts");
 });
