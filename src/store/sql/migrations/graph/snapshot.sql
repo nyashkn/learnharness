@@ -1,0 +1,7 @@
+CREATE TABLE documents ( key TEXT PRIMARY KEY, json TEXT NOT NULL );
+CREATE TABLE ledger_chains ( seq INTEGER PRIMARY KEY, line_json TEXT NOT NULL );
+CREATE TABLE ledger_checkpoints ( seq INTEGER PRIMARY KEY, line_json TEXT NOT NULL );
+CREATE TABLE ledger_coverage ( seq INTEGER PRIMARY KEY, line_json TEXT NOT NULL );
+CREATE TABLE ledger_nodes ( seq INTEGER PRIMARY KEY, line_json TEXT NOT NULL );
+CREATE TABLE lh_meta ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
+CREATE TABLE sources ( id TEXT PRIMARY KEY, record_json TEXT NOT NULL );
