@@ -1,0 +1,49 @@
+{
+	"type": "object",
+	"required": [
+		"id",
+		"premises",
+		"conclusion",
+		"provenance",
+		"createdAt"
+	],
+	"properties": {
+		"id": {
+			"type": "string"
+		},
+		"premises": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			},
+			"minItems": 1
+		},
+		"conclusion": {
+			"type": "string"
+		},
+		"provenance": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"required": [
+					"chatId",
+					"messageId"
+				],
+				"properties": {
+					"chatId": {
+						"type": "string"
+					},
+					"messageId": {
+						"type": "string"
+					}
+				},
+				"additionalProperties": true
+			}
+		},
+		"createdAt": {
+			"type": "string"
+		}
+	},
+	"$id": "lh.graph.chain-line.v1",
+	"additionalProperties": true
+}

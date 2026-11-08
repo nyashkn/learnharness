@@ -1,0 +1,25 @@
+{
+	"type": "object",
+	"required": [
+		"chatId",
+		"fp",
+		"tokens",
+		"foldedAt"
+	],
+	"properties": {
+		"chatId": {
+			"type": "string"
+		},
+		"fp": {
+			"type": "string"
+		},
+		"tokens": {
+			"type": "number"
+		},
+		"foldedAt": {
+			"type": "string"
+		}
+	},
+	"$id": "lh.graph.coverage-line.v1",
+	"additionalProperties": true
+}

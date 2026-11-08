@@ -1,0 +1,52 @@
+{
+	"type": "object",
+	"required": [
+		"id",
+		"name",
+		"statement",
+		"aliases",
+		"createdAt",
+		"provenance"
+	],
+	"properties": {
+		"id": {
+			"type": "string"
+		},
+		"name": {
+			"type": "string"
+		},
+		"statement": {
+			"type": "string"
+		},
+		"aliases": {
+			"type": "array",
+			"items": {
+				"type": "string"
+			}
+		},
+		"createdAt": {
+			"type": "string"
+		},
+		"provenance": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"required": [
+					"chatId",
+					"messageId"
+				],
+				"properties": {
+					"chatId": {
+						"type": "string"
+					},
+					"messageId": {
+						"type": "string"
+					}
+				},
+				"additionalProperties": true
+			}
+		}
+	},
+	"$id": "lh.graph.node-line.v1",
+	"additionalProperties": true
+}

@@ -1,0 +1,17 @@
+{
+	"type": "object",
+	"required": [
+		"chatId",
+		"foldedAt"
+	],
+	"properties": {
+		"chatId": {
+			"type": "string"
+		},
+		"foldedAt": {
+			"type": "string"
+		}
+	},
+	"$id": "lh.graph.checkpoint-line.v1",
+	"additionalProperties": true
+}
