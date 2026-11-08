@@ -54,7 +54,7 @@ import {
 } from "../core/auth-keys.ts";
 import { authStore } from "./stores.ts";
 import { isSubscriptionProvider, subscriptionConnected } from "../agent/subscription-connections.ts";
-import { customProviderAvailable, installCustomProviderSource } from "./custom-provider.ts";
+import { customProviderAvailable, installCustomProviderSource, syncCustomProvider } from "./custom-provider.ts";
 import { claudeCodeAvailable } from "./claude-code-config.ts";
 import { CLAUDE_CODE_PROVIDER } from "../agent/claude-code/constants.ts";
 import { CUSTOM_AUTH_BINDING } from "../core/custom-provider-auth.ts";
@@ -247,3 +247,7 @@ export function deleteKey(id: string): AuthKeyStatus {
 // imported by every route/handler path that touches keys).
 initAuthEnv();
 installCustomProviderSource();
+// Boot: register the custom endpoint (when configured) into piModels() as soon as its source is installed;
+// every piModels() call re-syncs, and POST /api/custom-provider re-syncs after each connect. (This used to run
+// at the bottom of stores.ts, which made stores.ts <-> custom-provider.ts a cycle.)
+syncCustomProvider();

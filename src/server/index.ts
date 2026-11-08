@@ -16,9 +16,8 @@ export { joinPages } from "../agent/subagents/pdf-markdown.ts";
 export * from "./commit-positions.ts";
 export * from "./jobs.ts";
 export * from "./stores.ts";
-// The settings record + prompt overrides (settings-storage wave, 2026-09-19).
-// The *Record aliases keep the app/api/settings routes explicit about which
-// seam they touch (the raw record, not the chat-section convenience view).
+// Prompt-segment validation for the settings routes. The settings *Record aliases
+// (readSettingsRecord, writeSettingsRecord) and the prompt overrides come from ./stores.ts above.
 export { isValidSegmentPath } from "../core/prompt-segments.ts";
 // The canonical segment discovery/resolution lives in the agent layer
 // (composition is an agent concern); the barrel re-exports it for the
@@ -44,6 +43,6 @@ export { subscriptionControlsResponse, subscriptionBrowserResponse } from "./web
 export { sessionCost } from "./pricing.ts";
 export { claudeCodeInstallationResponse } from "./claude-code.ts";
 // The custom endpoint module (registers into piModels() + probes for models).
-// No import side effects; the boot sync lives in stores.ts.
+// No import side effects here; the custom-endpoint boot sync lives at the bottom of keys.ts.
 export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";

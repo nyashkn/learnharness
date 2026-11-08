@@ -284,3 +284,15 @@ export interface CustomAuthSnapshot {
 	fileKey(): string | undefined;
 }
 
+// ─── Stores — the wired set, typed against the ports (never the adapters) ────
+
+export interface Stores {
+	chatStore: ChatStore;
+	graphStore: GraphStore;
+	sourceOrganizationStore: SourceOrganizationStore;
+	jobStore: JobStore;
+	settingsStore: SettingsStore;
+	authStore: AuthStore;
+	promptOverrides: PromptOverrideStore;
+	renderSettingsStore: RenderSettingsStore;
+}

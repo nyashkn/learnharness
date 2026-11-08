@@ -17,7 +17,7 @@
 		"dev": "next dev",
 		"build": "next build",
 		"start": "next start",
-		"test": "NODE_ENV=test tsx --test tests/*.test.ts tests/*.test.tsx",
+		"test": "NODE_ENV=test tsx --import ./tests/isolate-data-dir.ts --test tests/*.test.ts tests/*.test.tsx",
 		"lint": "eslint .",
 		"typecheck": "tsc --noEmit",
 		"ci": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:sql && pnpm run test:seed && pnpm run test:contract && pnpm run check:schemas && pnpm run check:pins",

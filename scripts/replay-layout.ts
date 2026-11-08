@@ -12,7 +12,9 @@
  * --depth regenerates the ledger WITH inference-depth anchoring (the
  * playground mode baked into the rest state); omit it for the free layout.
  */
-import { graphStore } from "../src/store/graph.ts";
+import { AUTH_FILE, PATHS } from "../config.ts";
+import { runStoreScript } from "../src/store/file-stores.ts";
+import type { Stores } from "../src/core/ports.ts";
 // --depth=vertical|radial: bake the playground depth mode into the ledger.
 const depthArg = process.argv.find((a) => a.startsWith("--depth="));
 const depthMode: "off" | "vertical" | "radial" =
@@ -22,7 +24,7 @@ import { birthSessionPartition } from "../src/core/session-clusters.ts";
 import { deriveView, getGraph } from "../src/core/graph.ts";
 import type { GraphNode, Position } from "../src/core/contracts.ts";
 
-function main() {
+function main({ graphStore }: Stores) {
 	const t0 = Date.now();
 
 	// CHAINS-PRIMARY (2026-09-30): the stored truth is nodes + chains; the
@@ -139,4 +141,5 @@ function main() {
 	);
 }
 
-main();
+// Factories over the data folder, under the store lock (a running server holds it: this exits naming the holder).
+await runStoreScript(PATHS.data, AUTH_FILE, main);
