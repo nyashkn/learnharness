@@ -8,7 +8,7 @@
 import { createProvider, type Api, type Model, type Provider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { configureProviderSource, piModels } from "../agent/models.ts";
-import { readSettings } from "../store/settings.ts";
+import { settingsStore } from "./stores.ts";
 import { CustomBodyLimitError, readBoundedJson } from "./custom-provider-body.ts";
 import { CUSTOM_PROVIDER } from "../core/auth-keys.ts";
 import { customBindingMatches } from "../core/custom-provider-auth.ts";
@@ -38,7 +38,7 @@ export function installCustomProviderSource(readAuth = customAuthState): void {
 	configureProviderSource({
 		isCustom: (id) => id === CUSTOM_PROVIDER.id,
 		sync(models) {
-			const cp = readSettings()?.customProvider;
+			const cp = settingsStore.readSettings()?.customProvider;
 			// Validate the durable nonce/URL/mode before resolving ANY credential.
 			// Keyless reads only the nonsecret marker, never a file/env key.
 			const auth = readAuth(cp?.authMode === "apiKey", cp);

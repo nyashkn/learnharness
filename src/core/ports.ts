@@ -28,6 +28,9 @@ import type {
 	NotesSource,
 } from "./contracts.ts";
 import type { UserSettings } from "./settings.ts";
+import type { FileAccessSettingsResult } from "./file-access.ts";
+import type { CustomAuthBinding } from "./custom-provider-auth.ts";
+import type { GraphRenderSettings } from "./render-settings.ts";
 
 // ─── ChatStore — the session record's home (data/chats) ─────────────────────
 
@@ -131,6 +134,22 @@ export interface GraphStore {
 		coverage?: CoverageEntry[];
 		checkpoints?: SessionCheckpoint[];
 	}): void;
+
+	/** One unit of work over the ledgers and sources map (CB2 items 4, 11, 14-17).
+	 *  Inside `fn` every read sees committed state plus this transaction's
+	 *  pending writes (read-your-writes), and the writes apply in call order
+	 *  when `fn` returns. A throw leaves no trace. `fn` must be synchronous:
+	 *  a returned thenable rolls back and throws. A nested `transact` joins the
+	 *  outer one; if a nested `fn` throws and the outer catches it, the outer
+	 *  still rolls back. `label` names the unit (commit message for versioned
+	 *  adapters). Positions and render settings stay outside the transaction.
+	 *  The bare source writes (`upsertSource`, `appendSourceUsage`,
+	 *  `deleteSources`) wrap themselves in `auto:<method>`. The source-
+	 *  organization write joins an open transaction too: it and its event wait
+	 *  for commit. LIMIT: `fn` must be synchronous. An async `fn` is rolled back
+	 *  and rejected only at its first return; work it does after an `await`
+	 *  runs outside the transaction and is not undone. */
+	transact<T>(label: string, fn: () => T): T;
 }
 
 /** Separate from graph ledgers and source identity, for future shared views. */
@@ -187,6 +206,20 @@ export interface SettingsStore {
 	readSettings(): UserSettings | null;
 	/** Persist the record (replace-whole). Callers pass a SANITIZED record. */
 	writeSettings(settings: UserSettings): void;
+	/** Strict file-access view: unlike readSettings, a corrupt or unreadable
+	 *  record is a refusal (ok: false), never first-boot defaults. */
+	readFileAccessSettings(): FileAccessSettingsResult;
+}
+
+// ─── RenderSettingsStore — graph render settings (data/render-settings.json) ──
+
+/** Read-modify-write, NOT a ledger; stays outside transact (decision: positions
+ *  and render settings stay outside transact). */
+export interface RenderSettingsStore {
+	/** The sanitized settings, or null when none exist yet (first boot). */
+	readRenderSettings(): GraphRenderSettings | null;
+	/** Persist (sanitized again on write). Returns what was written. */
+	writeRenderSettings(raw: unknown): GraphRenderSettings;
 }
 
 // ─── PromptOverrideStore — per-segment system-prompt overrides (2026-09-19) ──
@@ -231,5 +264,16 @@ export interface AuthStore {
 	setAuthVar(name: string, value: string): void;
 	/** Remove one VAR if present (absent = no-op, still a silent success). */
 	deleteAuthVar(name: string): void;
+	/** One immutable snapshot of the custom-endpoint pair. Throws when the
+	 *  private record is unreadable, so callers never overwrite it as {}.
+	 *  Keyless callers never invoke fileKey(). */
+	readCustomAuth(): CustomAuthSnapshot;
+	/** Replace just the custom pair in ONE atomic record write. */
+	writeCustomAuth(binding: CustomAuthBinding | undefined, fileKey: string | undefined): void;
+}
+
+export interface CustomAuthSnapshot {
+	binding: CustomAuthBinding | undefined;
+	fileKey(): string | undefined;
 }
 

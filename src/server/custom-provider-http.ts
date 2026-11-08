@@ -2,8 +2,7 @@
  * credential-binding and optimistic-write boundaries. No secret reaches GET. */
 import { createHmac, randomBytes } from "node:crypto";
 import { normalizeBaseUrl, parseModelIds, sanitizeCustomModelOverrides, type CustomProviderSettings } from "../core/settings.ts";
-import { readSettings, writeSettings } from "../store/settings.ts";
-import { readCustomAuth } from "../store/auth.ts";
+import { authStore, settingsStore } from "./stores.ts";
 import { customAuthState, customKeyAuthorized, persistCustomAuth } from "./custom-provider-auth.ts";
 import type { CustomAuthBinding } from "../core/custom-provider-auth.ts";
 import { desktopAPIAuthorized } from "./desktop-access.ts";
@@ -19,7 +18,7 @@ const failure = (error: string, status = 400) => Response.json({ error }, { stat
 const stale = () => failure("Custom configuration or credentials changed. Reload configuration and retry.", 409);
 
 function snapshot(inspectKey = false) {
-	const record = readSettings() ?? { version: 1 };
+	const record = settingsStore.readSettings() ?? { version: 1 };
 	const cp = record.customProvider;
 	// Keyless never looks up a key for authentication or revision generation.
 	// An explicit API-key inspection is used only after the user selects that mode.
@@ -65,13 +64,13 @@ function authorized(request: Request): boolean {
  * cross-file publication is durably unusable, including with a real env key.
  * Best-effort rollback restores the entire old pair, never just its secret. */
 function commit(cp: CustomProviderSettings | undefined, binding?: CustomAuthBinding, fileKey?: string): void {
-	const latest = readSettings() ?? { version: 1 };
-	const oldAuth = binding ? readCustomAuth() : undefined;
+	const latest = settingsStore.readSettings() ?? { version: 1 };
+	const oldAuth = binding ? authStore.readCustomAuth() : undefined;
 	let published = false;
 	try {
 		if (binding) { persistCustomAuth(binding, fileKey); published = true; }
 		const { customProvider: _old, ...rest } = latest;
-		writeSettings(cp ? { ...rest, customProvider: cp } : rest);
+		settingsStore.writeSettings(cp ? { ...rest, customProvider: cp } : rest);
 	} catch {
 		if (published && oldAuth) {
 			try { persistCustomAuth(oldAuth.binding, oldAuth.fileKey()); } catch { /* durable nonce mismatch fails closed after restart */ }

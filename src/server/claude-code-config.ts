@@ -1,5 +1,5 @@
 import { getClaudeBinary } from "../agent/claude-code/binary.ts";
-import { settingsStore } from "../store/settings.ts";
+import { settingsStore } from "./stores.ts";
 
 /** Fresh admission state, not a process-wide cache. Existing runs retain
  * their engines; only new chat/job/extraction/compaction admissions consult it. */

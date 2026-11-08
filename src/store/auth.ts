@@ -62,6 +62,8 @@ export const authStore: AuthStore = {
 		delete map[name];
 		writeMap(map);
 	},
+	readCustomAuth,
+	writeCustomAuth,
 };
 
 /** Custom writes must never turn an unreadable/corrupt private file into {}.

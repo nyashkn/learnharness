@@ -11,6 +11,9 @@ import { graphStore } from "../store/graph.ts";
 import { sourceOrganizationStore } from "../store/source-organization.ts";
 import { jobStore } from "../store/jobs.ts";
 import { settingsStore } from "../store/settings.ts";
+import { authStore } from "../store/auth.ts";
+import { promptOverrides } from "../store/prompt-overrides.ts";
+import { renderSettingsStore } from "../store/render-settings.ts";
 import { resolveSettings, type EffectiveSettings } from "../core/settings-resolution.ts";
 import { syncCustomProvider } from "./custom-provider.ts";
 /** The wired adapters. Satisfies core/graph.ts's GraphDeps structurally. */
@@ -20,7 +23,15 @@ export const stores = {
 	sourceOrganizationStore,
 	jobStore,
 	settingsStore,
+	authStore,
+	promptOverrides,
+	renderSettingsStore,
 };
+
+// Named handles and the raw-record aliases the routes use (moved from the barrel).
+export { settingsStore, authStore, promptOverrides, renderSettingsStore };
+export { readRenderSettings, writeRenderSettings } from "../store/render-settings.ts";
+export { readSettings as readSettingsRecord, writeSettings as writeSettingsRecord } from "../store/settings.ts";
 
 export type Stores = typeof stores;
 

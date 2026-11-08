@@ -4,21 +4,6 @@
 // tests/leak-allowlist.test.ts keeps this list equal to the real imports.
 
 // Lower this as entries go. It only ever goes down.
-export const maxLeaks = 14;
+export const maxLeaks = 0;
 
-export const leakAllowlist = [
-	{ file: "src/server/claude-code-config.ts", module: "settings.ts" },
-	{ file: "src/server/custom-provider-auth.ts", module: "auth.ts" },
-	{ file: "src/server/custom-provider-http.ts", module: "settings.ts" },
-	{ file: "src/server/custom-provider-http.ts", module: "auth.ts" },
-	{ file: "src/server/custom-provider.ts", module: "settings.ts" },
-	{ file: "src/server/file-access.ts", module: "settings.ts" },
-	{ file: "src/server/index.ts", module: "render-settings.ts" },
-	{ file: "src/server/index.ts", module: "settings.ts" },
-	{ file: "src/server/index.ts", module: "prompt-overrides.ts" },
-	{ file: "src/server/index.ts", module: "auth.ts" },
-	{ file: "src/server/keys.ts", module: "auth.ts" },
-	{ file: "src/server/model-catalog.ts", module: "settings.ts" },
-	{ file: "src/server/observability.ts", module: "chats.ts" }, // import
-	{ file: "src/server/observability.ts", module: "chats.ts" }, // re-export
-];
+export const leakAllowlist = [];
