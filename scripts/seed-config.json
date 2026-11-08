@@ -1,0 +1,7 @@
+{
+	"calibrated": false,
+	"recencyHalfLifeDays": 60,
+	"goalWeight": 1,
+	"minMentions": 50,
+	"learnableTau": 0.5
+}
