@@ -27,5 +27,5 @@ test("the allowlist is exactly the store imports that still leak, and it only sh
 	assert.ok(files.includes("src/server/index.ts"), "the file walk found nothing real");
 	const actual = files.flatMap((file) => leaksIn(file, readFileSync(`${root}${file}`, "utf8"))).sort();
 	assert.deepEqual(actual, leakAllowlist.map((leak) => `${leak.file} -> ${leak.module}`).sort());
-	assert.ok(leakAllowlist.length <= maxLeaks, "new leaks are not allowed: route the import through src/server/stores.ts");
+	assert.equal(leakAllowlist.length, maxLeaks, "lower maxLeaks with each removed entry; new leaks go through src/server/stores.ts");
 });

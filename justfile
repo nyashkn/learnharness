@@ -40,8 +40,8 @@ bead-claim id:
     BEADS_ACTOR=${BEADS_ACTOR:-kn-builder} bd update {{id}} --claim
 
 # notes: "gate: <one real result line per command>; gitnexus: <risk line>"
-bead-handoff id notes: ci
-    BEADS_ACTOR=${BEADS_ACTOR:-kn-builder} bd update {{id}} --status review --append-notes "$(git branch --show-current)@$(git rev-parse --short HEAD); {{notes}}"
+bead-handoff id $notes: ci
+    BEADS_ACTOR=${BEADS_ACTOR:-kn-builder} bd update {{id}} --status review --append-notes "$(git branch --show-current)@$(git rev-parse --short HEAD); $notes"
 
 seed *args:
     pnpm run seed {{args}}

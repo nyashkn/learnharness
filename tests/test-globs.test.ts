@@ -18,7 +18,8 @@ function ciNames(all: Record<string, string>): string[] {
 	return [...(all.ci ?? "").matchAll(/pnpm run ([\w:-]+)/g)].map((m) => m[1] as string);
 }
 
-const swallowsFailure = (body: string) => /\|\||;\s*(true|exit 0)/.test(body);
+// Anything but && between commands can hide a non-zero exit (||, ;, | tee, &).
+const swallowsFailure = (body: string) => /[;|]|(?<!&)&(?!&)/.test(body);
 
 const unquote = (token: string) => token.replaceAll('"', "");
 
