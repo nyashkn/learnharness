@@ -21,8 +21,6 @@ import type { GraphStore } from "../../src/core/ports.ts";
 /** adapter name -> test id -> owning bead. Runs as node:test `todo` for THAT adapter only: the test executes and reports but does not fail the run. A different adapter gets no allowance. */
 const KNOWN_GAPS: Record<string, Record<string, string>> = {
 	file: {
-		"B4-nodes": "lh-hbv", "B4-chains": "lh-hbv", "B4-checkpoints": "lh-hbv", "E5": "lh-hbv", // torn tail swallows the next append
-		"G2": "lh-hbv", // newer-format folder still accepts writes
 		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
 	},
 };
@@ -596,7 +594,7 @@ export function registerContract(f: AdapterFactory): void {
 			eq(cl(), items.filter((x) => "g" in x).length);
 		}, f.capabilities.corruptLines ? {} : { todo: "lh-bhc" });
 
-		it("N3 a newer-format store is refused AT OPEN with a StorageVersionError (item 5)", { timeout: A.PROPERTY_TIMEOUT_MS, ...(f.capabilities.refusesAtOpen ? {} : { todo: "lh-hbv" }) }, async () => {
+		it("N3 a newer-format store is refused AT OPEN with a StorageVersionError (item 5)", { timeout: A.PROPERTY_TIMEOUT_MS, ...(f.capabilities.refusesAtOpen ? {} : { todo: "lh-bzn" }) }, async () => {
 			const b = await fresh();
 			try {
 				b.hooks.stampNewerFormat();

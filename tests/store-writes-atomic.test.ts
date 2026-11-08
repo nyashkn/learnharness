@@ -82,7 +82,7 @@ describe("failed saves leave the old file whole", () => {
 
 	it("graph positions and ledgers", (t) => {
 		assertAllOrNothing(t, config.POSITIONS_FILE, () => graphStore.writePositions({ a: { x: 1, y: 1 } }), () => graphStore.writePositions({ a: { x: 2, y: 2 } }));
-		assertAllOrNothing(t, config.LEDGER_FILES.chains, () => graphStore.rewriteLedgers({ chains: [] }), () => graphStore.rewriteLedgers({ chains: [] }));
+		assertAllOrNothing(t, config.LEDGER_FILES.chains, () => graphStore.rewriteLedgers({ chains: [] }), () => graphStore.rewriteLedgers({ chains: [{ id: "ch_a", premises: ["a"], conclusion: "b", provenance: [], createdAt: "t" }] })); // a no-op rewrite no longer writes (lh-hbv)
 	});
 
 	it("source organization", (t) => {
@@ -123,7 +123,7 @@ describe("Windows sharing violations: per-writer compatibility policy (modeled)"
 		{ name: "prompt override", fallback: true, prepare: () => ({ file: path.join(config.PROMPTS_OVERRIDE_DIR, "system-prompt.md"), save: () => promptOverrides.writeOverride("system-prompt.md", "compatible prompt") }) },
 		{ name: "auth", fallback: false, prepare: () => ({ file: config.AUTH_FILE, save: () => authStore.setAuthVar("KEEP", "must not land") }) },
 		{ name: "source deletion", fallback: false, prepare: () => ({ file: config.SOURCES_FILE, save: () => graphStore.deleteSources(new Set(["src_policy"])) }) },
-		{ name: "ledger rewrite", fallback: false, prepare: () => ({ file: config.LEDGER_FILES.chains, save: () => graphStore.rewriteLedgers({ chains: [] }) }) },
+		{ name: "ledger rewrite", fallback: false, prepare: () => ({ file: config.LEDGER_FILES.chains, save: () => graphStore.rewriteLedgers({ chains: [{ id: "ch_a", premises: ["a"], conclusion: "b", provenance: [], createdAt: "t" }] }) }) },
 		{ name: "positions", fallback: false, prepare: () => ({ file: config.POSITIONS_FILE, save: () => graphStore.writePositions({ policy: { x: 3, y: 4 } }) }) },
 		{ name: "source organization", fallback: false, prepare: () => ({ file: config.SOURCE_ORGANIZATION_FILE, save: () => sourceOrganizationStore.write({ version: 1, folders: [], placements: {} }) }) },
 	];

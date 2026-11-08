@@ -39,22 +39,29 @@ function stampedVersion(): number | null {
 	}
 }
 
-/** READ-SIDE GUARD: throws when the data dir was written by a NEWER build.
- *  Called by every graph-family read — never writes (the golden fixtures
- *  pin reads as byte-identical). */
-export function assertGraphFormat(): void {
-	const v = stampedVersion();
-	if (v !== null && v > CURRENT_GRAPH_FORMAT_VERSION) {
-		throw new Error(
-			`Graph data is stamped with format version ${v}, but this build understands only ${CURRENT_GRAPH_FORMAT_VERSION}. ` +
+/** A data folder stamped by a NEWER build than this one (item 5). */
+export class StorageVersionError extends Error {
+	override name = "StorageVersionError";
+	constructor(readonly file: string, readonly found: number, readonly supported: number) {
+		super(
+			`Graph data is stamped with format version ${found}, but this build understands only ${supported}. ` +
 				"The app is older than its data — upgrade the app before touching the knowledge map.",
 		);
 	}
 }
 
+/** GUARD for every graph-family read AND write: throws when the data dir was
+ *  written by a NEWER build. Never writes (the golden fixtures pin reads as
+ *  byte-identical). */
+export function assertGraphFormat(): void {
+	const v = stampedVersion();
+	if (v !== null && v > CURRENT_GRAPH_FORMAT_VERSION) throw new StorageVersionError(GRAPH_FORMAT_FILE, v, CURRENT_GRAPH_FORMAT_VERSION);
+}
+
 /** WRITE-SIDE STAMP: creates the sidecar on the first graph-family write
  *  (lazy); afterwards a no-op existence-wise. Callers keep their own mkdir. */
 export function ensureGraphFormat(): void {
+	assertGraphFormat();
 	if (stampedVersion() !== null) return;
 	fs.mkdirSync(path.dirname(GRAPH_FORMAT_FILE), { recursive: true });
 	writeFileAtomicSync(GRAPH_FORMAT_FILE, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION }, null, "\t") + "\n", { allowInPlaceFallback: true });

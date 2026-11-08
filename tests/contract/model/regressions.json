@@ -1,0 +1,162 @@
+[
+ {
+  "name": "guard-proof: dropped line in the model after a caught nested throw",
+  "why": "Counterexample shape produced while proving the model comparison can fail (model dropped a line on append); keeps commit/rollback/reopen/rewrite-with-copies ordering exercised on every run.",
+  "specs": [
+   {
+    "k": "append",
+    "op": {
+     "t": "n",
+     "v": {
+      "id": "n1",
+      "name": "",
+      "statement": "s1",
+      "aliases": [],
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "provenance": []
+     }
+    }
+   },
+   {
+    "k": "tx",
+    "ops": [
+     {
+      "t": "n",
+      "v": {
+       "id": "n2",
+       "name": "",
+       "statement": "s2",
+       "aliases": [],
+       "createdAt": "2026-01-01T00:00:00.000Z",
+       "provenance": []
+      }
+     },
+     {
+      "t": "nest",
+      "how": "caught",
+      "ops": [
+       {
+        "t": "cp",
+        "v": {
+         "chatId": "c1",
+         "foldedAt": "2026-01-01T00:00:00.000Z"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "k": "tx",
+    "ops": [
+     {
+      "t": "n",
+      "v": {
+       "id": "n3",
+       "name": "",
+       "statement": "s3",
+       "aliases": [],
+       "createdAt": "2026-01-01T00:00:00.000Z",
+       "provenance": []
+      }
+     },
+     {
+      "t": "rw",
+      "spec": {
+       "nodes": {
+        "keep": [
+         true,
+         false
+        ],
+        "rev": true,
+        "mod": true
+       }
+      }
+     }
+    ]
+   },
+   {
+    "k": "positions",
+    "p": {
+     "n1": {
+      "x": 1,
+      "y": 2
+     }
+    }
+   },
+   {
+    "k": "tx",
+    "ops": [
+     {
+      "t": "throw"
+     }
+    ]
+   },
+   {
+    "k": "reopen"
+   },
+   {
+    "k": "rewrite",
+    "spec": {
+     "nodes": {
+      "keep": [
+       true
+      ],
+      "rev": false,
+      "mod": true
+     }
+    }
+   }
+  ]
+ },
+ {
+  "name": "guard-proof (c): model dropped node lines past 2",
+  "why": "Shrunk counterexample fast-check produced when the model was broken on purpose (seed 20261108): two nested then one outer node append in one transact.",
+  "specs": [
+   {
+    "k": "tx",
+    "ops": [
+     {
+      "t": "nest",
+      "how": "ok",
+      "ops": [
+       {
+        "t": "n",
+        "v": {
+         "id": "n1",
+         "name": "",
+         "statement": "",
+         "aliases": [],
+         "createdAt": "2026-01-01T00:00:00.000Z",
+         "provenance": []
+        }
+       },
+       {
+        "t": "n",
+        "v": {
+         "id": "n1",
+         "name": "",
+         "statement": "",
+         "aliases": [],
+         "createdAt": "2026-01-01T00:00:00.000Z",
+         "provenance": []
+        }
+       }
+      ]
+     },
+     {
+      "t": "n",
+      "v": {
+       "id": "n1",
+       "name": "",
+       "statement": "",
+       "aliases": [],
+       "createdAt": "2026-01-01T00:00:00.000Z",
+       "provenance": []
+      }
+     }
+    ]
+   }
+  ]
+ }
+]

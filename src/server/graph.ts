@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import { LEDGER_FILES, POSITIONS_FILE } from "../../config.ts";
 import type { GraphSnapshot } from "../core/contracts.ts";
 import type { GraphCostSummary } from "../core/cost-summary.ts";
 import { graphCostSummary } from "../core/cost-summary.ts";
@@ -47,29 +45,13 @@ export function graphCosts(): GraphCostSummary {
 	return graphCostSummary({ chats, sources }, callCost);
 }
 
-/** The graph's version stamp (session-deletion wave 6): the max mtime
- * across every graph data file — ledgers, positions. Moves on ANY
- * graph write (merge append, settle, or a deletion's atomic rewrite),
- * never moves on reads, and needs no bookkeeping of its own: the fs
- * IS the counter. Consumers poll it (the activity feed
- *  carries it; the DELETE response returns it) to know clusters/layout
- *  must refetch — the "graph changed underneath me" signal. */
+/** The graph's version stamp (session-deletion wave 6): GraphStore.revision().
+ *  Moves on any committed ledger or sources write that changed something,
+ *  never on reads, settles (positions) or no-op writes. Consumers poll it
+ *  (the activity feed carries it; the DELETE response returns it) to know
+ *  clusters/layout must refetch. */
 export function graphRevision(): number {
-	let revision = 0;
-	for (const file of [
-		LEDGER_FILES.nodes,
-		LEDGER_FILES.chains,
-		LEDGER_FILES.sessions,
-		LEDGER_FILES.coverage,
-		POSITIONS_FILE,
-	]) {
-		try {
-			revision = Math.max(revision, fs.statSync(file).mtimeMs);
-		} catch {
-			/* absent — nothing has ever written it */
-		}
-	}
-	return revision;
+	return stores.graphStore.revision();
 }
 
 // ─── single-node deletion (node interlude, owner-locked full-death) ──────────
