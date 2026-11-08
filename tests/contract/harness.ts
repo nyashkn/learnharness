@@ -25,8 +25,8 @@ export interface StoreBundle {
 	auth: AuthStore;
 	/** Render settings have no port today (spec: new RenderSettingsStore). */
 	render: { read(): unknown | null; write(raw: unknown): unknown };
-	/** Absent until PR0 adds GraphStore.transact. */
-	transact?: <T>(label: string, fn: () => T) => T;
+	/** The adapter's own event bus (items 4 and 10): the stores emit through the module instance the adapter loaded. */
+	events: { subscribe(listener: (event: { type: string }) => void): () => void };
 	hooks: {
 		/** Put an unreadable-shaped record line into a ledger (appended, newline-terminated). */
 		injectCorruptLine(ledger: Ledger, text: string): void;
@@ -43,7 +43,8 @@ export interface StoreBundle {
 
 export interface AdapterFactory {
 	name: string;
-	capabilities: { transact: boolean };
+	/** Self-declared, then checked against the opened bundle (a wrong `false` would silently skip properties). */
+	capabilities: { revision: boolean; corruptLines: boolean; refusesAtOpen: boolean };
 	/** Open a FRESH, EMPTY store whose bytes live under `dir` (an existing empty folder the harness owns and removes). */
 	open(dir: string): Promise<StoreBundle>;
 }
@@ -62,11 +63,21 @@ export async function discoverAdapters(): Promise<AdapterFactory[]> {
 	return out;
 }
 
+/** Open the folder `b` was opened on again (after a hook changed it); returns the new bundle or rejects. Tracks dir by openFresh. */
+const dirs = new WeakMap<StoreBundle, string>();
+export async function reopen(f: AdapterFactory, b: StoreBundle): Promise<StoreBundle> {
+	const dir = dirs.get(b);
+	if (!dir) throw new Error("reopen: bundle was not opened by openFresh");
+	return f.open(dir);
+}
+
 /** A fresh temp folder, an open store in it, and a dispose that also removes the folder. */
 export async function openFresh(f: AdapterFactory): Promise<StoreBundle> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `lh-contract-${f.name}-`));
 	const b = await f.open(dir);
-	return { ...b, dispose: () => { try { b.dispose(); } finally { fs.rmSync(dir, { recursive: true, force: true }); } } };
+	const wrapped: StoreBundle = { ...b, dispose: () => { try { b.dispose(); } finally { fs.rmSync(dir, { recursive: true, force: true }); } } };
+	dirs.set(wrapped, dir);
+	return wrapped;
 }
 
 // ── generators ──
@@ -115,6 +126,24 @@ export const checkpointLine: fc.Arbitrary<SessionCheckpoint> = fc.record({
 /** Valid-JSON-or-not lines that every strict reader must skip. */
 export const garbage = fc.constantFrom("{", "not json", "{\"id\":1}", "[]", "null", "42", "{\"id\":\"x\"}", "\"str\"", "{\"chatId\":1}");
 
+/** Verbatim lines (item 12): unknown fields, edge whitespace and shuffled key order must all survive a round trip untouched. */
+const edgeText = fc.constantFrom(" ", "  x ", "\tt\t", " lead", "trail ", "a  b", "uni é中", "line\nbreak", 'q"uote', "");
+const extraVal = fc.oneof(fc.string({ maxLength: 4 }), fc.nat(), fc.boolean(), fc.constant(null), fc.array(fc.nat(), { maxLength: 2 }));
+const verbatim = <T extends object>(base: fc.Arbitrary<T>): fc.Arbitrary<T> =>
+	fc.tuple(base, fc.dictionary(fc.constantFrom("zz", "extra", "aa", "_x", "note"), extraVal), fc.infiniteStream(fc.nat(1000)))
+		.map(([rec, extras, rnd]) => {
+			const entries = Object.entries({ ...rec, ...extras });
+			const it = rnd[Symbol.iterator]();
+			const keyed = entries.map((e) => [it.next().value as number, e] as const).sort((a, b) => a[0] - b[0]);
+			return Object.fromEntries(keyed.map(([, e]) => e)) as T;
+		});
+export const verbatimNode: fc.Arbitrary<GraphNode> = verbatim(fc.tuple(nodeLine, edgeText, edgeText).map(([n, name, statement]) => ({ ...n, name, statement })));
+export const verbatimChain: fc.Arbitrary<GraphChain> = verbatim(chainLine);
+export const verbatimCoverage: fc.Arbitrary<CoverageEntry> = verbatim(coverageLine);
+export const verbatimCheckpoint: fc.Arbitrary<SessionCheckpoint> = verbatim(checkpointLine);
+
+/** Per-property time limit: a hang while shrinking fails the property instead of stalling the gate. */
+export const PROPERTY_TIMEOUT_MS = 90_000;
 export const runs = Number(process.env.FC_RUNS ?? 100);
 export const seed = Number(process.env.FC_SEED ?? 20261108) // fixed default: reproducible; vary to explore;
-export const cfg: fc.Parameters<unknown> = { numRuns: runs, ...(seed !== undefined ? { seed } : {}) };
+export const cfg: fc.Parameters<unknown> = { numRuns: runs, interruptAfterTimeLimit: PROPERTY_TIMEOUT_MS - 20_000, markInterruptAsFailure: true, ...(seed !== undefined ? { seed } : {}) };

@@ -21,7 +21,7 @@
 		"lint": "eslint .",
 		"typecheck": "tsc --noEmit",
 		"ci": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run test:sql && pnpm run test:seed && pnpm run test:contract && pnpm run check:schemas && pnpm run check:pins",
-		"test:contract": "NODE_ENV=test tsx --test \"tests/contract/*.contract.ts\"",
+		"test:contract": "ls tests/contract/*.contract.ts tests/contract/adapters/*.ts >/dev/null && NODE_ENV=test tsx --test \"tests/contract/*.contract.ts\"",
 		"test:sql": "NODE_ENV=test tsx --test \"tests/sql/**/*.test.ts\"",
 		"test:seed": "NODE_ENV=test tsx --test \"tests/seed/**/*.test.ts\"",
 		"check:schemas": "tsx scripts/export-json-schemas.ts --check",

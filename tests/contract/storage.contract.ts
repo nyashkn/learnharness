@@ -4,27 +4,27 @@
  *  E coverage ledger  F simplify/merge invariants G format guard     H record round-trips
  *  I ordering/identity J cross-adapter equivalence
  * Test names start with their id (A1, B3 ...). Tests whose failure is a confirmed
- * upstream gap are in KNOWN and run as node:test `todo` (they still execute and report).
+ * gap of one adapter are in KNOWN_GAPS and run as node:test `todo` (they still execute and report).
  */
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import { describe, it, test } from "node:test";
 import fc from "fast-check";
 import * as A from "./harness.ts";
-import { discoverAdapters, openFresh } from "./harness.ts";
+import { discoverAdapters, openFresh, reopen } from "./harness.ts";
 import type { AdapterFactory, Ledger, StoreBundle } from "./harness.ts";
 import { getGraph, mergeFindings, simplifyChains } from "../../src/core/graph.ts";
 import { coveredSet } from "../../src/core/coverage.ts";
 import type { CoverageEntry, GraphChain, GraphNode, SessionCheckpoint } from "../../src/core/contracts.ts";
 import type { GraphStore } from "../../src/core/ports.ts";
 
-/** Test id -> upstream finding (contract-tests FINDINGS.md). Listed tests run as node:test `todo`: they execute and report but do not fail the run. */
-const KNOWN: Record<string, string> = {
-	"B4-nodes": "FINDING-1 torn append swallows next append", "B4-chains": "FINDING-1", "B4-checkpoints": "FINDING-1", "E5": "FINDING-1",
-	"D1": "FINDING-2 known gap, PR0 (no transact)",
-	"F5": "FINDING-3",
-	"F3c": "FINDING-4 out-of-domain input",
-	"G2": "FINDING-5",
-	"H10b": "FINDING-6 latent, unreachable ids",
+/** adapter name -> test id -> owning bead. Runs as node:test `todo` for THAT adapter only: the test executes and reports but does not fail the run. A different adapter gets no allowance. */
+const KNOWN_GAPS: Record<string, Record<string, string>> = {
+	file: {
+		"B4-nodes": "lh-hbv", "B4-chains": "lh-hbv", "B4-checkpoints": "lh-hbv", "E5": "lh-hbv", // torn tail swallows the next append
+		"G2": "lh-hbv", // newer-format folder still accepts writes
+		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+	},
 };
 
 
@@ -64,19 +64,23 @@ const closure = (start: readonly string[], chains: GraphChain[]): Set<string> =>
 	}
 	return s;
 };
+/** Mask what a merge mints from the clock and a hash (node and chain ids, createdAt) so two runs of the same step compare equal. */
+const norm = (s: string) => { const seen = new Map<string, string>(); return s.replace(/(?:n|arg)_[0-9a-f]{12}/g, (m) => seen.get(m) ?? (seen.set(m, `N${seen.size}`), `N${seen.size - 1}`)).replace(/"createdAt":"[^"]*"/g, '"createdAt":"T"'); };
 const state = (g: GraphStore) => JSON.stringify([g.readNodes(), g.readChains(), g.readCoverage(), g.readCheckpoints()]);
 /** Plain-object deep equality (fast-check may emit null-prototype records). */
 const eq = (a: unknown, b: unknown) => assert.deepStrictEqual(structuredClone(a), structuredClone(b));
 
 export function registerContract(f: AdapterFactory): void {
 	const fresh = (): Promise<StoreBundle> => openFresh(f);
-	const P = <T>(id: string, title: string, arb: fc.Arbitrary<T>, fn: (b: StoreBundle, v: T) => void | Promise<void>, opts: { skip?: string } = {}) => {
+	const gaps = KNOWN_GAPS[f.name] ?? {};
+	/** `todo`: bead id while the API under test is absent (the body still runs and reports). Known gaps of this adapter get the same treatment. */
+	const P = <T>(id: string, title: string, arb: fc.Arbitrary<T>, fn: (b: StoreBundle, v: T) => void | Promise<void>, opts: { skip?: string; todo?: string } = {}) => {
 		const name = `${id} ${title}`;
-		const o = opts.skip ? { skip: opts.skip } : KNOWN[id] ? { todo: `known: ${KNOWN[id]}` } : {};
+		const bead = opts.todo ?? gaps[id];
+		const o = { timeout: A.PROPERTY_TIMEOUT_MS, ...(opts.skip ? { skip: opts.skip } : bead ? { todo: bead } : {}) };
 		it(name, o, () => fc.assert(fc.asyncProperty(arb, async (v) => { const b = await fresh(); try { await fn(b, v); } finally { b.dispose(); } }), A.cfg));
 	};
 	const T = (id: string, title: string, fn: (b: StoreBundle) => void) => P(id, title, fc.constant(0), (b) => fn(b));
-	const PEND = (why: string) => (f.capabilities.transact ? undefined : `pending: ${why}`);
 
 	const putAll = (b: StoreBundle, nodes: GraphNode[] = [], chains: GraphChain[] = []) => {
 		nodes.forEach((n) => b.graph.appendNode(n));
@@ -116,8 +120,8 @@ export function registerContract(f: AdapterFactory): void {
 			const regrouped = order.flatMap((id) => ls.filter((l) => l.id === id));
 			putAll(b, ls);
 			const base = new Map(getGraph(b.graph).nodes.map((n) => [n.id, n]));
-			const b2 = await fresh(); putAll(b2, regrouped);
-			for (const n of getGraph(b2.graph).nodes) eq(n, base.get(n.id));
+			const b2 = await fresh();
+			try { putAll(b2, regrouped); for (const n of getGraph(b2.graph).nodes) eq(n, base.get(n.id)); } finally { b2.dispose(); }
 		});
 		P("A7", "fold is deterministic and does not mutate the ledger", lines, (b, ls) => {
 			putAll(b, ls);
@@ -129,13 +133,13 @@ export function registerContract(f: AdapterFactory): void {
 
 	describe(`${f.name}: B append/read round-trip`, () => {
 		const ledgers: { l: Ledger; arb: fc.Arbitrary<unknown>; app: (b: StoreBundle, v: any) => void; rd: (b: StoreBundle) => unknown[] }[] = [
-			{ l: "nodes", arb: A.nodeLine, app: (b, v) => b.graph.appendNode(v), rd: (b) => b.graph.readNodes() },
-			{ l: "chains", arb: A.chainLine, app: (b, v) => b.graph.appendChain(v), rd: (b) => b.graph.readChains() },
-			{ l: "checkpoints", arb: A.checkpointLine, app: (b, v) => b.graph.appendCheckpoint(v), rd: (b) => b.graph.readCheckpoints() },
+			{ l: "nodes", arb: A.verbatimNode, app: (b, v) => b.graph.appendNode(v), rd: (b) => b.graph.readNodes() },
+			{ l: "chains", arb: A.verbatimChain, app: (b, v) => b.graph.appendChain(v), rd: (b) => b.graph.readChains() },
+			{ l: "checkpoints", arb: A.verbatimCheckpoint, app: (b, v) => b.graph.appendCheckpoint(v), rd: (b) => b.graph.readCheckpoints() },
 		];
 		for (const L of ledgers) {
 			const lines = fc.array(L.arb, { maxLength: 10 });
-			P(`B1-${L.l}`, "append then read returns the same lines in append order", lines, (b, ls) => { ls.forEach((v) => L.app(b, v)); eq(L.rd(b), ls); });
+			P(`B1-${L.l}`, "append then read returns the same lines in append order", lines, (b, ls) => { ls.forEach((v) => L.app(b, v)); eq(L.rd(b), ls); assert.equal(JSON.stringify(L.rd(b)), JSON.stringify(ls), "verbatim: unknown fields, whitespace and key order must survive"); });
 			P(`B2-${L.l}`, "duplicate lines survive as a multiset (k copies in, k copies out)", fc.tuple(L.arb, fc.integer({ min: 1, max: 5 })), (b, [v, k]) => { for (let i = 0; i < k; i++) L.app(b, v); eq(L.rd(b), Array(k).fill(v)); });
 			P(`B3-${L.l}`, "corrupt/wrong-shape lines are skipped; valid lines keep order", fc.array(fc.oneof(L.arb.map((v) => ({ v })), A.garbage.map((g) => ({ g }))), { maxLength: 10 }), (b, items) => {
 				for (const it2 of items) "v" in it2 ? L.app(b, it2.v) : b.hooks.injectCorruptLine(L.l, it2.g);
@@ -204,52 +208,69 @@ export function registerContract(f: AdapterFactory): void {
 	});
 
 	describe(`${f.name}: D transact atomicity`, () => {
-		const fault = (g: GraphStore, failAt: number): GraphStore => {
+		/** Throws at the failAt-th mutator call; `hit.fired` says whether it did. */
+		const fault = (g: GraphStore, failAt: number, hit: { fired: boolean }): GraphStore => {
 			let n = 0;
 			const MUT = new Set(["appendNode", "appendChain", "appendCheckpoint", "appendCoverage", "rewriteLedgers"]);
-			return new Proxy(g, { get: (t: any, p: string) => { const v = t[p]; if (typeof v !== "function") return v; return MUT.has(p) ? (...a: any[]) => { if (++n === failAt) throw new Error("injected"); return v.apply(t, a); } : v.bind(t); } });
+			return new Proxy(g, { get: (t: any, p: string) => { const v = t[p]; if (typeof v !== "function") return v; return MUT.has(p) ? (...a: any[]) => { if (++n === failAt) { hit.fired = true; throw new Error("injected"); } return v.apply(t, a); } : v.bind(t); } });
 		};
-		P("D1", "TODAY (no transact): mergeFindings that throws mid-way leaves NO change", fc.tuple(stepArb(), stepArb(), fc.integer({ min: 1, max: 12 })), (b, [s1, s2, k]) => {
-			const deps0 = { chatStore: b.chats, graphStore: b.graph };
-			runStep(deps0, s1);
+		P("D1", "a mergeFindings that throws mid-way (no transact wrapper in the test) leaves NO change", fc.tuple(stepArb(), stepArb(), fc.integer({ min: 1, max: 12 })), (b, [s1, s2, k]) => {
+			runStep({ chatStore: b.chats, graphStore: b.graph }, s1);
 			const before = state(b.graph);
+			const hit = { fired: false };
 			let threw = false;
-			try { runStep({ chatStore: b.chats, graphStore: fault(b.graph, k) }, s2); } catch { threw = true; }
-			if (threw) eq(state(b.graph), before);
+			try { runStep({ chatStore: b.chats, graphStore: fault(b.graph, k, hit) }, s2); } catch { threw = true; }
+			if (hit.fired) { assert.ok(threw, "an injected fault was swallowed"); eq(state(b.graph), before); }
 		});
 		type TOp = { t: "n"; v: GraphNode } | { t: "c"; v: GraphChain } | { t: "cov"; v: CoverageEntry } | { t: "rw" };
 		const tops = fc.array(fc.oneof(A.nodeLine.map((v) => ({ t: "n", v }) as TOp), A.chainLine.map((v) => ({ t: "c", v }) as TOp), A.coverageLine.map((v) => ({ t: "cov", v }) as TOp), fc.constant({ t: "rw" } as TOp)), { maxLength: 8 });
-		P("D2", "MODEL: transact(fn) commits all ops when fn returns (and returns fn's value); a throw at ANY point leaves state identical to before and rethrows", fc.array(fc.record({ ops: tops, throwAt: fc.option(fc.nat(8), { nil: undefined }) }), { maxLength: 6 }), (b, txs) => {
+		P("D2", "MODEL: transact(fn) runs fn, commits all ops in call order and returns fn's value; a throw at ANY point rethrows and leaves state identical to before", fc.array(fc.record({ ops: tops, throwAt: fc.option(fc.nat(8), { nil: undefined }) }), { maxLength: 6 }), (b, txs) => {
 			const m: any = { nodes: [], chains: [], coverage: [] };
 			for (const tx of txs) {
 				const before = state(b.graph);
 				const staged = structuredClone(m);
-				let threw = false;
+				let ran = false;
+				let r: number | undefined;
+				let thrown: unknown;
 				try {
-					const r = b.transact!("t", () => {
+					r = b.graph.transact("t", () => {
+						ran = true;
 						tx.ops.forEach((o, i) => {
 							if (tx.throwAt === i) throw new Error("boom");
 							if (o.t === "n") { b.graph.appendNode(o.v); staged.nodes.push(o.v); }
 							if (o.t === "c") { b.graph.appendChain(o.v); staged.chains.push(o.v); }
 							if (o.t === "cov") { b.graph.appendCoverage(o.v); staged.coverage.push(o.v); }
-							if (o.t === "rw") { staged.chains = staged.chains.slice(1); b.graph.rewriteLedgers({ chains: staged.chains }); }
+							if (o.t === "rw") { staged.chains = staged.chains.slice(1); b.graph.rewriteLedgers({ chains: [...staged.chains] }); }
 						});
 						if (tx.throwAt !== undefined && tx.throwAt >= tx.ops.length) throw new Error("boom");
 						return 42;
 					});
+				} catch (e) { thrown = e; }
+				assert.ok(ran, "transact never ran fn");
+				if (tx.throwAt !== undefined) {
+					assert.ok(thrown instanceof Error && thrown.message === "boom", "transact must rethrow fn's error");
+					eq(state(b.graph), before);
+				} else {
+					assert.equal(thrown, undefined, "transact threw although fn returned");
 					eq(r, 42);
 					Object.assign(m, staged);
-				} catch { threw = true; }
-				if (threw) eq(state(b.graph), before);
-				else eq([b.graph.readNodes(), b.graph.readChains(), b.graph.readCoverage()], [m.nodes, m.chains, m.coverage]);
+					eq([b.graph.readNodes(), b.graph.readChains(), b.graph.readCoverage()], [m.nodes, m.chains, m.coverage]);
+				}
 			}
-		}, { skip: PEND("needs PR0 (GraphStore.transact)") });
-		P("D3", "mergeFindings run inside transact is atomic under a fault at every write position (incl. the simplify rewrite and coverage appends)", fc.tuple(stepArb(), stepArb(), fc.integer({ min: 1, max: 14 })), (b, [s1, s2, k]) => {
+		});
+		P("D3", "mergeFindings run inside transact is atomic under a fault at every write position (incl. the simplify rewrite and coverage appends), and equals the plain run when no fault fires", fc.tuple(stepArb(), stepArb(), fc.integer({ min: 1, max: 14 })), async (b, [s1, s2, k]) => {
 			runStep({ chatStore: b.chats, graphStore: b.graph }, s1);
 			const before = state(b.graph);
-			try { b.transact!("merge", () => runStep({ chatStore: b.chats, graphStore: fault(b.graph, k) }, s2)); } catch { eq(state(b.graph), before); }
-		}, { skip: PEND("needs PR0 (GraphStore.transact)") });
-		P("D4", "one durable commit per transact (engine fact for versioned back-ends)", fc.constant(0), () => {}, { skip: "pending: needs PR6 (DoltLite driver; assert commit count via dolt_log)" });
+			const hit = { fired: false };
+			let threw = false;
+			try { b.graph.transact("merge", () => runStep({ chatStore: b.chats, graphStore: fault(b.graph, k, hit) }, s2)); } catch { threw = true; }
+			if (hit.fired) { assert.ok(threw, "an injected fault was swallowed by transact"); eq(state(b.graph), before); return; }
+			assert.ok(!threw, "transact threw without a fault");
+			const committed = state(b.graph);
+			const b2 = await fresh(); // the reference: the same two steps without a transaction
+			try { runStep({ chatStore: b2.chats, graphStore: b2.graph }, s1); runStep({ chatStore: b2.chats, graphStore: b2.graph }, s2); eq(norm(committed), norm(state(b2.graph))); } finally { b2.dispose(); }
+		});
+		P("D4", "one durable commit per transact (engine fact for versioned back-ends)", fc.constant(0), () => { throw new Error("pending: dolt_log commit count"); }, { todo: "lh-btn" });
 	});
 
 	describe(`${f.name}: E coverage ledger`, () => {
@@ -527,36 +548,193 @@ export function registerContract(f: AdapterFactory): void {
 		});
 	});
 
-	// ── New contract items: todo until the owning bead lands the API (they execute and report, never fail the run) ──
-	describe(`${f.name}: N pending contract items`, () => {
+	// ── Behaviour contract items 1, 2, 5, 6, 9-17 (architecture §2.1). A test is `todo` only while its API is absent,
+	//    and the `todo` names the bead that lands it; `capabilities` is checked against the bundle so the allowance cannot go stale. ──
+	describe(`${f.name}: N behaviour contract (storage-architecture §2.1)`, () => {
 		const nodeAt = (i: number): GraphNode => ({ id: `n${(i % 5) + 1}`, name: "", statement: `s${i}`, aliases: [], createdAt: "t", provenance: [] });
 		const need = <T>(v: T | undefined, what: string): T => { if (v === undefined) throw new Error(`pending: ${what} not implemented`); return v; };
-		const N = <T>(id: string, bead: string, title: string, arb: fc.Arbitrary<T>, fn: (b: StoreBundle, v: T) => void) => {
-			it(`${id} ${title}`, { todo: bead }, () => fc.assert(fc.asyncProperty(arb, async (v) => { const b = await fresh(); try { fn(b, v); } finally { b.dispose(); } }), { ...A.cfg, numRuns: 20 }));
-		};
-		N("N1", "lh-7lz", "order: a committed transact appends lines in call order", fc.integer({ min: 1, max: 8 }), (b, n) => {
-			const ns = Array.from({ length: n }, (_, i) => nodeAt(i));
-			need(b.transact, "GraphStore.transact")("n1", () => ns.forEach((x) => b.graph.appendNode(x)));
-			eq(b.graph.readNodes(), ns);
+		const revisionOf = (b: StoreBundle) => (b.graph as unknown as { revision?: () => unknown }).revision?.bind(b.graph);
+		const corruptOf = (b: StoreBundle) => (b.graph as unknown as { corruptLines?: () => unknown }).corruptLines?.bind(b.graph);
+		const exportAll = (b: StoreBundle) => JSON.stringify([b.graph.readNodes(), b.graph.readChains(), b.graph.readCoverage(), b.graph.readCheckpoints()]);
+		const everything = (b: StoreBundle) => JSON.stringify([state(b.graph), b.graph.readSources(), b.graph.readPositions(), b.sourceOrg.read()]);
+		const org = { version: 1, folders: [{ id: "f1", name: "A", parentId: null, createdAt: "t" }], placements: {} } as never;
+		const src = (id: string) => ({ id, filePath: `/x/${id}`, importedAt: "t" });
+		const usage = (startedAt: number) => ({ startedAt, at: "t", durationMs: 1, stages: { extractor: {}, auditor: {} } }) as never;
+		const count = fc.integer({ min: 1, max: 8 });
+		const events = (b: StoreBundle) => { const seen: string[] = []; const off = b.events.subscribe((e) => seen.push(e.type)); return { seen, off }; };
+
+		it("capabilities match the opened bundle (a wrong flag would silently skip properties)", async () => {
+			const b = await fresh();
+			try {
+				assert.equal(typeof b.graph.transact, "function", "GraphStore.transact is part of the port");
+				assert.equal(revisionOf(b) !== undefined, f.capabilities.revision, "capabilities.revision");
+				assert.equal(corruptOf(b) !== undefined, f.capabilities.corruptLines, "capabilities.corruptLines");
+			} finally { b.dispose(); }
+			const d = await fresh();
+			try {
+				d.hooks.stampNewerFormat();
+				let refused = false;
+				try { await reopen(f, d); } catch { refused = true; }
+				assert.equal(refused, f.capabilities.refusesAtOpen, "capabilities.refusesAtOpen");
+			} finally { d.dispose(); }
 		});
-		N("N2", "lh-7lz", "read-your-writes: inside transact, reads see the transaction's own appends", fc.integer({ min: 1, max: 8 }), (b, n) => {
-			need(b.transact, "GraphStore.transact")("n2", () => { for (let i = 0; i < n; i++) { b.graph.appendNode(nodeAt(i)); assert.equal(b.graph.readNodes().length, i + 1); } });
+
+		T("N1", "golden fixtures (item 1): the real graph ledgers load through the port, read back line-for-line, and fold to the independent oracle", (b) => {
+			const dir = new URL("../fixtures/golden-data/graph/", import.meta.url).pathname;
+			const lines = (n: string) => fs.readFileSync(`${dir}${n}.jsonl`, "utf8").split("\n").filter((l) => l.trim() !== "");
+			const parse = <T>(n: string) => lines(n).map((l) => JSON.parse(l) as T);
+			const [nodes, chains, cov, cps] = [parse<GraphNode>("nodes"), parse<GraphChain>("chains"), parse<CoverageEntry>("coverage"), parse<SessionCheckpoint>("sessions")];
+			nodes.forEach((x) => b.graph.appendNode(x)); chains.forEach((x) => b.graph.appendChain(x)); cov.forEach((x) => b.graph.appendCoverage(x)); cps.forEach((x) => b.graph.appendCheckpoint(x));
+			assert.deepEqual([nodes.length, chains.length, cov.length, cps.length].map((n) => n > 0), [true, true, true, true], "fixture ledgers must be non-empty");
+			assert.deepEqual(b.graph.readNodes().map((x) => JSON.stringify(x)), lines("nodes"), "canonical bytes round-trip byte-identically");
+			assert.deepEqual(b.graph.readChains().map((x) => JSON.stringify(x)), lines("chains"));
+			const g = getGraph(b.graph);
+			eq(g.nodes.map((n) => [n.id, n.aliases, n.provenance]), oracleNodes(nodes).map((n) => [n.id, n.aliases, n.provenance]));
+			eq(g.chains, oracleChains(chains));
 		});
-		N("N3", "lh-hbv", "revision changes only when the store changes (reads and no-op rewrites keep it)", fc.integer({ min: 1, max: 6 }), (b, n) => {
-			const rev = need((b.graph as unknown as { revision?: () => string }).revision, "GraphStore.revision").bind(b.graph);
-			const r0 = rev(); b.graph.readNodes(); b.graph.readChains(); assert.equal(rev(), r0);
-			b.graph.appendNode(nodeAt(n)); const r1 = rev(); assert.notEqual(r1, r0);
-			b.graph.rewriteLedgers({ chains: b.graph.readChains() }); assert.equal(rev(), r1);
+
+		P("N2", "corrupt lines are skipped AND counted by corruptLines() (item 2)", fc.array(fc.oneof(A.nodeLine.map((v) => ({ v })), A.garbage.map((g) => ({ g }))), { maxLength: 10 }), (b, items) => {
+			for (const it2 of items) "v" in it2 ? b.graph.appendNode(it2.v) : b.hooks.injectCorruptLine("nodes", it2.g);
+			eq(b.graph.readNodes(), items.flatMap((x) => ("v" in x ? [x.v] : [])));
+			const cl = need(corruptOf(b), "GraphStore.corruptLines");
+			eq(cl(), items.filter((x) => "g" in x).length);
+		}, f.capabilities.corruptLines ? {} : { todo: "lh-hbv" });
+
+		it("N3 a newer-format store is refused AT OPEN with a StorageVersionError (item 5)", { timeout: A.PROPERTY_TIMEOUT_MS, ...(f.capabilities.refusesAtOpen ? {} : { todo: "lh-hbv" }) }, async () => {
+			const b = await fresh();
+			try {
+				b.hooks.stampNewerFormat();
+				await assert.rejects(reopen(f, b), (e: Error) => { assert.equal(e.name, "StorageVersionError"); assert.match(e.message, /\d/); return true; });
+			} finally { b.dispose(); }
 		});
-		N("N4", "lh-7lz", "rollback-only: a throwing transact leaves exactly the pre-transaction state", fc.integer({ min: 1, max: 6 }), (b, n) => {
+
+		P("N4", "re-running an import is idempotent as a multiset (item 6): the first import's lines stay a prefix, the second adds exactly the same lines again", fc.tuple(fc.array(A.nodeLine, { maxLength: 8 }), fc.array(A.saneChainLine, { maxLength: 6 })), (b, [ns, cs]) => {
+			// shortcut: the fold itself is not idempotent on duplicate lines (a duplicate adds the statement as an alias), so only the stored multiset is asserted.
+			putAll(b, ns, cs);
+			const [n1, c1] = [b.graph.readNodes(), b.graph.readChains()];
+			putAll(b, ns, cs);
+			eq(b.graph.readNodes(), [...n1, ...n1]);
+			eq(b.graph.readChains(), [...c1, ...c1]);
+		});
+
+		P("N5", "order (item 15): append, rewrite, append keeps call order, inside and outside a transact", fc.tuple(count, count), (b, [x, y]) => {
+			const first = Array.from({ length: x }, (_, i) => nodeAt(i));
+			const last = Array.from({ length: y }, (_, i) => nodeAt(100 + i));
+			b.graph.transact("order", () => { first.forEach((n) => b.graph.appendNode(n)); b.graph.rewriteLedgers({ nodes: first.slice(1) }); last.forEach((n) => b.graph.appendNode(n)); });
+			eq(b.graph.readNodes(), [...first.slice(1), ...last]);
+		});
+
+		P("N6", "read-your-writes (item 14): inside transact every read sees committed state plus the pending writes, across all ledgers", fc.tuple(fc.array(A.nodeLine, { maxLength: 4 }), fc.array(A.nodeLine, { minLength: 1, maxLength: 4 }), fc.array(A.coverageLine, { maxLength: 3 })), (b, [committed, pending, cov]) => {
+			putAll(b, committed);
+			b.graph.transact("ryw", () => {
+				pending.forEach((n, i) => { b.graph.appendNode(n); eq(b.graph.readNodes(), [...committed, ...pending.slice(0, i + 1)]); });
+				cov.forEach((e) => b.graph.appendCoverage(e)); eq(b.graph.readCoverage(), cov);
+				b.graph.upsertSource(src("src_1")); eq(b.graph.readSources().map((s) => s.id), ["src_1"]);
+				b.graph.rewriteLedgers({ nodes: pending }); eq(b.graph.readNodes(), pending);
+				eq(getGraph(b.graph).nodes.length, new Set(pending.map((n) => n.id)).size);
+			});
+			eq(b.graph.readNodes(), pending);
+		});
+
+		P("N7", "revision (item 9): unchanged by reads, no-op rewrites and no-op bare writes; changed by every committed write; not changed by a rolled-back transact", count, (b, n) => {
+			const rev = need(revisionOf(b), "GraphStore.revision");
+			const r0 = rev(); b.graph.readNodes(); b.graph.readChains(); assert.equal(rev(), r0, "a read moved the revision");
+			b.graph.appendNode(nodeAt(n)); const r1 = rev(); assert.notEqual(r1, r0, "an append did not move the revision");
+			b.graph.rewriteLedgers({ nodes: b.graph.readNodes() }); assert.equal(rev(), r1, "a rewrite to identical content moved the revision");
+			b.graph.deleteSources(new Set(["src_none"])); assert.equal(rev(), r1, "a no-op deleteSources moved the revision");
+			b.graph.upsertSource(src("src_1")); const r2 = rev(); assert.notEqual(r2, r1);
+			b.graph.appendSourceUsage("src_1", usage(1)); const r3 = rev(); assert.notEqual(r3, r2);
+			b.graph.appendSourceUsage("src_1", usage(1)); assert.equal(rev(), r3, "a duplicate appendSourceUsage (idempotent per startedAt) moved the revision");
+			assert.throws(() => b.graph.transact("rb", () => { b.graph.appendNode(nodeAt(n + 1)); throw new Error("boom"); }), /boom/);
+			assert.equal(rev(), r3, "a rolled-back transact moved the revision");
+		}, f.capabilities.revision ? {} : { todo: "lh-hbv" });
+
+		P("N8", "rollback (items 4, 17): a throw leaves no lines, no rewrite and no events; a CAUGHT inner throw still rolls the outer transact back", count, (b, n) => {
 			b.graph.appendNode(nodeAt(0));
-			const before = state(b.graph);
-			assert.throws(() => need(b.transact, "GraphStore.transact")("n4", () => { for (let i = 1; i <= n; i++) b.graph.appendNode(nodeAt(i)); throw new Error("boom"); }), /boom/);
-			assert.equal(state(b.graph), before);
+			const before = everything(b);
+			const ev = events(b);
+			try {
+				assert.throws(() => b.graph.transact("t1", () => { for (let i = 1; i <= n; i++) b.graph.appendNode(nodeAt(i)); b.graph.rewriteLedgers({ chains: [] }); b.sourceOrg.write(org); throw new Error("boom"); }), /boom/);
+				assert.equal(everything(b), before);
+				assert.throws(() => b.graph.transact("outer", () => {
+					b.graph.appendNode(nodeAt(50));
+					try { b.graph.transact("inner", () => { b.graph.appendNode(nodeAt(51)); throw new Error("inner"); }); } catch { /* caught on purpose */ }
+					b.graph.appendNode(nodeAt(52));
+				}));
+				assert.equal(everything(b), before, "outer committed although a nested transact threw");
+				assert.deepEqual(ev.seen, [], "events fired inside a rolled-back transact");
+			} finally { ev.off(); }
 		});
-		N("N5", "lh-rws", "round trip: read(write(x)) equals x under the defined normalisation (JSON: undefined keys dropped, key order irrelevant)", A.nodeLine, (b, n) => {
-			b.graph.appendNode(n);
-			eq(b.graph.readNodes(), [JSON.parse(JSON.stringify(n))]);
+
+		P("N9", "events after commit (item 10): the source-organization event fires once, only after every op flushed, never from a rolled-back transact", count, (b, n) => {
+			const seenAtEvent: string[] = [];
+			const off = b.events.subscribe((e) => { if (e.type === "sources-changed") seenAtEvent.push(JSON.stringify([b.graph.readNodes().length, b.sourceOrg.read().folders.length])); });
+			try {
+				b.graph.transact("commit", () => { b.sourceOrg.write(org); for (let i = 0; i < n; i++) b.graph.appendNode(nodeAt(i)); assert.deepEqual(seenAtEvent, [], "event fired before commit"); });
+				eq(seenAtEvent, [JSON.stringify([n, 1])]);
+			} finally { off(); }
+		});
+
+		P("N10", "nested transact (item 11) joins the outer: one commit, call order kept", count, (b, n) => {
+			b.graph.transact("outer", () => { b.graph.appendNode(nodeAt(0)); b.graph.transact("inner", () => { for (let i = 1; i <= n; i++) b.graph.appendNode(nodeAt(i)); }); b.graph.appendNode(nodeAt(99)); });
+			eq(b.graph.readNodes().map((x) => x.statement), ["s0", ...Array.from({ length: n }, (_, i) => `s${i + 1}`), "s99"]);
+		});
+
+		T("N11", "positions and render settings stay OUTSIDE the transaction (item 13): they survive a rollback", (b) => {
+			const raw = b.render.read();
+			assert.equal(raw, null);
+			let written: unknown;
+			assert.throws(() => b.graph.transact("t", () => { b.graph.writePositions({ n1: { x: 1, y: 2 } }); written = b.render.write({}); b.graph.appendNode(nodeAt(0)); throw new Error("boom"); }), /boom/);
+			eq(b.graph.readPositions(), { n1: { x: 1, y: 2 } });
+			eq(b.render.read(), written);
+			eq(b.graph.readNodes(), []);
+		});
+
+		P("N12", "bare writes (item 16): upsertSource, appendSourceUsage, deleteSources and the organization write are each atomic and idempotent where documented", fc.array(fc.constantFrom("a", "b", "c"), { minLength: 1, maxLength: 5 }), (b, ids) => {
+			const ev = events(b);
+			try {
+				for (const id of ids) b.graph.upsertSource(src(`src_${id}`));
+				const uniq = [...new Set(ids)].map((x) => `src_${x}`).sort();
+				eq(b.graph.readSources().map((s) => s.id).sort(), uniq);
+				b.graph.appendSourceUsage(uniq[0]!, usage(7)); b.graph.appendSourceUsage(uniq[0]!, usage(7));
+				eq(b.graph.readSources().find((s) => s.id === uniq[0])!.extractions?.length, 1);
+				b.graph.upsertSource(src(uniq[0]!)); assert.equal(b.graph.readSources().find((s) => s.id === uniq[0])!.extractions?.length, 1, "an upsert must keep the usage log");
+				eq(b.graph.deleteSources(new Set(["src_none"])), 0);
+				eq(b.graph.deleteSources(new Set(uniq)), uniq.length);
+				eq(b.graph.readSources(), []);
+				b.sourceOrg.write(org); eq(b.sourceOrg.read(), org);
+				assert.ok(ev.seen.includes("sources-changed"));
+			} finally { ev.off(); }
+		});
+
+		T("N13", "failure modes (item 17): an async fn rolls back and throws; work after its first await is not undone", (b) => {
+			const before = everything(b);
+			assert.throws(() => b.graph.transact("async", (() => { b.graph.appendNode(nodeAt(0)); return Promise.resolve(1); }) as never), TypeError);
+			assert.equal(everything(b), before);
+		});
+
+		P("N14", "seal failure after COMMIT is logged, not thrown; the next transaction first seals `recovered: <label>` (item 17, versioned back-ends)", fc.constant(0), () => { throw new Error("pending: SqlDriver.seal"); }, { todo: "lh-rws" });
+
+		P("N15", "round trip with defined normalisation (item 12): CRLF becomes LF, blank lines and a torn tail are dropped; unknown fields, whitespace and key order are kept", fc.tuple(fc.array(fc.tuple(A.verbatimNode, fc.constantFrom("lf", "crlf", "blank-before")), { maxLength: 8 }), fc.constantFrom('{"id":"n9","na', '{', '[1,')), (b, [items, torn]) => {
+			for (const [n, style] of items) {
+				if (style === "blank-before") b.hooks.injectCorruptLine("nodes", "");
+				if (style === "crlf") b.hooks.injectCorruptLine("nodes", `${JSON.stringify(n)}\r`); else b.graph.appendNode(n);
+			}
+			b.hooks.injectTornTail?.("nodes", torn);
+			const expected = items.map(([n]) => n);
+			assert.equal(JSON.stringify(b.graph.readNodes()), JSON.stringify(expected));
+		});
+
+		P("N16", "export(import(export(x))) == export(x), byte-for-byte, over all four ledgers with verbatim records (item 12)", fc.tuple(fc.array(A.verbatimNode, { maxLength: 6 }), fc.array(A.verbatimChain, { maxLength: 6 }), fc.array(A.verbatimCoverage, { maxLength: 4 }), fc.array(A.verbatimCheckpoint, { maxLength: 4 })), async (b, [ns, cs, cv, cp]) => {
+			ns.forEach((x) => b.graph.appendNode(x)); cs.forEach((x) => b.graph.appendChain(x)); cv.forEach((x) => b.graph.appendCoverage(x)); cp.forEach((x) => b.graph.appendCheckpoint(x));
+			const e1 = exportAll(b);
+			assert.equal(e1, JSON.stringify([ns, cs, cv, cp]), "export differs from what was written");
+			const [rn, rc, rv, rp] = [b.graph.readNodes(), b.graph.readChains(), b.graph.readCoverage(), b.graph.readCheckpoints()]; // read BEFORE opening b2: some adapters bind one folder at a time
+			const b2 = await fresh();
+			try {
+				rn.forEach((x) => b2.graph.appendNode(x)); rc.forEach((x) => b2.graph.appendChain(x)); rv.forEach((x) => b2.graph.appendCoverage(x)); rp.forEach((x) => b2.graph.appendCheckpoint(x));
+				assert.equal(exportAll(b2), e1);
+			} finally { b2.dispose(); }
 		});
 	});
 
@@ -620,5 +798,5 @@ test("discovery found this contract file and at least one adapter", () => {
 });
 for (const a of adapters) registerContract(a);
 // shortcut: with one adapter J compares it to itself (validates the harness only); real J starts at the second adapter.
-if (adapters.length === 1) registerEquivalence(adapters[0]!, adapters[0]!);
+// shortcut: J1 compares two adapters, so it registers nothing until a second adapter exists (a self-comparison is not evidence).
 for (const [i, a] of adapters.entries()) for (const b of adapters.slice(i + 1)) registerEquivalence(a, b);
