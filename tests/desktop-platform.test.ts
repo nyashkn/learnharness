@@ -176,7 +176,7 @@ describe("workflow action versions", () => {
 	for (const filename of ["ci.yml", "release.yml"]) {
 		it(`${filename} uses supported Action runtimes without changing the app's Node 26`, () => {
 			const workflow = yaml.load(readFileSync(new URL(`../.github/workflows/${filename}`, import.meta.url), "utf8"));
-			const expected = ["actions/checkout@v7", "actions/setup-node@v7"];
+			const expected = ["actions/checkout@v7", "actions/setup-node@v7", "pnpm/action-setup@v6"];
 			if (filename === "release.yml") {
 				expected.push("actions/github-script@v9", "actions/upload-artifact@v7", "maxim-lobanov/setup-xcode@v1");
 			}
@@ -188,7 +188,7 @@ describe("workflow action versions", () => {
 					observed.add(step.uses);
 					if (step.uses === "actions/setup-node@v7") {
 						assert.equal(step.with?.["node-version"], "26");
-						assert.equal(step.with?.cache, "npm");
+						assert.equal(step.with?.cache, "pnpm");
 					}
 					if (step.uses === "actions/upload-artifact@v7") {
 						assert.equal(step.with?.archive ?? true, true, "multi-file installers remain zipped artifacts");
@@ -263,7 +263,7 @@ describe("desktop release workflow", () => {
 			const steps = job.steps;
 			const native = steps.find(step => step.run?.includes("pdf-native-render.test.ts"));
 			assert.ok(native);
-			assert.ok(native.run?.startsWith("npx electron --import tsx --test "));
+			assert.ok(native.run?.startsWith("pnpm exec electron --import tsx --test "));
 			assert.equal(native.env?.ELECTRON_RUN_AS_NODE, "1");
 			assert.ok(steps.some(step => step.run === "node scripts/smoke-server.mjs --electron"));
 		}

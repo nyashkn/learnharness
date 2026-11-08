@@ -25,11 +25,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: "26"
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Tag must match package.json
         if: github.event_name == 'push'
         run: |
@@ -41,9 +42,9 @@ jobs:
               process.exit(1);
             }
           '
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run lint
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run lint
 
   draft:
     name: Prepare one draft
@@ -109,10 +110,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: "26"
-          cache: npm
+          cache: pnpm
       # The mac icon is the Icon Composer document (build/icon.icon);
       # compiling it needs both macOS 26+ and actool ≥ 26 (Xcode 26+).
       # Xcode 26's asset compiler crashes on macOS 15's older frameworks.
@@ -122,13 +124,13 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
       - name: Native renderer tests on this OS
-        run: npx electron --import tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
+        run: pnpm exec electron --import tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
         env:
           NODE_ENV: test
           ELECTRON_RUN_AS_NODE: "1"
-      - run: npm run build
+      - run: pnpm run build
       # Check the fresh trace before any static copying/curation.
       - run: node scripts/smoke-provider-runtime.mjs
       - run: node scripts/build-server.mjs
@@ -157,20 +159,20 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx electron-builder ${{ matrix.builder_args }} --publish always -c.forceCodeSigning=true
+        run: pnpm exec electron-builder ${{ matrix.builder_args }} --publish always -c.forceCodeSigning=true
       - name: Windows/Linux release → draft
         if: github.event_name == 'push' && runner.os != 'macOS'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npx electron-builder ${{ matrix.builder_args }} --publish always
+        run: pnpm exec electron-builder ${{ matrix.builder_args }} --publish always
       - name: Unsigned macOS rehearsal (no publish, no notarization)
         if: github.event_name == 'workflow_dispatch' && runner.os == 'macOS'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder ${{ matrix.builder_args }} --publish never -c.mac.notarize=false
+        run: pnpm exec electron-builder ${{ matrix.builder_args }} --publish never -c.mac.notarize=false
       - name: Windows/Linux rehearsal (no publish)
         if: github.event_name == 'workflow_dispatch' && runner.os != 'macOS'
-        run: npx electron-builder ${{ matrix.builder_args }} --publish never
+        run: pnpm exec electron-builder ${{ matrix.builder_args }} --publish never
       - name: Initialize packaged providers offline (host and packaged Electron Node)
         run: |
           case "$RUNNER_OS" in
@@ -242,11 +244,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
           node-version: "26"
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: List every release, drafts included
         env:
           GH_TOKEN: ${{ github.token }}
@@ -255,7 +258,7 @@ jobs:
         run: gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
       - name: Select the tag's single draft
         # Machine JSON on stdout (release id + asset ids); warnings on stderr.
-        run: npx tsx scripts/verify-release.ts select "$RUNNER_TEMP/releases.json" --tag "$GITHUB_REF_NAME" > "$RUNNER_TEMP/draft.json"
+        run: pnpm exec tsx scripts/verify-release.ts select "$RUNNER_TEMP/releases.json" --tag "$GITHUB_REF_NAME" > "$RUNNER_TEMP/draft.json"
       - name: Download the three update feeds
         env:
           GH_TOKEN: ${{ github.token }}
@@ -274,4 +277,4 @@ jobs:
             echo "downloaded $name ($(wc -c < "$RUNNER_TEMP/metadata/$name") bytes)"
           done
       - name: Verify draft assets and update feeds
-        run: npx tsx scripts/verify-release.ts verify "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/metadata" --tag "$GITHUB_REF_NAME"
+        run: pnpm exec tsx scripts/verify-release.ts verify "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/metadata" --tag "$GITHUB_REF_NAME"

@@ -1,0 +1,11 @@
+# pnpm 11 reads only auth and registry settings from .npmrc; everything else lives here.
+nodeLinker: hoisted # electron-builder needs a flat node_modules
+allowBuilds:
+  "@google/genai": false # no-op echo
+  electron-winstaller: true
+  esbuild: true
+  protobufjs: false # version-scheme check only
+  unrs-resolver: true
+# pnpm ignores package.json "overrides". Keep equal to the katex version in package.json (tests/katex-security.test.ts).
+overrides:
+  katex: 0.18.2

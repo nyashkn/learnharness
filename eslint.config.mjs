@@ -2,6 +2,7 @@ import { defineConfig, globalIgnores } from "eslint/config";
 import nextPlugin from "@next/eslint-plugin-next";
 import tsParser from "@typescript-eslint/parser";
 import importPlugin from "eslint-plugin-import";
+import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
 
 /**
  * ESLint with one job here: ENFORCE THE IMPORT LAW (the shell/core
@@ -18,6 +19,25 @@ import importPlugin from "eslint-plugin-import";
  *
  * tests/ and scripts/ are internal — unrestricted.
  */
+
+const leakedFiles = [...new Set(leakAllowlist.map((leak) => leak.file))];
+
+// `except` is relative to `from`. A listed file may keep only its own listed adapters.
+const serverStoreRule = (except) => ({
+	"import/no-restricted-paths": [
+		"error",
+		{
+			zones: [
+				{
+					target: "./src/server",
+					from: "./src/store",
+					except,
+					message: "src/server reaches store adapters only through the composition root, src/server/stores.ts (known leaks: eslint/leak-allowlist.mjs).",
+				},
+			],
+		},
+	],
+});
 
 export default defineConfig([
 	// electron/** — the desktop shell: plain Node, no framework, outside the
@@ -71,4 +91,13 @@ export default defineConfig([
 			],
 		},
 	},
+	{
+		files: ["src/server/**/*.{ts,tsx}"],
+		ignores: ["src/server/stores.ts", ...leakedFiles],
+		rules: serverStoreRule([]),
+	},
+	...leakedFiles.map((file) => ({
+		files: [file],
+		rules: serverStoreRule([...new Set(leakAllowlist.filter((leak) => leak.file === file).map((leak) => `./${leak.module}`))]),
+	})),
 ]);
