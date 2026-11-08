@@ -50,7 +50,11 @@ export function openNodeSqlite(file: string, options: NodeSqliteOptions = {}): S
 				db.exec("COMMIT");
 				return result;
 			} catch (error) {
-				if (db.isTransaction) db.exec("ROLLBACK");
+				try {
+					if (db.isTransaction) db.exec("ROLLBACK");
+				} catch {
+					// the original error is the one the caller needs
+				}
 				throw error;
 			} finally {
 				depth = 0;

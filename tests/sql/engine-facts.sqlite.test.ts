@@ -85,6 +85,19 @@ describe("engine facts: node:sqlite", () => {
 		db.close();
 	});
 
+	test("F5b a failing ROLLBACK never masks the error fn threw", () => {
+		const db = open();
+		const boom = new Error("boom");
+		assert.throws(
+			() =>
+				db.transaction(() => {
+					db.close(); // makes the rollback itself fail
+					throw boom;
+				}),
+			(e) => e === boom,
+		);
+	});
+
 	test("F6 BEGIN IMMEDIATE: a second writer is refused (SQLITE_BUSY) while a transaction is open, a reader is not", () => {
 		const file = fresh();
 		const a = open(file);

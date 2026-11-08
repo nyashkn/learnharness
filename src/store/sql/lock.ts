@@ -65,9 +65,7 @@ function readText(file: string): string | undefined {
 	}
 }
 
-function readLock(lockFile: string): LockInfo | null | undefined {
-	const text = readText(lockFile);
-	if (text === undefined) return undefined;
+function parseLock(text: string): LockInfo | null {
 	try {
 		const value = JSON.parse(text) as Partial<LockInfo>;
 		if (Number.isInteger(value.pid) && typeof value.host === "string" && typeof value.startedAt === "string") return value as LockInfo;
@@ -88,8 +86,7 @@ export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLoc
 	const temp = `${lockFile}.${randomUUID()}.tmp`;
 	fs.writeFileSync(temp, text, { flag: "wx" });
 	try {
-		// shortcut: two reclaimers can both unlink a stale lock and one may then unlink the other's fresh lock; upgrade if a second writer process ever starts concurrently by design.
-		for (let attempt = 0; attempt < 2; attempt++) {
+		for (let attempt = 0; attempt < 3; attempt++) {
 			try {
 				fs.linkSync(temp, lockFile);
 				return {
@@ -101,12 +98,34 @@ export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLoc
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 			}
-			const holder = readLock(lockFile);
-			if (holder === undefined) continue; // released between link and read: retry
+			const seen = readText(lockFile);
+			if (seen === undefined) continue; // released between link and read: retry
+			const holder = parseLock(seen);
 			if (holder === null || holder.host !== host || isAlive(holder.pid)) throw new StoreLockedError(storeFile, holder);
-			fs.rmSync(lockFile, { force: true }); // stale: dead pid on this host
+			// Stale. Move it aside (atomic: one reclaimer wins) and confirm we moved the lock we judged, not a fresh one.
+			const tomb = `${lockFile}.${randomUUID()}.tomb`;
+			try {
+				fs.renameSync(lockFile, tomb);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; // another reclaimer won
+				throw error;
+			}
+			const moved = readText(tomb);
+			if (moved === seen) {
+				fs.rmSync(tomb, { force: true });
+				continue;
+			}
+			// We evicted a live writer's fresh lock: put it back and refuse.
+			try {
+				fs.linkSync(tomb, lockFile);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			}
+			fs.rmSync(tomb, { force: true });
+			throw new StoreLockedError(storeFile, moved === undefined ? null : parseLock(moved));
 		}
-		throw new StoreLockedError(storeFile, readLock(lockFile) ?? null);
+		const last = readText(lockFile);
+		throw new StoreLockedError(storeFile, last === undefined ? null : parseLock(last));
 	} finally {
 		fs.rmSync(temp, { force: true });
 	}

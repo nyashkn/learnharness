@@ -70,6 +70,26 @@ describe("store lock (CB6)", () => {
 		assert.deepEqual(leftovers(), []);
 	});
 
+	test("concurrent reclaim: a writer that took the lock while another judged it stale is not evicted", () => {
+		const f = store();
+		acquireStoreLock(f, { pid: 7, host: "h1" }); // crashed holder
+		let a: ReturnType<typeof acquireStoreLock> | undefined;
+		// B reads the stale lock, then (inside its liveness check) A reclaims and links its own lock
+		const b = () =>
+			acquireStoreLock(f, {
+				pid: 20,
+				host: "h1",
+				isAlive: (pid) => {
+					if (pid === 7 && !a) a = acquireStoreLock(f, { pid: 10, host: "h1", isAlive: () => false });
+					return false;
+				},
+			});
+		assert.throws(b, (e) => e instanceof StoreLockedError && e.holder?.pid === 10);
+		assert.equal(JSON.parse(fs.readFileSync(lockFileFor(f), "utf8")).pid, 10, "A's lock survives");
+		a?.release();
+		assert.deepEqual(fs.readdirSync(dir).filter((x) => x.includes(".tomb") || x.endsWith(".tmp")), []);
+	});
+
 	test("property: a held lock is reclaimed iff same host and holder pid not alive", () => {
 		fc.assert(
 			fc.property(fc.boolean(), fc.boolean(), (sameHost, alive) => {
