@@ -128,4 +128,5 @@ export function writeSettings(raw: unknown): UserSettings {
 export const settingsStore: SettingsStore = {
 	readSettings,
 	writeSettings,
+	readFileAccessSettings,
 };

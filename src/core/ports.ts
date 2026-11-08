@@ -28,6 +28,9 @@ import type {
 	NotesSource,
 } from "./contracts.ts";
 import type { UserSettings } from "./settings.ts";
+import type { FileAccessSettingsResult } from "./file-access.ts";
+import type { CustomAuthBinding } from "./custom-provider-auth.ts";
+import type { GraphRenderSettings } from "./render-settings.ts";
 
 // ─── ChatStore — the session record's home (data/chats) ─────────────────────
 
@@ -187,6 +190,20 @@ export interface SettingsStore {
 	readSettings(): UserSettings | null;
 	/** Persist the record (replace-whole). Callers pass a SANITIZED record. */
 	writeSettings(settings: UserSettings): void;
+	/** Strict file-access view: unlike readSettings, a corrupt or unreadable
+	 *  record is a refusal (ok: false), never first-boot defaults. */
+	readFileAccessSettings(): FileAccessSettingsResult;
+}
+
+// ─── RenderSettingsStore — graph render settings (data/render-settings.json) ──
+
+/** Read-modify-write, NOT a ledger; stays outside transact (decision: positions
+ *  and render settings stay outside transact). */
+export interface RenderSettingsStore {
+	/** The sanitized settings, or null when none exist yet (first boot). */
+	readRenderSettings(): GraphRenderSettings | null;
+	/** Persist (sanitized again on write). Returns what was written. */
+	writeRenderSettings(raw: unknown): GraphRenderSettings;
 }
 
 // ─── PromptOverrideStore — per-segment system-prompt overrides (2026-09-19) ──
@@ -231,5 +248,16 @@ export interface AuthStore {
 	setAuthVar(name: string, value: string): void;
 	/** Remove one VAR if present (absent = no-op, still a silent success). */
 	deleteAuthVar(name: string): void;
+	/** One immutable snapshot of the custom-endpoint pair. Throws when the
+	 *  private record is unreadable, so callers never overwrite it as {}.
+	 *  Keyless callers never invoke fileKey(). */
+	readCustomAuth(): CustomAuthSnapshot;
+	/** Replace just the custom pair in ONE atomic record write. */
+	writeCustomAuth(binding: CustomAuthBinding | undefined, fileKey: string | undefined): void;
+}
+
+export interface CustomAuthSnapshot {
+	binding: CustomAuthBinding | undefined;
+	fileKey(): string | undefined;
 }
 

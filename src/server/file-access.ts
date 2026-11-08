@@ -4,7 +4,7 @@
 import os from "node:os";
 import path from "node:path";
 import type { FileAccessPolicy } from "../agent/tools/file-access.ts";
-import { readFileAccessSettings } from "../store/settings.ts";
+import { settingsStore } from "./stores.ts";
 
 export function expandFolder(folder: string, home: string = os.homedir()): string {
 	if (folder === "~") return home;
@@ -14,7 +14,7 @@ export function expandFolder(folder: string, home: string = os.homedir()): strin
 }
 
 export function fileAccessPolicy(): FileAccessPolicy {
-	const result = readFileAccessSettings();
+	const result = settingsStore.readFileAccessSettings();
 	if (!result.ok) return { restricted: true, folders: [], error: result.error };
 	return { restricted: result.settings.restricted, folders: result.settings.folders.map((folder) => expandFolder(folder)) };
 }
@@ -22,6 +22,6 @@ export function fileAccessPolicy(): FileAccessPolicy {
 /** Safe UI diagnostic, no raw JSON/file contents. A corrupt record must
  * not make the restriction toggle appear safely OFF while reads are blocked. */
 export function fileAccessConfigurationError(): string | null {
-	const result = readFileAccessSettings();
+	const result = settingsStore.readFileAccessSettings();
 	return result.ok ? null : result.error;
 }

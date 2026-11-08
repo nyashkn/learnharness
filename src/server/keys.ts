@@ -52,7 +52,7 @@ import {
 	maskKey,
 	validateKeyShape,
 } from "../core/auth-keys.ts";
-import { authStore } from "../store/auth.ts";
+import { authStore } from "./stores.ts";
 import { isSubscriptionProvider, subscriptionConnected } from "../agent/subscription-connections.ts";
 import { customProviderAvailable, installCustomProviderSource } from "./custom-provider.ts";
 import { claudeCodeAvailable } from "./claude-code-config.ts";

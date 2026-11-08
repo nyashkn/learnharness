@@ -16,16 +16,9 @@ export { joinPages } from "../agent/subagents/pdf-markdown.ts";
 export * from "./commit-positions.ts";
 export * from "./jobs.ts";
 export * from "./stores.ts";
-export { readRenderSettings, writeRenderSettings } from "../store/render-settings.ts";
 // The settings record + prompt overrides (settings-storage wave, 2026-09-19).
 // The *Record aliases keep the app/api/settings routes explicit about which
 // seam they touch (the raw record, not the chat-section convenience view).
-export {
-	readSettings as readSettingsRecord,
-	writeSettings as writeSettingsRecord,
-	settingsStore,
-} from "../store/settings.ts";
-export { promptOverrides } from "../store/prompt-overrides.ts";
 export { isValidSegmentPath } from "../core/prompt-segments.ts";
 // The canonical segment discovery/resolution lives in the agent layer
 // (composition is an agent concern); the barrel re-exports it for the
@@ -38,7 +31,6 @@ export { effectivePromptSegments, allSegmentPaths, readPromptOverride } from "..
 // keeps its plain process.env reads (that seam is the point).
 export * from "./keys.ts";
 export * from "./search.ts";
-export { authStore } from "../store/auth.ts";
 export * from "./settings-body.ts";
 export { fileAccessConfigurationError } from "./file-access.ts";
 export * from "./turn-liveness.ts";
