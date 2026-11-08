@@ -131,6 +131,18 @@ export interface GraphStore {
 		coverage?: CoverageEntry[];
 		checkpoints?: SessionCheckpoint[];
 	}): void;
+
+	/** One unit of work over the ledgers and sources map (CB2 items 4, 11, 14-17).
+	 *  Inside `fn` every read sees committed state plus this transaction's
+	 *  pending writes (read-your-writes), and the writes apply in call order
+	 *  when `fn` returns. A throw leaves no trace. `fn` must be synchronous:
+	 *  a returned thenable rolls back and throws. A nested `transact` joins the
+	 *  outer one; if a nested `fn` throws and the outer catches it, the outer
+	 *  still rolls back. `label` names the unit (commit message for versioned
+	 *  adapters). Positions and render settings stay outside the transaction.
+	 *  The bare source writes (`upsertSource`, `appendSourceUsage`,
+	 *  `deleteSources`) wrap themselves in `auto:<method>`. */
+	transact<T>(label: string, fn: () => T): T;
 }
 
 /** Separate from graph ledgers and source identity, for future shared views. */

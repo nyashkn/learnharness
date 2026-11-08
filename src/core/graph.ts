@@ -153,6 +153,17 @@ export function mergeFindings(
 	deps: GraphDeps,
 	source: MergeSource,
 ): EmissionStats {
+	// One unit of work: a throw anywhere below leaves no half-merged ledgers.
+	return deps.graphStore.transact(`extract chat:${chatId}`, () => mergeFindingsInTransaction(chatId, findings, verdicts, deps, source));
+}
+
+function mergeFindingsInTransaction(
+	chatId: string,
+	findings: SessionFindings,
+	verdicts: AuditVerdicts,
+	deps: GraphDeps,
+	source: MergeSource,
+): EmissionStats {
 	const { graphStore: ledgers } = deps;
 	const stats: EmissionStats = { nodes: 0, chains: 0 };
 
