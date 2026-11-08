@@ -5,10 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import fc from "fast-check";
-import { acquireStoreLock, lockFileFor, pidIsAlive, StoreLockedError } from "../../src/store/sql/lock";
+import { acquireStoreLock, lockFileFor, pidIsAlive, psProcessStart, StoreLockedError } from "../../src/store/sql/lock";
+import { machineId } from "../../src/store/sql/machine-id";
 
 let dir: string;
 let n = 0;
+process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), "lh-lock-home-")); // machineId() writes under HOME, never the real one
 before(() => {
 	dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-lock-"));
 });
@@ -106,6 +108,97 @@ describe("store lock (CB6)", () => {
 			}),
 			{ numRuns: 40 },
 		);
+	});
+
+	test("a changed hostname does not matter: the default host is the stable machine id (lh-bzc)", () => {
+		const f = store();
+		const a = acquireStoreLock(f, { pid: 4242 });
+		const host = JSON.parse(fs.readFileSync(lockFileFor(f), "utf8")).host;
+		assert.equal(host, machineId());
+		assert.notEqual(host, os.hostname());
+		a.release();
+	});
+
+	describe("recycled pid (lh-bzc)", () => {
+		const T0 = Date.parse("2026-01-01T00:00:00Z");
+		const hold = (f: string) => {
+			acquireStoreLock(f, { pid: 7, host: "h1" }); // never released
+			const text = JSON.parse(fs.readFileSync(lockFileFor(f), "utf8"));
+			text.startedAt = new Date(T0).toISOString();
+			fs.writeFileSync(lockFileFor(f), JSON.stringify(text));
+		};
+		const take = (f: string, start: (pid: number) => Date | undefined) =>
+			acquireStoreLock(f, { pid: 99, host: "h1", isAlive: () => true, processStart: start });
+
+		test("an alive pid that started after the lock was written is reclaimed", () => {
+			const f = store();
+			hold(f);
+			take(f, () => new Date(T0 + 1000)).release();
+		});
+
+		test("an alive pid that started before the lock was written is refused", () => {
+			const f = store();
+			hold(f);
+			assert.throws(() => take(f, () => new Date(T0 - 1000)), (e) => e instanceof StoreLockedError && e.holder?.pid === 7);
+		});
+
+		test("a start time equal to startedAt is refused (not later)", () => {
+			const f = store();
+			hold(f);
+			assert.throws(() => take(f, () => new Date(T0)), StoreLockedError);
+		});
+
+		test("an unknown start time (ps failed) means alive", () => {
+			const f = store();
+			hold(f);
+			assert.throws(() => take(f, () => undefined), StoreLockedError);
+		});
+
+		test("property: reclaimed iff the start time is strictly later", () => {
+			fc.assert(
+				fc.property(fc.integer({ min: -100000, max: 100000 }), (delta) => {
+					const f = store();
+					hold(f);
+					let reclaimed = true;
+					try {
+						take(f, () => new Date(T0 + delta)).release();
+					} catch {
+						reclaimed = false;
+					}
+					return reclaimed === delta > 0;
+				}),
+				{ numRuns: 40 },
+			);
+		});
+
+		test("another machine's live-looking lock is refused even if the pid started later", () => {
+			const f = store();
+			acquireStoreLock(f, { pid: 7, host: "other" });
+			assert.throws(() => acquireStoreLock(f, { pid: 99, host: "h1", isAlive: () => true, processStart: () => new Date(Date.now() + 1e6) }), StoreLockedError);
+		});
+	});
+
+	describe("psProcessStart: every failure mode is undefined (alive)", () => {
+		const withPath = (p: string, fn: () => void) => {
+			const old = process.env.PATH;
+			process.env.PATH = p;
+			try { fn(); } finally { process.env.PATH = old; }
+		};
+		const fakePs = (script: string) => {
+			const d = fs.mkdtempSync(path.join(dir, "bin-"));
+			fs.writeFileSync(path.join(d, "ps"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+			return d;
+		};
+		test("no ps on PATH", () => withPath(fs.mkdtempSync(path.join(dir, "empty-")), () => assert.equal(psProcessStart(process.pid), undefined)));
+		test("empty output", () => withPath(fakePs("exit 0"), () => assert.equal(psProcessStart(process.pid), undefined)));
+		test("unparsable output", () => withPath(fakePs("echo not-a-date"), () => assert.equal(psProcessStart(process.pid), undefined)));
+		test("non-zero exit", () => withPath(fakePs("echo 'Sat Nov  8 12:34:56 2026'; exit 1"), () => assert.equal(psProcessStart(process.pid), undefined)));
+		test("timeout", () => withPath(fakePs("/bin/sleep 5"), () => assert.equal(psProcessStart(process.pid), undefined)));
+		test("the real ps reports this process as started in the past", () => {
+			const t = psProcessStart(process.pid);
+			assert.ok(t && t.getTime() <= Date.now() && t.getTime() > Date.now() - 24 * 3600 * 1000, String(t));
+		});
+		test("a parseable date is returned", () => withPath(fakePs("echo 'Sat Nov  8 12:34:56 2026'"), () => assert.equal(psProcessStart(1)?.getFullYear(), 2026)));
 	});
 
 	test("pidIsAlive: true for this process, false for a pid that has exited", () => {

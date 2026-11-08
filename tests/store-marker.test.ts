@@ -7,12 +7,13 @@ import fc from "fast-check";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { after, describe, it, mock } from "node:test";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-marker-"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 // The singletons (config-built) live in their own throwaway folder, never the repo's data/.
+process.env.HOME = path.join(root, "home"); // the machine id file goes here, never to the real ~/.learnharness
 process.env.LH_DATA_DIR = path.join(root, "singleton-data");
 process.env.LH_AUTH_FILE = path.join(root, "singleton-auth.json");
 delete process.env.LH_STORAGE;
@@ -20,6 +21,7 @@ delete process.env.LH_STORAGE;
 const marker = await import("../src/store/marker.ts");
 const { createFileStores, runStoreScript } = await import("../src/store/file-stores.ts");
 const { acquireStoreLock, StoreLockedError } = await import("../src/store/sql/lock.ts");
+const { machineId } = await import("../src/store/sql/machine-id.ts");
 const { createGraphStore, graphPaths } = await import("../src/store/graph.ts");
 const { StorageVersionError } = await import("../src/store/graph-format.ts");
 const { CURRENT_GRAPH_FORMAT_VERSION } = await import("../src/core/contracts/graph.ts");
@@ -333,7 +335,7 @@ describe("the store lock", () => {
 		const dir = fresh();
 		fs.mkdirSync(dir);
 		const file = path.join(dir, "storage.json");
-		acquireStoreLock(file, { pid: 999991, host: os.hostname() });
+		acquireStoreLock(file, { pid: 999991, host: machineId() });
 		const errors: string[] = [];
 		const spy = mock.method(console, "error", (...a: unknown[]) => { errors.push(a.join(" ")); });
 		let ran = false;
@@ -449,5 +451,56 @@ describe("boot", () => {
 		assert.equal(r.status, 0, r.stderr);
 		const { settingsReads } = JSON.parse(r.stdout.trim().split("\n").at(-1)!) as { settingsReads: number };
 		assert.ok(settingsReads > 0, "the boot sync must read the settings record when keys.ts loads");
+	});
+});
+
+// ─── 5. the server releases its lock on exit, SIGTERM and SIGINT (lh-bzc) ───
+
+describe("lock release on shutdown", () => {
+	const markerTs = path.resolve(import.meta.dirname, "../src/store/marker.ts");
+	const run = (dir: string, how: "exit" | "SIGTERM" | "SIGINT" | "SIGTERM-with-listener") =>
+		new Promise<{ code: number | null; signal: NodeJS.Signals | null; lockAtReady: boolean }>((resolve, reject) => {
+			const home = fresh();
+			fs.mkdirSync(home);
+			const code = `
+				import { beforeWrite } from ${JSON.stringify(markerTs)};
+				${how === "SIGTERM-with-listener" ? 'process.on("SIGTERM", () => setTimeout(() => process.exit(0), 50));' : ""}
+				beforeWrite(${JSON.stringify(dir)});
+				console.log("ready");
+				${how === "exit" ? "" : "setInterval(() => {}, 1000);"}`;
+			const c = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
+				cwd: path.resolve(import.meta.dirname, ".."), env: { PATH: process.env.PATH, HOME: home, NODE_ENV: "test" },
+			});
+			let err = "", ready = false;
+			c.stderr.on("data", (d) => (err += d));
+			c.stdout.on("data", () => {
+				if (ready) return;
+				ready = true;
+				const lockAtReady = fs.existsSync(path.join(dir, "storage.json.lock"));
+				if (how !== "exit") c.kill(how === "SIGINT" ? "SIGINT" : "SIGTERM");
+				const killer = setTimeout(() => c.kill("SIGKILL"), 5000); // a child that swallows the signal fails the test, not hangs it
+				c.on("exit", () => clearTimeout(killer));
+				c.on("exit", (code, signal) => resolve({ code, signal, lockAtReady }));
+			});
+			c.on("error", reject);
+			c.on("exit", () => { if (!ready) reject(new Error(err)); });
+		});
+
+	for (const how of ["exit", "SIGTERM", "SIGINT"] as const) {
+		it(`${how}: the lock is gone afterwards${how === "exit" ? "" : " and the child still dies by that signal"}`, async () => {
+			const dir = fresh();
+			const r = await run(dir, how);
+			assert.equal(r.lockAtReady, true, "the child held the lock before the shutdown");
+			assert.equal(fs.existsSync(path.join(dir, "storage.json.lock")), false);
+			if (how === "exit") assert.deepEqual([r.code, r.signal], [0, null]);
+			else assert.deepEqual([r.code, r.signal], [null, how]);
+		});
+	}
+
+	it("SIGTERM with another listener: the lock is released and the exit is left to that listener", async () => {
+		const dir = fresh();
+		const r = await run(dir, "SIGTERM-with-listener");
+		assert.equal(fs.existsSync(path.join(dir, "storage.json.lock")), false);
+		assert.deepEqual([r.code, r.signal], [0, null]);
 	});
 });

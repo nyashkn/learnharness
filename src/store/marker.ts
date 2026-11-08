@@ -116,7 +116,34 @@ interface Held {
 const REGISTRY_KEY = "__lhStoreLocks";
 function registry(): Map<string, Held> {
 	const g = globalThis as unknown as Record<string, Map<string, Held> | undefined>;
-	return (g[REGISTRY_KEY] ??= new Map());
+	const map = (g[REGISTRY_KEY] ??= new Map());
+	installExitHooks();
+	return map;
+}
+
+/** Release every lock this process holds. Idempotent; reads the global registry, so any module copy may run it. */
+function releaseAll(): void {
+	const g = globalThis as unknown as Record<string, Map<string, Held> | undefined>;
+	for (const held of g[REGISTRY_KEY]?.values() ?? []) held.lock.release();
+	g[REGISTRY_KEY]?.clear();
+}
+
+/** Once per process (globalThis flag, so Next dev's duplicate modules do not stack listeners):
+ *  release on exit, and on SIGTERM/SIGINT without swallowing the signal. */
+function installExitHooks(): void {
+	const g = globalThis as unknown as Record<string, boolean | undefined>;
+	if (g.__lhStoreLockHooks) return;
+	g.__lhStoreLockHooks = true;
+	process.on("exit", releaseAll);
+	for (const sig of ["SIGTERM", "SIGINT"] as const) {
+		const onSignal = (): void => {
+			releaseAll();
+			process.removeListener(sig, onSignal);
+			// Others (Next, Electron shutdown) own the exit; if none remain, die with this signal.
+			if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+		};
+		process.on(sig, onSignal);
+	}
 }
 
 /** Release this process's lock on a folder (tests, scripts). A later write re-acquires. */
