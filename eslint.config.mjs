@@ -42,7 +42,7 @@ const serverStoreRule = (except) => ({
 export default defineConfig([
 	// electron/** — the desktop shell: plain Node, no framework, outside the
 // import law (same rationale as scripts/).
-	globalIgnores([".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**"]),
+	globalIgnores([".worktrees/**", ".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**"]),
 	{
 		files: ["**/*.{js,mjs,ts,tsx}"],
 		languageOptions: {

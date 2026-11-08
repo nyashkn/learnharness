@@ -8,9 +8,17 @@ const scripts: Record<string, string> = JSON.parse(readFileSync(`${root}package.
 
 /** Test-path tokens of the scripts `ci` actually runs, quotes kept. */
 function ciTokens(all: Record<string, string>): string[] {
-	const names = [...(all.ci ?? "").matchAll(/pnpm run ([\w:-]+)/g)].map((m) => m[1] as string);
-	return names.flatMap((name) => [...(all[name] ?? "").matchAll(/"?tests\/[^\s"]+"?/g)].map((m) => m[0]));
+	return ciNames(all)
+		.map((name) => all[name] ?? "")
+		.filter((body) => body.includes("--test"))
+		.flatMap((body) => [...body.matchAll(/"?tests\/[^\s"]+"?/g)].map((m) => m[0]));
 }
+
+function ciNames(all: Record<string, string>): string[] {
+	return [...(all.ci ?? "").matchAll(/pnpm run ([\w:-]+)/g)].map((m) => m[1] as string);
+}
+
+const swallowsFailure = (body: string) => /\|\||;\s*(true|exit 0)/.test(body);
 
 const unquote = (token: string) => token.replaceAll('"', "");
 
@@ -26,9 +34,21 @@ test("orphans reports a test file no ci glob matches", () => {
 });
 
 test("ciTokens only counts scripts reachable from ci", () => {
-	const fake = { ci: "pnpm run a && pnpm run b", a: 'tsx --test "tests/a/**/*.test.ts"', b: "tsx --test tests/*.test.ts", c: "tsx --test tests/c/*.test.ts" };
+	const fake = {
+		ci: "pnpm run a && pnpm run b && pnpm run e",
+		a: 'tsx --test "tests/a/**/*.test.ts"',
+		b: "tsx --test tests/*.test.ts",
+		c: "tsx --test tests/c/*.test.ts",
+		e: "echo tests/e/*.test.ts",
+	};
 	assert.deepEqual(ciTokens(fake), ['"tests/a/**/*.test.ts"', "tests/*.test.ts"]);
+	assert.ok(swallowsFailure("tsx --test a || true"));
+	assert.ok(!swallowsFailure("tsx --test a && tsx b"));
 	assert.deepEqual(flattenedByShell(['"tests/a/**/*.test.ts"', "tests/b/**/*.test.ts"]), ["tests/b/**/*.test.ts"]);
+});
+
+test("no script in the gate can swallow a failure", () => {
+	assert.deepEqual(["ci", ...ciNames(scripts)].filter((name) => swallowsFailure(scripts[name] ?? "")), []);
 });
 
 test("every test file runs in the gate", () => {

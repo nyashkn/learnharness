@@ -12,7 +12,7 @@ ci:
     pnpm run ci
 
 test-one file:
-    pnpm exec tsx --test {{file}}
+    NODE_ENV=test pnpm exec tsx --test {{file}}
 
 contract:
     pnpm run test:contract
@@ -28,7 +28,7 @@ wt-list:
     agent-deck worktree list
 
 wt-new id slug: _main-checkout
-    agent-deck add {{fork}} -w lh-{{id}}-{{slug}} -b --location sibling
+    agent-deck add -t {{id}} -c claude -w lh-{{id}}-{{slug}} -b --location sibling {{fork}}
 
 wt-finish id: _main-checkout
     agent-deck worktree finish {{id}}
@@ -39,14 +39,15 @@ wt-clean: _main-checkout
 bead-claim id:
     BEADS_ACTOR=${BEADS_ACTOR:-kn-builder} bd update {{id}} --claim
 
-bead-handoff id: ci
-    BEADS_ACTOR=${BEADS_ACTOR:-kn-builder} bd update {{id}} --status review --append-notes "$(git branch --show-current)@$(git rev-parse --short HEAD); gate: just ci passed"
+# notes: "gate: <one real result line per command>; gitnexus: <risk line>"
+bead-handoff id notes: ci
+    BEADS_ACTOR=${BEADS_ACTOR:-kn-builder} bd update {{id}} --status review --append-notes "$(git branch --show-current)@$(git rev-parse --short HEAD); {{notes}}"
 
 seed *args:
-    pnpm run seed -- {{args}}
+    pnpm run seed {{args}}
 
 lh *args:
-    pnpm run lh -- {{args}}
+    pnpm run lh {{args}}
 
 # In a linked worktree .git is a file. Beads setup and worktree management belong to the main checkout.
 [private]

@@ -42,9 +42,7 @@ jobs:
               process.exit(1);
             }
           '
-      - run: pnpm run typecheck
-      - run: pnpm test
-      - run: pnpm run lint
+      - run: pnpm run ci
 
   draft:
     name: Prepare one draft

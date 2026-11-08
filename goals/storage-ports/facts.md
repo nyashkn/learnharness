@@ -12,8 +12,8 @@
 | 4 | The newer-format check runs only on read paths. All our stores refuse at open, for reads and writes. | auto: contract suite |
 | 5 | The versioned store holds no blobs today; image snapshots live in chat JSON, keyed by SHA-256. | manual |
 | 6 | `zod` is installed but never imported. TypeBox is used for LLM tool arguments. | manual |
-| 7 | Versioned stores use a `_datalib_meta` table, not `PRAGMA user_version`. | manual |
-| 8 | `read_marks` is UI state. The projection cursor is written in the same transaction as the derived rows. | manual |
+| 7 | In datalib (the model for this design), versioned stores use a `_datalib_meta` table, not `PRAGMA user_version`. | manual |
+| 8 | In datalib, `read_marks` is UI state. Its projection cursor is written in the same transaction as the derived rows. | manual |
 
 ## Tooling facts
 
