@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { RENDER_SETTINGS_FILE } from "../../config.ts";
 import { DEFAULT_RENDER_SETTINGS, sanitizeRenderSettings, type GraphRenderSettings } from "../core/render-settings.ts";
+import type { RenderSettingsStore } from "../core/ports.ts";
 import { assertGraphFormat, ensureGraphFormat } from "./graph-format.ts";
 import { writeFileAtomicSync } from "./atomic-write.ts";
 
@@ -42,3 +43,6 @@ export function writeRenderSettings(raw: unknown): GraphRenderSettings {
 }
 
 export { DEFAULT_RENDER_SETTINGS };
+
+/** The typed adapter (core/ports.ts RenderSettingsStore), for the composition root. */
+export const renderSettingsStore: RenderSettingsStore = { readRenderSettings, writeRenderSettings };
