@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e 'const fs=require(\"fs\"),path=require(\"path\"),cp=require(\"child_process\");let i={};try{i=JSON.parse(fs.readFileSync(0,\"utf8\"))}catch{}const f=i.tool_input&&i.tool_input.file_path;if(!f)process.exit(0);const proj=path.resolve(process.env.CLAUDE_PROJECT_DIR||i.cwd||process.cwd());const abs=path.resolve(proj,f);const inside=(root)=>{const r=path.relative(root,abs);return r===\"\"||(!r.startsWith(\"..\")&&!path.isAbsolute(r))};const deny=(m)=>{process.stderr.write(\"BLOCKED: \"+m+\"\\n\");process.exit(2)};if(inside(path.join(proj,\"upstream\"))||inside(path.join(proj,\"..\",\"upstream\")))deny(\"upstream/** is read-only.\");if(/(^|\\/)schema\\/.*snapshot\\.sql$/.test(path.relative(proj,abs).split(path.sep).join(\"/\")))deny(\"schema/**/snapshot.sql is generated; do not edit it by hand.\");const mig=path.join(proj,\"src/store/sql/migrations\");if(inside(mig)){ const rel=path.relative(mig,abs).split(path.sep).join(\"/\"); const strip=(p)=>p.replace(/\\.[^./]+$/,\"\"); let lock;try{lock=JSON.parse(cp.execSync(\"git show origin/main:src/store/sql/migrations/migrations.lock.json\",{cwd:proj,stdio:[\"ignore\",\"pipe\",\"ignore\"]}).toString())}catch{process.exit(0)} const keys=[];(function w(o,p){for(const k of Object.keys(o)){const n=p?p+\"/\"+k:k;if(o[k]&&typeof o[k]===\"object\")w(o[k],n);else keys.push(n)}})(lock,\"\"); if(keys.some((k)=>strip(k)===strip(rel)))deny(rel+\" is a released rung (listed in origin/main migrations.lock.json). Add a new rung instead.\");}process.exit(0);'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const{execFileSync:x}=require('child_process');let i={};try{i=JSON.parse(require('fs').readFileSync(0,'utf8'))}catch{}const f=i.tool_input&&i.tool_input.file_path;if(f&&/\\.(js|mjs|ts|tsx)$/.test(f)){try{x('pnpm',['exec','eslint','--fix','--no-warn-ignored',f],{cwd:process.env.CLAUDE_PROJECT_DIR||i.cwd,stdio:'ignore'})}catch{}}process.exit(0)\""
+          }
+        ]
+      }
+    ]
+  }
+}

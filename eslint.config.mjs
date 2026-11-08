@@ -17,6 +17,12 @@ import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
  *                    the storage ports, the composition — arrive via
  *                    factories/closures from the chat-handler)
  *
+ *   node:sqlite, @dolthub/doltlite → only src/store/sql/drivers/** may import
+ *                    them (static, dynamic import() and require() forms);
+ *                    src/seed gets a driver injected by scripts/seed.ts
+ *   src/seed/**    →  never imports src/store, src/server, src/agent (CB7:
+ *                    scripts/seed.ts is the only composition root)
+ *
  * tests/ and scripts/ are internal — unrestricted.
  */
 
@@ -39,6 +45,17 @@ const serverStoreRule = (except) => ({
 	],
 });
 
+const driverMessage = "Only src/store/sql/drivers may import node:sqlite or @dolthub/doltlite; src/seed gets a driver injected by scripts/seed.ts.";
+const driverModule = "node:sqlite|@dolthub/doltlite";
+// esquery regexes cannot contain "/", so "." stands for it and the subpath boundary is dropped.
+const driverSource = "/^(node:sqlite|@dolthub.doltlite)/";
+// Selectors cover what no-restricted-imports cannot see: import("x"), import(`x`), require("x").
+const driverSyntax = [
+	`ImportExpression[source.value=${driverSource}]`,
+	`ImportExpression[source.expressions.length=0][source.quasis.0.value.cooked=${driverSource}]`,
+	`CallExpression[callee.name="require"][arguments.0.value=${driverSource}]`,
+].map((selector) => ({ selector, message: driverMessage }));
+
 export default defineConfig([
 	// electron/** — the desktop shell: plain Node, no framework, outside the
 // import law (same rationale as scripts/).
@@ -55,6 +72,8 @@ export default defineConfig([
 		},
 		rules: {
 			...nextPlugin.configs.recommended.rules,
+			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }] }],
+			"no-restricted-syntax": ["error", ...driverSyntax],
 			"import/no-restricted-paths": [
 				"error",
 				{
@@ -86,10 +105,20 @@ export default defineConfig([
 							message:
 								"The agent layer receives its dependencies (storage ports via factories/closures) — it never imports the server layer or store adapters (architecture: docs/architecture.md).",
 						},
+						{
+							target: "./src/seed",
+							from: ["./src/store", "./src/server", "./src/agent"],
+							message:
+								"src/seed sees ports only; scripts/seed.ts is the only composition root that bridges seed and store/server (CB7).",
+						},
 					],
 				},
 			],
 		},
+	},
+	{
+		files: ["src/store/sql/drivers/**"],
+		rules: { "no-restricted-imports": "off", "no-restricted-syntax": "off" },
 	},
 	{
 		files: ["src/server/**/*.{ts,tsx}"],
