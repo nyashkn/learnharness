@@ -61,7 +61,7 @@ type Op =
 	| { t: "append"; file: string; record: unknown }
 	| { t: "rewrite"; file: string; records: unknown[] }
 	| { t: "sources"; map: Record<string, NotesSource>; deleting: boolean }
-	| { t: "deferred"; key: string; value: unknown; flush: () => void };
+	| { t: "deferred"; key: string; value: unknown; flush: () => void; after?: () => void };
 interface Txn { ops: Op[]; poisoned: boolean }
 let txn: Txn | null = null;
 
@@ -71,10 +71,12 @@ const viaDisk = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 /** A sibling adapter's write (source organization) that must commit or roll
  *  back with the open transaction. True = deferred to commit (the caller does
  *  nothing more); false = no transaction is open, so write now. `flush` runs
- *  at commit, in call order, and must do the write and any event emission. */
-export function deferWrite(key: string, value: unknown, flush: () => void): boolean {
+ *  at commit, in call order, and does the write only; `after` (events) runs
+ *  once every op has flushed, so a listener sees the whole committed state
+ *  and a failed flush emits nothing. */
+export function deferWrite(key: string, value: unknown, flush: () => void, after?: () => void): boolean {
 	if (!txn) return false;
-	txn.ops.push({ t: "deferred", key, value: viaDisk(value), flush });
+	txn.ops.push({ t: "deferred", key, value: viaDisk(value), flush, after });
 	return true;
 }
 
@@ -125,6 +127,7 @@ function transact<T>(label: string, fn: () => T): T {
 		else if (op.deleting) deleteSourceMap(op.map);
 		else writeSourceMap(op.map);
 	}
+	for (const op of mine.ops) if (op.t === "deferred") op.after?.();
 	return result;
 }
 

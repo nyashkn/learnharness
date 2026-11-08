@@ -25,15 +25,17 @@ export const sourceOrganizationStore: SourceOrganizationStore = {
 	},
 	write(state) {
 		assertGraphFormat();
-		const valid = parseSourceOrganization(state);
+		const valid = parseSourceOrganization(structuredClone(state)); // a snapshot: later caller mutation must not change what commits
 		const commit = () => {
 			fs.mkdirSync(path.dirname(SOURCE_ORGANIZATION_FILE), { recursive: true });
 			ensureGraphFormat();
 			writeFileAtomicSync(SOURCE_ORGANIZATION_FILE, JSON.stringify(valid, null, "\t") + "\n");
 			removeLeftoverTemps(SOURCE_ORGANIZATION_FILE); // crash leftovers could still place deleted sources
-			emit("sources-changed", {}); // after the write, and after the graph transaction commits
 		};
-		// Inside GraphStore.transact the write and its event wait for commit.
-		if (!deferWrite(PENDING_KEY, valid, commit)) commit();
+		const announce = () => emit("sources-changed", {});
+		// Inside GraphStore.transact the write waits for commit and the event for the whole commit.
+		if (deferWrite(PENDING_KEY, valid, commit, announce)) return;
+		commit();
+		announce();
 	},
 };

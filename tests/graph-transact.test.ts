@@ -215,6 +215,40 @@ describe("GraphStore.transact (file adapter)", () => {
 			assert.deepEqual(ids(), ["a"]);
 		});
 
+		it("the event fires after the whole commit: a listener sees every ledger op, and a failed flush emits nothing", () => {
+			let seen: string[] | null = null;
+			const off = subscribe((e) => { if (e.type === "sources-changed") seen = ids(); });
+			try {
+				events = 0;
+				graphStore.transact("t", () => {
+					sourceOrganizationStore.write(org("first")); // the org write comes BEFORE the append
+					graphStore.appendNode(node("late"));
+				});
+				assert.deepEqual(seen, ["late"], "listener at emit time reads the committed ledger");
+				// a later op fails at flush: transact throws and no event was sent
+				events = 0;
+				fs.mkdirSync(SOURCES_FILE, { recursive: true }); // sources.json is now a directory: its flush op throws
+				try {
+					assert.throws(() => graphStore.transact("t", () => {
+						sourceOrganizationStore.write(org("second"));
+						graphStore.upsertSource(source("boom"));
+					}));
+				} finally { fs.rmSync(SOURCES_FILE, { recursive: true, force: true }); }
+				assert.equal(events, 0);
+			} finally { off(); }
+		});
+
+		it("a caller mutating the state after write cannot change what commits", () => {
+			const state = org("snap");
+			graphStore.transact("t", () => {
+				sourceOrganizationStore.write(state);
+				state.folders[0]!.name = "mutated";
+				assert.equal(sourceOrganizationStore.read().folders[0]!.name, "snap");
+			});
+			assert.equal(sourceOrganizationStore.read().folders[0]!.name, "snap");
+			assert.match(bytes(SOURCE_ORGANIZATION_FILE)!, /snap/);
+		});
+
 		it("a bare write still writes and emits immediately", () => {
 			sourceOrganizationStore.write(org("bare"));
 			assert.match(bytes(SOURCE_ORGANIZATION_FILE)!, /bare/);
