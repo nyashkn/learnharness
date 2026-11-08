@@ -141,7 +141,11 @@ export interface GraphStore {
 	 *  still rolls back. `label` names the unit (commit message for versioned
 	 *  adapters). Positions and render settings stay outside the transaction.
 	 *  The bare source writes (`upsertSource`, `appendSourceUsage`,
-	 *  `deleteSources`) wrap themselves in `auto:<method>`. */
+	 *  `deleteSources`) wrap themselves in `auto:<method>`. The source-
+	 *  organization write joins an open transaction too: it and its event wait
+	 *  for commit. LIMIT: `fn` must be synchronous. An async `fn` is rolled back
+	 *  and rejected only at its first return; work it does after an `await`
+	 *  runs outside the transaction and is not undone. */
 	transact<T>(label: string, fn: () => T): T;
 }
 

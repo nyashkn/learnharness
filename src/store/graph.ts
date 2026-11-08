@@ -60,12 +60,33 @@ import type { GraphStore } from "../core/ports.ts";
 type Op =
 	| { t: "append"; file: string; record: unknown }
 	| { t: "rewrite"; file: string; records: unknown[] }
-	| { t: "sources"; map: Record<string, NotesSource>; deleting: boolean };
+	| { t: "sources"; map: Record<string, NotesSource>; deleting: boolean }
+	| { t: "deferred"; key: string; value: unknown; flush: () => void };
 interface Txn { ops: Op[]; poisoned: boolean }
 let txn: Txn | null = null;
 
 /** What the record will look like once it has been through disk. */
 const viaDisk = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+/** A sibling adapter's write (source organization) that must commit or roll
+ *  back with the open transaction. True = deferred to commit (the caller does
+ *  nothing more); false = no transaction is open, so write now. `flush` runs
+ *  at commit, in call order, and must do the write and any event emission. */
+export function deferWrite(key: string, value: unknown, flush: () => void): boolean {
+	if (!txn) return false;
+	txn.ops.push({ t: "deferred", key, value: viaDisk(value), flush });
+	return true;
+}
+
+/** The newest pending value for `key` in the open transaction, or undefined. */
+export function pendingWrite(key: string): unknown {
+	if (!txn) return undefined;
+	for (let i = txn.ops.length - 1; i >= 0; i--) {
+		const op = txn.ops[i]!;
+		if (op.t === "deferred" && op.key === key) return viaDisk(op.value);
+	}
+	return undefined;
+}
 
 function isThenable(v: unknown): boolean {
 	return typeof v === "object" && v !== null && typeof (v as { then?: unknown }).then === "function";
@@ -100,6 +121,7 @@ function transact<T>(label: string, fn: () => T): T {
 	for (const op of mine.ops) {
 		if (op.t === "append") appendLine(op.file, op.record);
 		else if (op.t === "rewrite") rewriteFile(op.file, op.records);
+		else if (op.t === "deferred") op.flush();
 		else if (op.deleting) deleteSourceMap(op.map);
 		else writeSourceMap(op.map);
 	}
