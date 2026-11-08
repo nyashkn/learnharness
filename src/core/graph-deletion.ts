@@ -99,6 +99,10 @@ export function deleteChatTraces(graphStore: GraphStore, chatId: string, mode: C
 /** The same provenance rules for a selected batch, with one ledger rewrite
  * rather than reparsing/rewriting the whole graph once per imported file. */
 export function deleteSourcesTraces(graphStore: GraphStore, sourceIds: ReadonlySet<string>, mode: ChatDeleteMode): ChatDeletionStats {
+	return graphStore.transact(`delete sources:${sourceIds.size}`, () => deleteSourcesTracesInTransaction(graphStore, sourceIds, mode));
+}
+
+function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: ReadonlySet<string>, mode: ChatDeleteMode): ChatDeletionStats {
 	if (mode !== "preserve-graph" && mode !== "delete-nodes") {
 		throw new Error(`Unknown deletion mode: ${mode as string}`);
 	}
@@ -295,6 +299,10 @@ function chainLinesOf(graphStore: GraphStore, chainId: string): GraphChain[] {
  * mtimes — the version stamp moves only when something really did).
  */
 export function deleteNodeTraces(graphStore: GraphStore, nodeId: string): NodeDeletionStats | null {
+	return graphStore.transact(`delete node:${nodeId}`, () => deleteNodeTracesInTransaction(graphStore, nodeId));
+}
+
+function deleteNodeTracesInTransaction(graphStore: GraphStore, nodeId: string): NodeDeletionStats | null {
 	const chainLines = graphStore.readChains();
 
 	// The argument branch: an arg_ id names a CHAIN, not a proposition —

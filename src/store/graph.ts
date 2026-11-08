@@ -51,7 +51,91 @@ import type { GraphStore } from "../core/ports.ts";
 
 // ─── JSONL primitives ────────────────────────────────────────────────────────
 
+// ─── transact: the in-memory op log ─────────────────────────────────────────
+// Inside graphStore.transact the write methods push ops here instead of
+// touching disk; reads replay the log over what disk holds (read-your-writes);
+// success flushes the ops in CALL ORDER. No crash atomicity across files —
+// only the SQL adapters get that (architecture CB2 note).
+
+type Op =
+	| { t: "append"; file: string; record: unknown }
+	| { t: "rewrite"; file: string; records: unknown[] }
+	| { t: "sources"; map: Record<string, NotesSource>; deleting: boolean }
+	| { t: "deferred"; key: string; value: unknown; flush: () => void; after?: () => void };
+interface Txn { ops: Op[]; poisoned: boolean }
+let txn: Txn | null = null;
+
+/** What the record will look like once it has been through disk. */
+const viaDisk = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+
+/** A sibling adapter's write (source organization) that must commit or roll
+ *  back with the open transaction. True = deferred to commit (the caller does
+ *  nothing more); false = no transaction is open, so write now. `flush` runs
+ *  at commit, in call order, and does the write only; `after` (events) runs
+ *  once every op has flushed, so a listener sees the whole committed state
+ *  and a failed flush emits nothing. */
+export function deferWrite(key: string, value: unknown, flush: () => void, after?: () => void): boolean {
+	if (!txn) return false;
+	txn.ops.push({ t: "deferred", key, value: viaDisk(value), flush, after });
+	return true;
+}
+
+/** The newest pending value for `key` in the open transaction, or undefined. */
+export function pendingWrite(key: string): unknown {
+	if (!txn) return undefined;
+	for (let i = txn.ops.length - 1; i >= 0; i--) {
+		const op = txn.ops[i]!;
+		if (op.t === "deferred" && op.key === key) return viaDisk(op.value);
+	}
+	return undefined;
+}
+
+function isThenable(v: unknown): boolean {
+	return typeof v === "object" && v !== null && typeof (v as { then?: unknown }).then === "function";
+}
+
+function transact<T>(label: string, fn: () => T): T {
+	const guarded = (): T => {
+		const result = fn();
+		if (isThenable(result)) {
+			(result as unknown as PromiseLike<unknown>).then(undefined, () => {}); // no unhandled rejection from the discarded work
+			throw new TypeError(`GraphStore.transact("${label}"): fn must be synchronous; a returned promise cannot be rolled back`);
+		}
+		return result;
+	};
+	if (txn) { // nested: join the outer; a throw poisons it even if the caller catches
+		try {
+			return guarded();
+		} catch (err) {
+			txn.poisoned = true;
+			throw err;
+		}
+	}
+	const mine: Txn = { ops: [], poisoned: false };
+	txn = mine;
+	let result: T;
+	try {
+		result = guarded();
+		if (mine.poisoned) throw new Error(`GraphStore.transact("${label}"): a nested transact threw, so this one rolls back`);
+	} finally {
+		txn = null; // the flush below writes straight to disk
+	}
+	for (const op of mine.ops) {
+		if (op.t === "append") appendLine(op.file, op.record);
+		else if (op.t === "rewrite") rewriteFile(op.file, op.records);
+		else if (op.t === "deferred") op.flush();
+		else if (op.deleting) deleteSourceMap(op.map);
+		else writeSourceMap(op.map);
+	}
+	for (const op of mine.ops) if (op.t === "deferred") op.after?.();
+	return result;
+}
+
 function appendLine<T>(file: string, record: T): void {
+	if (txn) {
+		txn.ops.push({ t: "append", file, record: viaDisk(record) });
+		return;
+	}
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	ensureGraphFormat(); // the lazy format stamp (graph-format.ts)
 	fs.appendFileSync(file, `${JSON.stringify(record)}\n`, "utf-8");
@@ -87,7 +171,14 @@ const isString = (v: unknown): v is string => typeof v === "string";
 /** Strict shape guards — anything not matching a W4 ledger shape is skipped. */
 function readValid<T>(file: string, isValid: (v: unknown) => v is T): T[] {
 	assertGraphFormat(); // honest refusal on a newer-stamped data dir
-	return readRawLines(file).filter(isValid);
+	let records = readRawLines(file);
+	if (txn) {
+		for (const op of txn.ops) {
+			if (op.t === "append" && op.file === file) records.push(viaDisk(op.record));
+			else if (op.t === "rewrite" && op.file === file) records = op.records.map(viaDisk);
+		}
+	}
+	return records.filter(isValid);
 }
 
 /** Provenance points are (chatId, messageId) pairs — message-granular. */
@@ -167,33 +258,38 @@ export const graphStore: GraphStore = {
 
 	/** Upsert: keeps the existing record's usage log when re-importing. */
 	upsertSource(source: NotesSource): void {
-		const all = readSourceMap();
-		const prev = all[source.id];
-		all[source.id] = prev ? { ...source, extractions: prev.extractions } : source;
-		writeSourceMap(all);
+		transact("auto:upsertSource", () => {
+			const all = readSourceMap();
+			const prev = all[source.id];
+			all[source.id] = prev ? { ...source, extractions: prev.extractions } : source;
+			writeSourceMap(all);
+		});
 	},
 	readSources(): NotesSource[] {
 		return Object.values(readSourceMap());
 	},
 	deleteSources(ids: ReadonlySet<string>): number {
 		if (ids.size === 0) return 0;
-		const all = readSourceMap();
-		let removed = 0;
-		for (const id of ids) if (Object.hasOwn(all, id)) { delete all[id]; removed++; }
-		if (removed === 0) return 0;
-		writeFileAtomicSync(SOURCES_FILE, JSON.stringify(all, null, "\t"));
-		removeLeftoverTemps(SOURCES_FILE); // crash leftovers would still hold the deleted sources
-		return removed;
+		return transact("auto:deleteSources", () => {
+			const all = readSourceMap();
+			let removed = 0;
+			for (const id of ids) if (Object.hasOwn(all, id)) { delete all[id]; removed++; }
+			if (removed === 0) return 0;
+			writeSourceMap(all, true);
+			return removed;
+		});
 	},
 	/** Idempotent per startedAt — same discipline as chats.appendExtractionUsage. */
 	appendSourceUsage(id: string, entry: ExtractionRunUsage): void {
-		const all = readSourceMap();
-		const source = all[id];
-		if (!source) return; // no such source — nothing to bill against
-		source.extractions = source.extractions?.some((r) => r.startedAt === entry.startedAt)
-			? source.extractions
-			: [...(source.extractions ?? []), entry];
-		writeSourceMap(all);
+		transact("auto:appendSourceUsage", () => {
+			const all = readSourceMap();
+			const source = all[id];
+			if (!source) return; // no such source — nothing to bill against
+			source.extractions = source.extractions?.some((r) => r.startedAt === entry.startedAt)
+				? source.extractions
+				: [...(source.extractions ?? []), entry];
+			writeSourceMap(all);
+		});
 	},
 
 	// ── the layout ledger (config.POSITIONS_FILE — a JSON map) ──
@@ -222,16 +318,27 @@ export const graphStore: GraphStore = {
 			checkpoints: LEDGER_FILES.sessions,
 		} as const;
 		for (const [key, records] of Object.entries(next) as [keyof typeof files, unknown[]][]) {
-			const file = files[key];
-			fs.mkdirSync(path.dirname(file), { recursive: true });
-			// JSONL: one record per line, trailing newline — the reader
-			// must see exactly what appendLine would have written.
-			const body = records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : "");
-			writeFileAtomicSync(file, body);
-			removeLeftoverTemps(file); // crash leftovers would still hold the purged records
+			if (txn) txn.ops.push({ t: "rewrite", file: files[key], records: records.map(viaDisk) });
+			else rewriteFile(files[key], records);
 		}
 	},
+
+	transact,
 };
+
+/** JSONL: one record per line, trailing newline — the reader must see
+ *  exactly what appendLine would have written. */
+function rewriteFile(file: string, records: unknown[]): void {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	const body = records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : "");
+	writeFileAtomicSync(file, body);
+	removeLeftoverTemps(file); // crash leftovers would still hold the purged records
+}
+
+function deleteSourceMap(map: Record<string, NotesSource>): void {
+	writeFileAtomicSync(SOURCES_FILE, JSON.stringify(map, null, "\t"));
+	removeLeftoverTemps(SOURCES_FILE); // crash leftovers would still hold the deleted sources
+}
 
 /** positions.json — { positions, updatedAt }. Read-modify-write, NOT
  *  append-only: the settle is a full-graph computation, so it replaces the
@@ -270,6 +377,12 @@ const isPosition = (v: unknown): v is Position =>
  *  the usage log lives inside the record (like a chat's JSON file). */
 function readSourceMap(): Record<string, NotesSource> {
 	assertGraphFormat(); // honest refusal on a newer-stamped data dir
+	if (txn) {
+		for (let i = txn.ops.length - 1; i >= 0; i--) {
+			const op = txn.ops[i]!;
+			if (op.t === "sources") return viaDisk(op.map);
+		}
+	}
 	let raw: string;
 	try {
 		raw = fs.readFileSync(SOURCES_FILE, "utf-8");
@@ -289,7 +402,12 @@ function readSourceMap(): Record<string, NotesSource> {
 	}
 }
 
-function writeSourceMap(map: Record<string, NotesSource>): void {
+function writeSourceMap(map: Record<string, NotesSource>, deleting = false): void {
+	if (txn) {
+		txn.ops.push({ t: "sources", map: viaDisk(map), deleting });
+		return;
+	}
+	if (deleting) return deleteSourceMap(map);
 	fs.mkdirSync(path.dirname(SOURCES_FILE), { recursive: true });
 	ensureGraphFormat(); // the lazy format stamp (graph-format.ts)
 	writeFileAtomicSync(SOURCES_FILE, JSON.stringify(map, null, "\t"), { allowInPlaceFallback: true });
