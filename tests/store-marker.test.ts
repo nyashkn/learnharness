@@ -246,6 +246,21 @@ describe("marker and lock are written on the first write, not before", () => {
 		marker.releaseStoreLock(dir);
 	});
 
+	it("LH_STORAGE is honoured at the first write: a refused choice leaves no marker and no lock (lh-uwy)", () => {
+		const cases: [string, "no-adapter" | "corrupt"][] = [["sqlite", "no-adapter"], ["doltlite", "no-adapter"], ["bogus", "corrupt"]];
+		for (const [value, outcome] of cases) {
+			const dir = fresh();
+			fs.mkdirSync(dir);
+			const old = process.env.LH_STORAGE;
+			process.env.LH_STORAGE = value;
+			try {
+				assert.throws(() => marker.beforeWrite(dir), (e) => outcome === "no-adapter" ? e instanceof marker.NoAdapterError : e instanceof marker.StorageMarkerError, value);
+			} finally { if (old === undefined) delete process.env.LH_STORAGE; else process.env.LH_STORAGE = old; }
+			assert.deepEqual(fs.readdirSync(dir), [], `${value}: the folder is still empty`);
+			assert.equal(marker.holdsStoreLock(dir), false);
+		}
+	});
+
 	it("an existing marker is never rewritten by a write", () => {
 		const dir = fresh();
 		fs.mkdirSync(dir);

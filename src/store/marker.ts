@@ -142,13 +142,15 @@ export function beforeWrite(dataDir: string, lockEnv?: LockEnv): void {
 	const abs = path.resolve(dataDir);
 	const file = markerFile(abs);
 	const existing = readMarker(file); // a newer or corrupt marker refuses the write too
+	// Resolve BEFORE the lock: the lock file makes the folder non-empty, which would hide LH_STORAGE.
+	// A refusal (bad value, no adapter) then leaves neither marker nor lock.
+	const backend = existing === undefined ? resolveBackend(abs) : undefined;
 	if (!holdsStoreLock(abs)) {
 		registry().delete(abs);
 		fs.mkdirSync(abs, { recursive: true });
 		registry().set(abs, { lock: acquireStoreLock(file, lockEnv) });
 	}
-	if (existing === undefined) {
-		const backend = resolveBackend(abs); // a fresh folder honours LH_STORAGE once, here
+	if (backend !== undefined) {
 		writeFileAtomicSync(file, `${JSON.stringify({ backend, layout: CURRENT_LAYOUT }, null, "\t")}\n`, { allowInPlaceFallback: true });
 	}
 }
