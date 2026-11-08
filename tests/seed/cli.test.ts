@@ -315,6 +315,18 @@ describe("scan", () => {
 		const dims = JSON.parse(decisionOf(r, "Alpha concepts")!.rank!.dimensionsJson) as { goal: number };
 		assert.equal(dims.goal, 1.5); // 1 + weight 1 * 0.5
 	});
+	it("goals are redacted: a planted secret and a home path reach neither the wire nor any table", async () => {
+		const r = rig({ items: ALPHA });
+		await r.run("scan", "--goals", `learn rust, key ${SECRET}, notes in /Users/bob/notes`);
+		const goalWire = r.wire.filter((w) => w.includes("learner's goals"));
+		assert.ok(goalWire.length > 0, "the goal question was asked");
+		assert.ok(goalWire.every((w) => w.includes("learn rust")));
+		const all = [dump(r.db), ...r.wire, ...r.prompts, ...r.lines].join("\n");
+		assert.equal(all.includes(SECRET), false);
+		assert.equal(all.includes("ZZZZ1111YYYY2222XXXX3333"), false);
+		assert.equal(all.includes("/Users/bob"), false);
+		assert.equal(all.includes("bob"), false);
+	});
 	it("a single-evidence proposal is skipped in code, with no decision call", async () => {
 		const r = rig({ items: [ALPHA[0]!] });
 		await r.run("scan");

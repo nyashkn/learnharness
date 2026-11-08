@@ -5,6 +5,7 @@ import { extractDraft, type ProposalDraft } from "./extract";
 import type { JudgeOutcome, JudgePort, JudgeRequest, Question } from "./judge/port";
 import { mergeDrafts, type Aligner } from "./proposals";
 import { rankProposal } from "./rank";
+import { redact } from "./redact";
 import { findRepeats } from "./signals";
 import { harvest } from "./sources/harvest";
 import type { Decision, ReviewRow, SeedStore, Verdict } from "./store";
@@ -77,7 +78,7 @@ export function parseCommand(rawArgv: readonly string[]): Parsed {
 			return noArgs({ kind: "propose" });
 		case "scan": {
 			if (rest.length === 0) return { kind: "scan", goals: null };
-			if (rest.length === 2 && rest[0] === "--goals" && rest[1]!.trim() !== "") return { kind: "scan", goals: rest[1]! };
+			if (rest.length === 2 && rest[0] === "--goals" && rest[1]!.trim() !== "") return { kind: "scan", goals: redact(rest[1]!) };
 			return { kind: "error", message: 'scan takes only --goals "<text>"' };
 		}
 		case "label": {
