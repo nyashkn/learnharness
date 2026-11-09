@@ -13,7 +13,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { PATHS } from "../config.ts";
 import { HELP, parseCommand, runCli, type SeedPolicy } from "../src/seed/cli.ts";
-import { canonProject, createAllowEgress } from "../src/seed/egress.ts";
+import { canonProject, createAllowEgress, matchableProject } from "../src/seed/egress.ts";
 import { createConfiguredLlmJudge } from "../src/seed/judge/configured-llm.ts";
 import { createJevApiJudge, type ProfileName } from "../src/seed/judge/jev-api.ts";
 import type { JudgePort } from "../src/seed/judge/port.ts";
@@ -54,13 +54,13 @@ export function loadSeedConfig(file: string, read: (file: string) => string = (f
 }
 
 /**
- * Default-on egress holds with an empty opt-out list. With any entry, a null project is refused:
- * Signet entities and cwd-less rows carry no provenance, so we cannot prove they are not opted-out work.
+ * Default-on egress holds with an empty opt-out list. With any entry, a project with no usable provenance is refused:
+ * Signet entities, cwd-less rows and slugs that redaction swallowed cannot be proven not to be opted-out work.
  */
 export function composeAllowEgress(optOut: readonly string[]): AllowEgress {
 	const inner = createAllowEgress(optOut);
 	const listed = optOut.some((entry) => canonProject(entry) !== "");
-	return (project) => (project === null || canonProject(project) === "" ? !listed : inner(project));
+	return (project) => (matchableProject(project) === null ? !listed : inner(project));
 }
 
 export function parseOptOut(text: string): string[] {

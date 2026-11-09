@@ -208,6 +208,29 @@ describe("opt-out entries meet redacted projects (lh-an0)", () => {
 	});
 });
 
+describe("a project that redaction swallowed counts as no provenance (lh-3p3)", () => {
+	// synthetic slug from lh-3p3: long, with a digit, entropy over the split-run threshold
+	const SLUG = "-Users-alice-RK-acme-2025-work-learn-projects-Mobile-Data-payments-RK-frontend-work-infra-dev-Initech";
+	const reach = (r: ReturnType<typeof rig>, marker: string) => r.wire.some((w) => w.includes(marker)) || r.prompts.some((p) => p.includes(marker));
+	it("with an opt-out list, its text reaches neither the wire nor an LLM prompt", async () => {
+		const r = rig({ items: [raw("o1", "why does ZQXSLUGMARK alpha fail", { project: SLUG }), ...ALPHA], optOut: ["acme"] });
+		assert.equal(await r.run("scan"), 0);
+		assert.ok(r.store.items().some((i) => i.project?.includes("[redacted:")), "precondition: the slug was swallowed, else this test proves nothing");
+		assert.equal(reach(r, "ZQXSLUGMARK"), false);
+		assert.ok(r.wire.length > 0, "unrelated items still go out");
+	});
+	it("without a list it is allowed, like a null project", async () => {
+		const r = rig({ items: [raw("o1", "why does ZQXSLUGMARK alpha fail", { project: SLUG }), ...ALPHA], optOut: [] });
+		await r.run("scan");
+		assert.equal(reach(r, "ZQXSLUGMARK"), true);
+	});
+	it("a stored placeholder project is refused once a list exists", () => {
+		assert.equal(composeAllowEgress(["acme"])("~-[redacted:secret]"), false);
+		assert.equal(composeAllowEgress(["acme"])("~/work/[redacted:email]/app"), false);
+		assert.equal(composeAllowEgress([])("~-[redacted:secret]"), true);
+	});
+});
+
 // ---- redaction ------------------------------------------------------------------------------------------------------
 
 describe("redaction", () => {
