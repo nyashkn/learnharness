@@ -62,7 +62,9 @@ function spy(db: SqlDriver): Spy {
 	return { ...db, seals, seal: (m: string) => (seals.push(m), `h${seals.length}`) };
 }
 
-const opts = (count: number, failAt: number | null = null, extra: Partial<MigrateOptions> = {}): MigrateOptions => ({ ...base, rungs: fakeRungs(count, failAt), ...extra });
+/** R5: an upgrade needs a backupPath, so every helper supplies one unless a test says otherwise. */
+const backupIn = (f: number) => path.join(dir, `bak-${n++}-v${f}.sqlite`);
+const opts = (count: number, failAt: number | null = null, extra: Partial<MigrateOptions> = {}): MigrateOptions => ({ ...base, rungs: fakeRungs(count, failAt), backupPath: backupIn, ...extra });
 const hasTable = (db: SqlDriver, name: string) => db.get("SELECT 1 AS x FROM sqlite_schema WHERE type='table' AND name=?", name) !== undefined;
 const metaRows = (db: SqlDriver) => (hasTable(db, "lh_meta") ? db.all<{ key: string; value: string }>("SELECT key, value FROM lh_meta ORDER BY key") : []);
 const meta = (db: SqlDriver) => Object.fromEntries(metaRows(db).map((r) => [r.key, r.value]));
@@ -296,6 +298,15 @@ describe("test 3: newer or malformed is refused before any write", () => {
 		refused(dropMeta("schema_version"), "malformed-meta");
 		refused(dropMeta("line_format"), "malformed-meta");
 	});
+	test("a stored store missing revision or store_id is malformed-meta, never silently accepted (lh-bhc c)", () => {
+		refused(dropMeta("revision"), "malformed-meta");
+		refused(dropMeta("store_id"), "malformed-meta");
+		refused(setMeta("store_id", ""), "malformed-meta");
+		fc.assert(
+			fc.property(fc.constantFrom("", "abc", "-1", "1.5", "01", " 2", "NaN", "1e2", "0x2"), (v) => refused(setMeta("revision", v), "malformed-meta")),
+			{ numRuns: 20 },
+		);
+	});
 	test("a store of another kind", () => {
 		refused(setMeta("store_kind", "seeds"), "wrong-kind");
 		refused(dropMeta("store_kind"), "wrong-kind");
@@ -343,7 +354,7 @@ describe("test 5: dense, ordered rungs", () => {
 describe("R5: backup before upgrade", () => {
 	const lhOpts = (count: number, extra: Partial<MigrateOptions>) => opts(count, null, extra);
 
-	test("sqlite upgrade leaves a VACUUM INTO copy at the version being left; fresh, reopen and no-callback take none", () => {
+	test("sqlite upgrade leaves a VACUUM INTO copy at the version being left; fresh and reopen take none", () => {
 		fc.assert(
 			fc.property(fc.integer({ min: 2, max: 5 }), fc.nat(), (top, pick) => {
 				const from = (pick % (top - 1)) + 1;
@@ -370,6 +381,28 @@ describe("R5: backup before upgrade", () => {
 				assert.equal(copy.get<{ v: string }>("SELECT v FROM t1")?.v, "x");
 				assert.equal(hasTable(copy, `t${from + 1}`), false);
 				copy.close();
+			}),
+			{ numRuns: 20 },
+		);
+	});
+
+	test("an upgrade of an existing sqlite store with NO backupPath throws before any write; fresh create and reopen need none; DoltLite needs none (lh-bhc f)", () => {
+		fc.assert(
+			fc.property(fc.integer({ min: 2, max: 5 }), fc.nat(), (top, pick) => {
+				const from = (pick % (top - 1)) + 1;
+				const db = open(fresh());
+				migrate(db, opts(from, null, { backupPath: undefined })); // fresh: from 0, no backup needed
+				migrate(db, opts(from, null, { backupPath: undefined })); // reopen at top
+				const before = state(db);
+				const sealed = spy(db);
+				assert.throws(() => migrate(sealed, opts(top, null, { backupPath: undefined })), /needs a backupPath/);
+				assert.equal(state(db), before, "nothing written");
+				assert.equal(sealed.seals.length, 0);
+				assert.equal(hasTable(db, `t${from + 1}`), false);
+				const dolt = { ...db, engine: "doltlite" as const, head: () => "h" };
+				migrate(dolt, opts(top, null, { backupPath: undefined })); // history is the backup there
+				assert.equal(versionOf(db), top);
+				db.close();
 			}),
 			{ numRuns: 20 },
 		);
@@ -406,7 +439,7 @@ describe("R5: backup before upgrade", () => {
 
 // ---- real graph ladder ---------------------------------------------------------------------------
 
-const graphOpts = (count = graphRungs.length, extra: Partial<MigrateOptions> = {}): MigrateOptions => ({ ...graphMigration, rungs: graphRungs.slice(0, count), lhVersion: "test", ...extra });
+const graphOpts = (count = graphRungs.length, extra: Partial<MigrateOptions> = {}): MigrateOptions => ({ ...graphMigration, rungs: graphRungs.slice(0, count), lhVersion: "test", backupPath: backupIn, ...extra });
 
 describe("test 1: fresh equals snapshot.sql", () => {
 	const snapshot = fs.readFileSync(path.join(GRAPH_DIR, "snapshot.sql"), "utf8");

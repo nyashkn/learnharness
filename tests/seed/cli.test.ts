@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -720,6 +720,23 @@ describe("scripts/seed main", () => {
 		assert.equal(code, 1);
 		assert.ok(s.lines.some((l) => l.includes("refused")));
 		assert.equal(s.calls.includes("buildSources"), false);
+	});
+	it("an existing older seeds.sqlite upgrades through main and leaves its R5 backup", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "lh-seed-upgrade-"));
+		try {
+			const file = join(dir, "seeds.sqlite");
+			const v1 = openNodeSqlite(file);
+			migrate(v1, { ...seedMigration, rungs: seedMigration.rungs.slice(0, 1), lhVersion: "t" });
+			v1.close();
+			const code = await main(["list"], { ...spies().f, dataDir: dir, openStore: openNodeSqlite, readOptOut: async () => [] });
+			assert.equal(code, 0);
+			const after = openNodeSqlite(file);
+			assert.equal(after.get<{ value: string }>("SELECT value FROM lh_meta WHERE key = 'schema_version'")?.value, String(seedMigration.rungs.length));
+			after.close();
+			assert.equal(readdirSync(dir).filter((f) => /^seeds\.bak-v1-\d+\.sqlite$/.test(f)).length, 1, "the pre-upgrade backup");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 	it("an unreadable opt-out list aborts before the store opens", async () => {
 		const s = spies();

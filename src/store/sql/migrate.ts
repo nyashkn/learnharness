@@ -14,7 +14,7 @@ export interface MigrateOptions {
 	lhVersion: string;
 	/** Newest line format this build reads. Omit for kinds without one (seeds). */
 	lineFormat?: number;
-	/** sqlite only: destination of the pre-upgrade `VACUUM INTO`, given the version being left. */
+	/** sqlite only, REQUIRED for an upgrade of an existing store (R5: migrate throws before any write without it). Destination of the pre-upgrade `VACUUM INTO`, given the version being left. */
 	backupPath?: (fromVersion: number) => string;
 	/** DoltLite: receives the HEAD hash recorded before an upgrade. */
 	log?: (message: string) => void;
@@ -82,6 +82,9 @@ function checkStore(db: SqlDriver, opts: MigrateOptions, top: number): number {
 			throw new MigrationRefusedError("newer-line-format", `line_format ${format} is newer than this build (${opts.lineFormat})`);
 		}
 	}
+	// After the newer checks: a newer build may store these differently. Every rung's writeMeta sets them, so a store without them was not made by this runner.
+	if (!/^(0|[1-9]\d{0,14})$/.test(meta.get("revision") ?? "")) throw new MigrationRefusedError("malformed-meta", `lh_meta.revision is ${meta.has("revision") ? `malformed (${JSON.stringify(meta.get("revision"))})` : "missing"}`);
+	if (!meta.get("store_id")) throw new MigrationRefusedError("malformed-meta", "lh_meta.store_id is missing");
 	return version;
 }
 
@@ -107,6 +110,13 @@ function checkRungs(rungs: readonly Rung[]): void {
 	});
 }
 
+/** True when `migrate` would write: no lh_meta yet, or a stored version below the top rung. A newer or malformed store is false (migrate refuses it). Never writes. */
+export function needsMigration(db: SqlDriver, rungs: readonly Rung[]): boolean {
+	if (!hasMeta(db)) return true;
+	const version = Number(readMeta(db).get("schema_version"));
+	return version < rungs.length;
+}
+
 /** Brings the store to the top rung. Refusals (R3) happen before any write. */
 export function migrate(db: SqlDriver, opts: MigrateOptions): MigrateResult {
 	checkRungs(opts.rungs);
@@ -116,6 +126,7 @@ export function migrate(db: SqlDriver, opts: MigrateOptions): MigrateResult {
 	if (from > 0 && from < top) {
 		if (db.engine === "doltlite") opts.log?.(`migrate ${opts.kind} from v${from}: HEAD ${db.head()}`);
 		else if (opts.backupPath) db.exec(`VACUUM INTO '${opts.backupPath(from).replaceAll("'", "''")}'`);
+		else throw new Error(`migrate ${opts.kind}: upgrading from v${from} to v${top} needs a backupPath (R5: no upgrade without a backup)`);
 	}
 
 	const applied: number[] = [];

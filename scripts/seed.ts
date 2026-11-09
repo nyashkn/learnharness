@@ -156,7 +156,7 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 	let closeSources = () => {};
 	try {
 		try {
-			migrate(db, { ...seedMigration, lhVersion: f.lhVersion() });
+			migrate(db, { ...seedMigration, lhVersion: f.lhVersion(), backupPath: (from) => path.join(f.dataDir, `seeds.bak-v${from}-${Date.now()}.sqlite`) });
 		} catch (error) {
 			if (error instanceof MigrationRefusedError) {
 				f.out(`seeds.sqlite refused: ${error.message}`);
