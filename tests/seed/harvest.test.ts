@@ -332,6 +332,33 @@ describe("read-only adapters", () => {
 		assert.deepEqual(out.map((i) => i.textRedacted), ["common\na concept"]);
 	});
 
+	it("session time comes from the session, not from when a derived row was written (lh-f6o)", async () => {
+		const OLD_S = 1_750_000_000; // 2025-06-15, seconds
+		const NEW_S = 1_760_000_000; // 2025-10-09, seconds
+		const sql = sqliteDb((run) => {
+			run("INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (1, 'first prompt', ?, '/w', 'sx')", OLD_S - 60);
+			run("INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (2, 'last prompt', ?, '/w', 'sx')", OLD_S);
+			run("INSERT INTO session_recaps (id, session_id, cwd, recap, created_at) VALUES (1, 'sx', '/w', 'recap of sx', ?)", NEW_S);
+			run("INSERT INTO session_recaps (id, session_id, cwd, recap, created_at) VALUES (2, 'sy', '/w', 'recap with no history', ?)", NEW_S);
+			run("INSERT INTO threads (id, updated_at, rollout_path, cwd, source_kind) VALUES ('t1', ?, '/r', '/w', 'cli')", NEW_S);
+			run("INSERT INTO stage1_outputs (thread_id, source_updated_at, raw_memory, rollout_summary, generated_at) VALUES ('t1', ?, 'x', 'summary of t1', ?)", OLD_S, NEW_S);
+			run("INSERT INTO session_summaries (id, project, kind, content, earliest_at, latest_at, session_key, created_at) VALUES ('x1', '/w', 'k', 'signet summary', '2025-06-01T00:00:00.000Z', '2025-06-15T00:00:00.000Z', 'k1', '2025-10-09T00:00:00.000Z')");
+			run("INSERT INTO entities (id, name, description, updated_at, mentions) VALUES ('e1', 'concept', 'all-time', '2025-10-09T00:00:00.000Z', 9)");
+		});
+		const files = fakeFiles({ "/mem/proj/learned.md": "an all-time rollup" });
+		const out = await collect([ompRecapSource(sql.db), ompMemorySource({ agentDb: sql.db, files, memoriesDir: "/mem" }), signetSummarySource({ db: sql.db, minMentions: 3 })]);
+		sql.close();
+		const byText = new Map(out.map((i) => [i.textRedacted, (i as { sessionAt?: string | null }).sessionAt]));
+		assert.deepEqual(Object.fromEntries(byText), {
+			"recap of sx": "2025-06-15T15:06:40.000Z",
+			"recap with no history": null,
+			"summary of t1": "2025-06-15T15:06:40.000Z",
+			"an all-time rollup": null,
+			"signet summary": "2025-06-15T00:00:00.000Z",
+			"concept\nall-time": null,
+		});
+	});
+
 	it("raw_memory is never selected: a marker planted there reaches no output", async () => {
 		const MARK = "RAWMEMORY_MARKER_w4p";
 		const { sources, close } = allSources("explain eigenvalues", "/work/a", "plain-slug", MARK);

@@ -34,7 +34,8 @@ export function signetSummarySource(io: { db: ReadOnlyDb; minMentions: number })
 					continue;
 				}
 				if (row.content.trim() === "") continue;
-				yield { source: "signet-summary", nativeId: `summary:${row.id}`, project: row.project, sessionId: row.session_key, at, text: row.content };
+				// latest_at is the session's own last time (created_at is the write time)
+				yield { source: "signet-summary", nativeId: `summary:${row.id}`, project: row.project, sessionId: row.session_key, at, sessionAt: at, text: row.content };
 			}
 			const entities = await io.db.all(
 				"SELECT id, name, description, updated_at, mentions FROM entities WHERE mentions >= ? ORDER BY updated_at",
@@ -48,7 +49,8 @@ export function signetSummarySource(io: { db: ReadOnlyDb; minMentions: number })
 				}
 				const text = row.description ? `${row.name}\n${row.description}` : row.name;
 				if (text.trim() === "") continue;
-				yield { source: "signet-summary", nativeId: `entity:${row.id}`, project: null, sessionId: null, at, text };
+				// an entity accumulates across all sessions: no session time
+				yield { source: "signet-summary", nativeId: `entity:${row.id}`, project: null, sessionId: null, at, sessionAt: null, text };
 			}
 		},
 	};

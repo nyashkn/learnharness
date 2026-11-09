@@ -275,6 +275,9 @@ const DECISION_INSTRUCTIONS =
 /** The judge could not run because no token is configured: nothing else will work either. */
 class NoTokenError extends Error {}
 
+/** A seeding scan stops on the first judge or extractor failure (DECISION lh-iqc): an outage must not keep sending candidates. */
+class StopError extends Error {}
+
 const noulOf = (o: JudgeOutcome & { kind: "answered" }, id: string): number => {
 	const a = o.answers[id];
 	return a?.kind === "noul" ? a.probability : Number.NaN;
@@ -294,22 +297,26 @@ async function scan(deps: CliDeps, goals: string | null, since: string | null): 
 	const ask = async (req: JudgeRequest): Promise<JudgeOutcome> => {
 		const o = await deps.judge.ask(req);
 		if (o.kind === "no-decision" && o.reason === "no-token") throw new NoTokenError();
+		// egress-denied is the opt-out working, not a failure
+		if (o.kind === "no-decision" && o.reason !== "egress-denied") throw new StopError(`the judge gave no decision (${o.reason})`);
 		return o;
 	};
 
 	try {
-		// 1. harvest. With --since, an older item is neither stored nor, if an earlier run stored it, used; an unreadable time counts as older.
+		// 1. harvest. With --since, only items whose session time is on or after the date take part: one with no session time
+		// (an all-time rollup) or an unreadable one is left out, and so is anything an earlier run stored, which is not dated here.
 		const sinceMs = since === null ? null : Date.parse(since);
-		const inRange = (item: HarvestItem) => sinceMs === null || Date.parse(item.at) >= sinceMs;
 		const harvested: HarvestItem[] = [];
 		let older = 0;
 		for await (const item of harvest(deps.sources)) {
-			if (inRange(item)) harvested.push(item);
+			if (sinceMs === null || (item.sessionAt !== null && Date.parse(item.sessionAt) >= sinceMs)) harvested.push(item);
 			else older++;
 		}
 		store.upsertItems(harvested);
 		for (const s of deps.sources) if (s.stats.skipped > 0) out(`${s.name}: skipped ${s.stats.skipped} malformed rows`);
-		if (since !== null) out(`since ${since.slice(0, 10)}: ${older} older items not read in`);
+		if (since !== null) out(`since ${since.slice(0, 10)}: ${older} items older or without a session time not read in`);
+		const thisRun = new Set(harvested.map((i) => i.id));
+		const inRange = (item: HarvestItem) => sinceMs === null || thisRun.has(item.id);
 		const stored = store.items().filter(inRange);
 		store.markRepeats([...findRepeats(stored.map((i) => ({ id: i.id, sessionId: i.sessionId, text: i.textRedacted })))]);
 		const items = store.items().filter(inRange);
@@ -354,14 +361,14 @@ async function scan(deps: CliDeps, goals: string | null, since: string | null): 
 			try {
 				reply = await llm.complete(prompt, TopicsSchema);
 			} catch {
-				for (const item of batch) note("topic-llm-failed", item.id);
-				continue;
+				throw new StopError("the extractor failed while naming topics");
 			}
-			if (!Value.Check(TopicsSchema, reply)) {
-				for (const item of batch) note("topic-invalid-output", item.id);
-				continue;
+			if (!Value.Check(TopicsSchema, reply)) throw new StopError("the extractor's topic reply did not match the schema");
+			// model-written text goes to the judge as choice options, so it gets the same redact and clip as harvested text
+			for (const raw of reply.topics) {
+				const t = clipSnippet(redact(raw).trim()).trim();
+				if (t !== "" && !topics.has(t.toLowerCase())) topics.set(t.toLowerCase(), t);
 			}
-			for (const t of reply.topics) if (t.trim() !== "" && !topics.has(t.trim().toLowerCase())) topics.set(t.trim().toLowerCase(), t.trim());
 		}
 		const topicList = [...topics.values()];
 		const clusters = new Map<string, HarvestItem[]>();
@@ -394,7 +401,8 @@ async function scan(deps: CliDeps, goals: string | null, since: string | null): 
 		for (const key of [...clusters.keys()].sort()) {
 			const result = await extractDraft(clusters.get(key)!, { llm, allowEgress });
 			if (result.kind === "draft") drafts.push(result.draft);
-			else reviews.push({ proposalId: null, reason: `extract-${result.reason}`, detail: topicOf(topicList, key) });
+			else if (result.reason === "egress-denied") reviews.push({ proposalId: null, reason: `extract-${result.reason}`, detail: topicOf(topicList, key) });
+			else throw new StopError(`the extractor failed while drafting a title (${result.reason})`);
 		}
 
 		// 5. align and merge
@@ -566,6 +574,10 @@ async function scan(deps: CliDeps, goals: string | null, since: string | null): 
 	} catch (error) {
 		if (error instanceof NoTokenError) {
 			out("scan stopped: no judge token is configured (set the profile's token variable, or use --judge configured-llm). Nothing further was written.");
+			return 1;
+		}
+		if (error instanceof StopError) {
+			out(`scan stopped: ${error.message}. Nothing more was sent; this run's results are incomplete.`);
 			return 1;
 		}
 		throw error;

@@ -20,6 +20,8 @@ export interface RawItem {
 	sessionId: string | null;
 	/** ISO-8601 UTC. */
 	at: string;
+	/** ISO-8601 UTC time of the session the text came from, or null when the row has none (an all-time rollup). scan --since filters on this, never on `at`, which for a derived row is when it was written. */
+	sessionAt: string | null;
 	text: string;
 }
 

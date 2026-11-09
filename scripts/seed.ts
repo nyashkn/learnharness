@@ -15,7 +15,7 @@ import { PATHS } from "../config.ts";
 import { HELP, parseCommand, runCli, type SeedPolicy } from "../src/seed/cli.ts";
 import { canonProject, createAllowEgress, matchableProject } from "../src/seed/egress.ts";
 import { createConfiguredLlmJudge } from "../src/seed/judge/configured-llm.ts";
-import { createJevApiJudge, type ProfileName } from "../src/seed/judge/jev-api.ts";
+import { createJevApiJudge, PROFILES, type ProfileName } from "../src/seed/judge/jev-api.ts";
 import type { JudgePort } from "../src/seed/judge/port.ts";
 import { claudeHistorySource } from "../src/seed/sources/claude-history.ts";
 import { ompHistorySource, ompMemorySource, ompRecapSource } from "../src/seed/sources/omp.ts";
@@ -195,6 +195,24 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 				? createConfiguredLlmJudge({ llm, allowEgress, cache: store.judgmentCache(), now: f.now })
 				: createJevApiJudge({ profile: name as ProfileName, allowEgress, cache: store.judgmentCache(), fetch: f.fetch, env: f.env, now: f.now });
 
+		// Checked before the first send (DECISION lh-iqc): a missing key or model must stop the run, not route every candidate to review.
+		if (parsed.kind === "scan") {
+			if (name !== "configured-llm") {
+				const profile = PROFILES[name as ProfileName];
+				const missing = [...(profile.tokenVars.some((v) => f.env(v)) ? [] : [profile.tokenVars.join(" or ")]), ...profile.configVars.filter((v) => !f.env(v))];
+				if (missing.length > 0) {
+					f.out(`scan stopped before sending anything: the ${name} judge needs ${missing.join(", ")} in the environment`);
+					return 1;
+				}
+			}
+			try {
+				await (llmPromise ??= f.buildLlm(policy.extractor));
+			} catch (error) {
+				f.out(`scan stopped before sending anything: ${error instanceof LlmUnavailableError ? error.message : "the extractor could not be set up"}`);
+				return 1;
+			}
+		}
+
 		let sources: SessionSource[] = [];
 		if (parsed.kind === "scan") {
 			const built = f.buildSources({ minMentions: policy.minMentions, out: f.out });
@@ -222,7 +240,7 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 
 // ---- real factories ------------------------------------------------------------------------------------------------
 
-class LlmUnavailableError extends Error {}
+export class LlmUnavailableError extends Error {}
 
 function defaultFactories(): Factories {
 	return {
@@ -289,13 +307,32 @@ function realSources({ minMentions, out }: { minMentions: number; out: (line: st
 	return { sources, close: () => closers.forEach((close) => close()) };
 }
 
-/** Existing structured-output path: the app's own submit-agent (one TypeBox tool call), on seed-config.json's extractor or else the extractor role's configured model. */
-async function realLlm(extractor: ModelRef | undefined): Promise<LlmPort> {
-	const { piEngineForSpec } = await import("../src/agent/models.ts");
-	const { runSubmitAgent } = await import("../src/agent/subagents/submit-agent.ts");
-	const spec = extractor ?? (await settingsExtractor());
+export interface LlmDeps {
+	/** Read only when seed-config.json names no extractor. */
+	settingsExtractor: () => Promise<ModelRef | undefined>;
+	env: Record<string, string | undefined>;
+}
+
+/**
+ * Existing structured-output path: the app's own submit-agent (one TypeBox tool call), on seed-config.json's extractor or else
+ * the extractor role's configured model. The model, its key and its endpoint variables are checked here, before any send.
+ */
+export async function realLlm(extractor: ModelRef | undefined, deps: LlmDeps = { settingsExtractor, env: process.env }): Promise<LlmPort> {
+	const spec = extractor ?? (await deps.settingsExtractor());
 	if (!spec) throw new LlmUnavailableError("no model is configured for the extractor role: set a model slot in Settings or an extractor in scripts/seed-config.json, then rerun");
-	const engine = piEngineForSpec(spec);
+	const { piEngineForSpec } = await import("../src/agent/models.ts");
+	let engine: ReturnType<typeof piEngineForSpec>;
+	try {
+		engine = piEngineForSpec(spec);
+	} catch {
+		throw new LlmUnavailableError(`the extractor model ${spec.provider}/${spec.id} is not in the model catalog`);
+	}
+	const env = Object.fromEntries(Object.entries(deps.env).filter((e): e is [string, string] => typeof e[1] === "string" && e[1] !== ""));
+	const { getEnvApiKey } = await import("@earendil-works/pi-ai/compat");
+	if (!getEnvApiKey(spec.provider, env)) throw new LlmUnavailableError(`no API key for ${spec.provider} in the environment`);
+	const unset = [...engine.model.baseUrl.matchAll(/\{([A-Z0-9_]+)\}/g)].map((m) => m[1]!).filter((name) => !env[name]);
+	if (unset.length > 0) throw new LlmUnavailableError(`the extractor endpoint needs ${unset.join(", ")} in the environment`);
+	const { runSubmitAgent } = await import("../src/agent/subagents/submit-agent.ts");
 	return {
 		complete: <S extends TSchema>(prompt: string, schema: S) =>
 			runSubmitAgent<Static<S>>({

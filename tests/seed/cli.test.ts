@@ -12,14 +12,15 @@ import type { HarvestItem, LlmPort, RawItem, SessionSource } from "../../src/see
 import { openNodeSqlite } from "../../src/store/sql/drivers/node-sqlite";
 import { MigrationRefusedError, migrate } from "../../src/store/sql/migrate";
 import { seedMigration } from "../../src/store/sql/migrations/seeds/index";
-import { composeAllowEgress, loadSeedConfig, main, parseOptOut, readOptOut } from "../../scripts/seed";
+import { composeAllowEgress, LlmUnavailableError, loadSeedConfig, main, parseOptOut, readOptOut, realLlm } from "../../scripts/seed";
+import { redact } from "../../src/seed/redact";
 
 const NOW = "2026-11-08T00:00:00.000Z";
 const RECENT = "2026-11-01T00:00:00.000Z";
 const SEED_POLICY = { calibrated: true, recencyHalfLifeDays: 60, goalWeight: 1, minMentions: 50, learnableTau: 0.5 };
 const SECRET = "sk-ant-api03-ZZZZ1111YYYY2222XXXX3333";
 
-const raw = (n: string, text: string, over: Partial<RawItem> = {}): RawItem => ({ source: "claude-history", nativeId: n, project: "/work/app", sessionId: `s-${n}`, at: RECENT, text, ...over });
+const raw = (n: string, text: string, over: Partial<RawItem> = {}): RawItem => ({ source: "claude-history", nativeId: n, project: "/work/app", sessionId: `s-${n}`, at: over.at ?? RECENT, sessionAt: over.at ?? RECENT, text, ...over });
 const ALPHA = [raw("a1", "why does alpha borrowing fail"), raw("a2", "why is alpha lifetime confusing")];
 const BETA = [raw("b1", "why does beta hashing collide"), raw("b2", "why is beta salting needed")];
 
@@ -402,85 +403,78 @@ describe("scan", () => {
 	});
 });
 
-describe("fail closed: no decision at each step routes to review, never to zero", () => {
-	it("screen: items are counted in one aggregate row and nothing is proposed", async () => {
-		const r = rig({ items: ALPHA });
-		r.knobs.fail.add("concept");
-		await r.run("scan");
-		assert.equal(r.store.loadProposals().length, 0);
-		assert.equal(r.store.reviews().filter((x) => x.reason === "screen-transport").length, 1);
-	});
-	it("topic choice", async () => {
-		const r = rig({ items: ALPHA });
-		r.knobs.fail.add("topic");
-		await r.run("scan");
-		assert.equal(r.store.loadProposals().length, 0);
-		assert.equal(r.store.reviews().filter((x) => x.reason === "topic-transport").length, 1);
-	});
-	it("alignment: an undecided pair appends nothing", async () => {
+describe("a scan stops on the first failure (lh-iqc)", () => {
+	const STOPPED = "scan stopped: the judge gave no decision (transport). Nothing more was sent; this run's results are incomplete.";
+	// how many judge requests asked the question with this id
+	const asked = (r: ReturnType<typeof rig>, id: string) => r.wire.filter((w) => Object.hasOwn((JSON.parse(w) as { input: { questions: object } }).input.questions, id)).length;
+	const cases: ReadonlyArray<readonly [step: string, id: string, items: RawItem[], argv: string[]]> = [
+		["screen", "concept", ALPHA, []],
+		["topic choice", "topic", ALPHA, []],
+		["goal relevance", "goal", ALPHA, ["--goals", "learn rust"]],
+		["decide", "decision", ALPHA, []],
+		["verify", "confused", ALPHA, []],
+		["prerequisites", "ab", [...ALPHA, ...BETA], []],
+	];
+	for (const [step, id, items, argv] of cases) {
+		it(`${step}: a judge 500 exits 1 and nothing more is asked`, async () => {
+			const r = rig({ items });
+			r.knobs.fail.add(id);
+			assert.equal(await r.run("scan", ...argv), 1);
+			assert.ok(r.lines.includes(STOPPED));
+			assert.equal(asked(r, id), 1, "the failing question is asked once, then the scan stops");
+			assert.equal(r.wire.length, r.wire.findIndex((w) => Object.hasOwn((JSON.parse(w) as { input: { questions: object } }).input.questions, id)) + 1, "no request after the failing one");
+		});
+	}
+	it("alignment: a judge 500 on a rescan exits 1", async () => {
 		const r = rig({ items: ALPHA });
 		await r.run("scan");
 		r.knobs.fail.add("relation");
 		r.source.items = [...ALPHA, raw("a9", "why does alpha move semantics work")];
-		await r.run("scan");
-		assert.equal(r.store.loadProposals().length, 1);
-		assert.ok(r.store.reviews().some((x) => x.reason === "merge-undecided"));
+		assert.equal(await r.run("scan"), 1);
+		assert.ok(r.lines.includes(STOPPED));
 	});
-	it("alignment: Score says same but the companion Noul disagrees", async () => {
+	it("the extractor failing on topics exits 1 before any topic question", async () => {
 		const r = rig({ items: ALPHA });
-		await r.run("scan");
-		r.knobs.noul = (id) => (id === "same" ? 0.1 : 0.9);
-		r.source.items = [...ALPHA, raw("a9", "why does alpha move semantics work")];
-		await r.run("scan");
-		assert.equal(r.store.loadProposals().length, 1);
-		assert.ok(r.store.reviews().some((x) => x.reason === "merge-undecided"));
+		r.deps.llm = { complete: async () => Promise.reject(new Error("500")) };
+		assert.equal(await r.run("scan"), 1);
+		assert.ok(r.lines.includes("scan stopped: the extractor failed while naming topics. Nothing more was sent; this run's results are incomplete."));
+		assert.equal(asked(r, "topic"), 0);
 	});
-	it("goal relevance: rank is review with a null score, not 0", async () => {
+	it("a schema-invalid topic reply exits 1", async () => {
 		const r = rig({ items: ALPHA });
-		r.knobs.fail.add("goal");
-		await r.run("scan", "--goals", "g");
-		const a = decisionOf(r, "Alpha concepts")!;
-		assert.equal(a.rank!.decision, "review");
-		assert.equal(a.p.rankScore, null);
-		assert.ok(r.store.reviews().some((x) => x.reason === "rank-review"));
+		r.deps.llm = { complete: async () => ({ nope: true }) as never };
+		assert.equal(await r.run("scan"), 1);
+		assert.ok(r.lines.includes("scan stopped: the extractor's topic reply did not match the schema. Nothing more was sent; this run's results are incomplete."));
 	});
-	it("gap: a proposal with no screen data is review", async () => {
+	it("a draft the extractor cannot write exits 1 before any decision", async () => {
 		const r = rig({ items: ALPHA });
-		await r.run("scan");
-		r.db.exec("DELETE FROM judgment_cache"); // a cache hit would hide the failure
-		r.knobs.fail.add("concept");
-		await r.run("scan");
-		const a = decisionOf(r, "Alpha concepts")!;
-		assert.equal(a.rank!.decision, "review");
-		assert.equal(a.p.rankScore, null);
+		r.knobs.draft = { title: " ", why: "recurs" };
+		assert.equal(await r.run("scan"), 1);
+		assert.ok(r.lines.includes("scan stopped: the extractor failed while drafting a title (invalid-output). Nothing more was sent; this run's results are incomplete."));
+		assert.equal(asked(r, "decision"), 0);
 	});
-	it("decide", async () => {
+	it("an egress refusal is not a failure: the scan goes on", async () => {
+		const r = rig({ items: [raw("o1", "why does alpha secretco fail", { project: "/work/secretco" }), ...ALPHA], optOut: ["secretco"] });
+		assert.equal(await r.run("scan"), 0);
+	});
+});
+
+describe("model text is redacted and clipped before it reaches the judge (lh-8o7)", () => {
+	const leaves = (v: unknown): string[] => (typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(leaves) : []);
+	it("a planted secret and a home path in topic names, titles and why never reach a judge body; no string there is over 400 chars", async () => {
 		const r = rig({ items: ALPHA });
-		r.knobs.fail.add("decision");
-		await r.run("scan");
-		assert.equal(decisionOf(r, "Alpha concepts")!.rank!.decision, "review");
-	});
-	it("decide: ask_user is review", async () => {
-		const r = rig({ items: ALPHA });
-		r.knobs.choice = (id) => (id === "decision" ? "ask_user" : undefined);
-		await r.run("scan");
-		assert.equal(decisionOf(r, "Alpha concepts")!.rank!.decision, "review");
-	});
-	it("verify: unverified evidence is kept and flagged", async () => {
-		const r = rig({ items: ALPHA });
-		r.knobs.fail.add("confused");
-		await r.run("scan");
-		const a = decisionOf(r, "Alpha concepts")!;
-		assert.equal(a.rank!.decision, "propose");
-		assert.equal(a.p.nItems, 2);
-		assert.ok(r.store.reviews().some((x) => x.reason === "verify-no-decision"));
-	});
-	it("prerequisites: no decision means no edge", async () => {
-		const r = rig({ items: [...ALPHA, ...BETA] });
-		r.knobs.noul = (id) => (id === "ab" ? 0.9 : id === "ba" ? 0.1 : 0.9);
-		r.knobs.fail.add("ab");
-		await r.run("scan");
-		assert.equal(r.store.loadProposals().filter((p) => p.prereqOf !== null).length, 0);
+		r.knobs.topics = [`alpha ${SECRET} ${"x".repeat(400)}`, "beta topic"];
+		r.knobs.draft = { title: `Alpha ${SECRET} ${"long ".repeat(200)}`, why: `see /Users/bob/notes and ${SECRET}` };
+		assert.equal(await r.run("scan", "--goals", "learn rust"), 0);
+		const bodies = r.wire.map((w) => JSON.parse(w) as unknown);
+		for (const id of ["topic", "goal", "decision", "confused"]) assert.ok(r.wire.some((w) => w.includes(`"${id}"`)), `the ${id} step ran`);
+		for (const leaf of bodies.flatMap(leaves)) {
+			assert.equal(redact(leaf), leaf);
+			assert.ok(leaf.length <= 400, `${leaf.length} chars`);
+		}
+		const all = r.wire.join("\n");
+		assert.equal(all.includes("ZZZZ1111YYYY2222XXXX3333"), false);
+		assert.equal(all.includes("/Users/bob"), false);
 	});
 });
 
@@ -839,7 +833,42 @@ describe("scan --since (lh-tw1.2)", () => {
 			assert.equal(dump(r.db).includes(marker), false, marker);
 		}
 		assert.ok(r.wire.some((w) => w.includes("alpha borrowing")), "items inside the limit still reach the judge");
-		assert.ok(r.lines.includes("since 2026-10-01: 2 older items not read in"));
+		assert.ok(r.lines.includes("since 2026-10-01: 2 items older or without a session time not read in"));
+	});
+	it("the limit is inclusive to the millisecond: at the date goes out, one millisecond before does not", async () => {
+		const at = raw("at1", "why does ZQXATMARK alpha fail", { at: "2026-10-01T00:00:00.000Z" });
+		const before = raw("bf1", "why does ZQXBEFOREMARK alpha fail", { at: "2026-09-30T23:59:59.999Z" });
+		const r = rig({ items: [at, before, ...ALPHA] });
+		await r.run("scan", "--since", "2026-10-01");
+		assert.equal(reached(r, "ZQXATMARK"), true);
+		assert.equal(reached(r, "ZQXBEFOREMARK"), false);
+	});
+	it("an item with a recent write time but no or an old session time never reaches a wire", async () => {
+		const derived = [
+			raw("d1", "why does ZQXNOSESSION alpha fail", { source: "omp-memory", at: RECENT, sessionAt: null }),
+			raw("d2", "why does ZQXOLDSESSION alpha fail", { source: "omp-recap", at: RECENT, sessionAt: OLD }),
+		];
+		const r = rig({ items: [...derived, ...ALPHA] });
+		await r.run("scan", "--since", "2026-10-01");
+		assert.equal(reached(r, "ZQXNOSESSION"), false);
+		assert.equal(reached(r, "ZQXOLDSESSION"), false);
+		assert.ok(r.wire.some((w) => w.includes("alpha borrowing")));
+		const without = rig({ items: [...derived, ...ALPHA] });
+		await without.run("scan");
+		assert.equal(reached(without, "ZQXNOSESSION"), true, "no limit behaves as before");
+	});
+	it("older items do not count toward a repeat that would make a newer item a candidate", async () => {
+		// no confusion cue, so only a repeat across 3 sessions makes this text a candidate
+		const same = "rename the ZQXREPEAT variable foo to bar";
+		const items = [raw("r1", same, { at: OLD }), raw("r2", same, { at: OLD }), raw("r3", same), ...ALPHA];
+		const r = rig({ items });
+		await r.run("scan");
+		assert.equal(reached(r, "ZQXREPEAT"), true, "without a limit the three make a repeat");
+		r.wire.length = 0;
+		r.prompts.length = 0;
+		r.db.exec("DELETE FROM judgment_cache");
+		await r.run("scan", "--since", "2026-10-01");
+		assert.equal(reached(r, "ZQXREPEAT"), false);
 	});
 	it("an older item stored by an earlier run without a limit is not used by a run with one", async () => {
 		const r = rig({ items: [old, ...ALPHA] });
@@ -860,6 +889,48 @@ describe("seeding extractor (lh-tw1.2)", () => {
 		const { extractor } = loadSeedConfig(CONFIG);
 		assert.deepEqual(extractor, { provider: "cloudflare-workers-ai", id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
 		assert.ok(piModels().getModel(extractor.provider, extractor.id), "model missing from the pi-ai catalog");
+	});
+	const MODEL = { provider: "cloudflare-workers-ai", id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017" };
+	const ENV = { CLOUDFLARE_API_KEY: "k", CLOUDFLARE_ACCOUNT_ID: "a" };
+	it("with an extractor in seed-config.json, settings are never read", async () => {
+		let read = 0;
+		const llm = await realLlm(MODEL, { settingsExtractor: async () => (read++, { provider: "openai", id: "gpt-x" }), env: ENV });
+		assert.equal(typeof llm.complete, "function");
+		assert.equal(read, 0);
+	});
+	it("without one, settings are read and an empty role refuses", async () => {
+		let read = 0;
+		await assert.rejects(realLlm(undefined, { settingsExtractor: async () => (read++, undefined), env: ENV }), (e) => e instanceof LlmUnavailableError && /no model is configured/.test(e.message));
+		assert.equal(read, 1);
+	});
+	it("a model missing from the catalog, a missing key or a missing account refuses before any send", async () => {
+		const none = async () => undefined;
+		await assert.rejects(realLlm({ ...MODEL, id: "@cf/none/nope" }, { settingsExtractor: none, env: ENV }), /is not in the model catalog/);
+		await assert.rejects(realLlm(MODEL, { settingsExtractor: none, env: { CLOUDFLARE_ACCOUNT_ID: "a" } }), /no API key for cloudflare-workers-ai/);
+		await assert.rejects(realLlm(MODEL, { settingsExtractor: none, env: { CLOUDFLARE_API_KEY: "k" } }), /needs CLOUDFLARE_ACCOUNT_ID/);
+	});
+	it("main stops a scan before sources or the network when the judge's variables or the extractor are missing", async () => {
+		for (const [env, buildLlm, expected] of [
+			[() => undefined, async () => ({ complete: async () => ({}) as never }), "scan stopped before sending anything: the clef judge needs JEV_CLOUDFLARE_API_TOKEN or CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID in the environment"],
+			[() => "x", async () => Promise.reject(new LlmUnavailableError("no API key for cloudflare-workers-ai in the environment")), "scan stopped before sending anything: no API key for cloudflare-workers-ai in the environment"],
+		] as const) {
+			const calls: string[] = [];
+			const lines: string[] = [];
+			const code = await main(["scan"], {
+				dataDir: "/nonexistent-data-dir",
+				lhVersion: () => "t",
+				openStore: () => openNodeSqlite(":memory:"),
+				readOptOut: async () => [],
+				buildSources: () => (calls.push("sources"), { sources: [], close() {} }),
+				buildLlm,
+				env,
+				fetch: (async () => (calls.push("fetch"), new Response("{}"))) as unknown as typeof fetch,
+				out: (l) => lines.push(l),
+			});
+			assert.equal(code, 1);
+			assert.ok(lines.includes(expected), lines.join(" | "));
+			assert.deepEqual(calls, []);
+		}
 	});
 	it("a malformed extractor refuses", () => {
 		const base = { calibrated: false, recencyHalfLifeDays: 60, goalWeight: 1, minMentions: 50, learnableTau: 0.5 };
