@@ -48,6 +48,7 @@ export const MIGRATE_TEXT = {
 	badJson: (file: string) => `${file} is not valid JSON; refusing, so nothing is lost silently`,
 	notUtf8: (file: string, where?: string) => `${file}${where === undefined ? "" : ` ${where}`} is not valid UTF-8; refusing, because carrying it over would change its bytes. Nothing was changed`,
 	notText: (file: string, where: string, type: string) => `${file} ${where} holds ${type}, not text; refusing, because exporting it would change it. Nothing was changed`,
+	illFormed: (file: string, where: string) => `${file} ${where} holds a lone surrogate, which cannot be stored in SQL unchanged; refusing. Nothing was changed`,
 	multiline: (file: string, where: string) => `${file} ${where} holds a line break, so it is not one ledger line; refusing, because exporting it would split it. Nothing was changed`,
 	emptySource: (backend: string) => `the source holds no data but the ${backend} target does, and migrating would replace it with nothing. Nothing was changed. Pass --allow-empty-source if that is what you want`,
 	badFormat: (file: string, version: number) => `${file} has version ${version}; a format version must be a positive integer`,
@@ -627,30 +628,46 @@ function fileTarget(dataDir: string, rendered: Map<string, string>): Target {
 	};
 }
 
-// Verify compares stored bytes with expected bytes, never through the reader or the normaliser: a check built on them cannot see what they remove.
+// Verify strictly decodes what is stored and compares it with the expected text, never through the reader or the normaliser: a check built on them cannot see what they remove.
+// Never re-encode the expected text to compare: Buffer.from turns a lone surrogate into U+FFFD just as the driver does, so both sides would agree after losing the same data.
 
 function fileDifference(dataDir: string, rendered: Map<string, string>): string | undefined {
 	for (const name of FAMILY_FILES) {
 		const rel = `graph/${name}`;
 		const want = rendered.get(rel);
 		const got = readBytes(path.join(dataDir, rel));
-		if (want === undefined ? got !== undefined : !got?.equals(Buffer.from(want, "utf8"))) return rel;
+		if (want === undefined ? got !== undefined : got === undefined || utf8(got) !== want) return rel;
 	}
 	return undefined;
 }
 
-function sqlDifference(file: string, backend: SqlBackend, snap: Snapshot): string | undefined {
+/** Every value a SQL target must hold, table by table. `file` is where a file source keeps it. */
+function sqlRows(snap: Snapshot) {
 	const byId = [...snap.sources].sort(([a], [b]) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-	const expected = [
-		...LEDGERS.map((l) => ({ table: l.table, columns: ["line_json"], order: "ORDER BY seq", want: snap.ledgers[l.entity].map((line) => [line]) })),
-		{ table: "sources", columns: ["id", "record_json"], order: "ORDER BY CAST(id AS BLOB)", want: byId.map(([id, record]) => [id, JSON.stringify(record)]) },
-		{ table: "documents", columns: ["key", "json"], order: "", want: snap.organization ? [[ORG_KEY, JSON.stringify(snap.organization.value)]] : [] },
+	return [
+		...LEDGERS.map((l) => ({ file: l.file, table: l.table, columns: ["line_json"], order: "ORDER BY seq", want: snap.ledgers[l.entity].map((line) => [line]) })),
+		{ file: "sources.json", table: "sources", columns: ["id", "record_json"], order: "ORDER BY CAST(id AS BLOB)", want: byId.map(([id, record]) => [id, JSON.stringify(record)]) },
+		{ file: "source-organization.json", table: "documents", columns: ["key", "json"], order: "", want: snap.organization ? [[ORG_KEY, JSON.stringify(snap.organization.value)]] : [] },
 	];
+}
+
+/** Before anything is written: a lone surrogate (JSON.parse makes one from a \\ud800 escape) cannot be encoded to UTF-8 unchanged, and the driver would store U+FFFD for it. */
+function refuseIllFormed(snap: Snapshot, originOf: (file: string) => string): void {
+	for (const { file, table, columns, want } of sqlRows(snap)) {
+		for (const row of want) {
+			row.forEach((value, c) => {
+				if (/\p{Surrogate}/u.test(value)) throw new MigrateRefusedError(MIGRATE_TEXT.illFormed(originOf(file), `${table}.${columns[c]} of ${JSON.stringify((row[0] as string).slice(0, 100))}`));
+			});
+		}
+	}
+}
+
+export function sqlDifference(file: string, backend: SqlBackend, snap: Snapshot): string | undefined {
 	const db = openReadOnly(file, backend);
 	try {
-		for (const { table, columns, order, want } of expected) {
+		for (const { table, columns, order, want } of sqlRows(snap)) {
 			const got = rawRows(db, table, columns, order);
-			const same = got.length === want.length && got.every((cells, r) => cells.every((cell, c) => cell.type === "text" && Buffer.from(want[r]?.[c] as string, "utf8").equals(cell.bytes)));
+			const same = got.length === want.length && got.every((cells, r) => cells.every((cell, c) => cell.type === "text" && utf8(cell.bytes) === want[r]?.[c]));
 			if (!same) return table;
 		}
 		return db.get<{ value: string }>("SELECT value FROM lh_meta WHERE key = 'line_format'")?.value === String(snap.lineFormat) ? undefined : "lh_meta.line_format";
@@ -690,6 +707,7 @@ export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateO
 		const snap = snapshotOf(dataDir, from);
 		const rendered = renderExport(snap);
 		const fp = fingerprint(rendered);
+		if (isSql(to)) refuseIllFormed(snap, (name) => (isSql(from) ? storeFile(dataDir, from) : path.join(dataDir, "graph", name)));
 
 		// An empty source would replace real data with nothing. The check reads only: nothing has been changed yet.
 		if (options.allowEmptySource !== true && !holdsData(snap) && (to === "file" || fs.existsSync(storeFile(dataDir, to))) && holdsData(snapshotOf(dataDir, to))) throw new MigrateRefusedError(MIGRATE_TEXT.emptySource(to));

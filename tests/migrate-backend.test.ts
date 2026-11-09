@@ -17,7 +17,7 @@ import fc from "fast-check";
 import { runCli } from "../scripts/lh-storage";
 import { StorageVersionError } from "../src/store/graph-format";
 import { BACKENDS, markerFile, type Backend } from "../src/store/marker";
-import { exportStore, migrateBackend, MIGRATE_TEXT, normaliseLedger, renderExport, type Snapshot } from "../src/store/migrate-backend";
+import { exportStore, migrateBackend, MIGRATE_TEXT, normaliseLedger, renderExport, sqlDifference, type Snapshot } from "../src/store/migrate-backend";
 import { PURGE_TEXT } from "../src/store/sql/purge";
 import { openDoltlite } from "../src/store/sql/drivers/doltlite";
 import { openNodeSqlite } from "../src/store/sql/drivers/node-sqlite";
@@ -89,6 +89,7 @@ function writeFolder(dir: string, raw: Raw): void {
 }
 
 const bytes = (...parts: (string | number[])[]): Buffer => Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p, "utf8") : Buffer.from(p))));
+const LONE_SURROGATE_ID = '{"a\\ud800b":{"id":"x"}}'; // valid JSON and valid UTF-8; JSON.parse makes the lone surrogate
 const LATIN1_E9 = [0xe9]; // é in Latin-1: not valid UTF-8 when a quote follows it
 const graphFile = (dir: string, name: string): string => path.join(dir, "graph", name);
 
@@ -583,6 +584,14 @@ describe("M marker last and verify", () => {
 		assert.throws(() => mig(dir, to, { now, checkpoint: (n) => { if (n === "before-verify") tamperTarget(); } }), /verification failed/, ctx);
 		assert.equal(readMarkerBytes(dir)?.includes(`"${to}"`) ?? false, false, `${ctx}: no marker for the target`);
 	};
+	for (const to of ["sqlite", "doltlite"] as const) {
+		test(`M5 verify on ${to}: an expected id that cannot be encoded unchanged never matches what the driver stored for it`, () => {
+			const dir = mk();
+			seedSql(dir, to, { nodes: [], chains: [], checkpoints: [], coverage: [], sources: [["a\ud800b", '{"id":"x"}']] }, false);
+			const snap: Snapshot = { lineFormat: 1, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [] }, sources: [["a\ud800b", { id: "x" }]], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
+			assert.equal(sqlDifference(path.join(dir, storeName(to)), to, snap), "sources");
+		});
+	}
 	test("M3 verify is byte-for-byte on a file target: what the normaliser would remove is still a difference", () => {
 		const edits: Record<string, (t: string) => string> = {
 			"CRLF and a blank line appended": (t) => `${t}\r\n\n`,
@@ -719,6 +728,7 @@ const REFUSALS: Refusal[] = [
 			{ name: `${b} ledger row that is a BLOB`, expect: /ledger_nodes\.line_json row 5 holds blob/, build: withRow(line("x'7b7d'")) },
 		];
 	}),
+	...(["sqlite", "doltlite"] as const).map((b): Refusal => ({ name: `lone surrogate in a source id, to ${b}`, migrateOnly: true, expect: /sources\.json sources\.id of "a\\ud800b" holds a lone surrogate/, build: (d) => (writeFolder(d, { ...DIRTY, sources: LONE_SURROGATE_ID }), { to: b }) })),
 	{ name: "empty source, sqlite target holds data", migrateOnly: true, expect: /holds no data/, build: (d) => (seedSql(d, "sqlite", STALE, false), { to: "sqlite" }) },
 	{ name: "empty sqlite source, file target holds data", migrateOnly: true, expect: /holds no data/, build: (d) => (seedSql(d, "sqlite", { ...STALE, nodes: [] }, true), writeFolder(d, { nodes: '{"id":"keep"}\n', chains: "", sessions: "", coverage: "" }), { to: "file" }) },
 	{ name: "corrupt source-organization.json", expect: /not valid JSON/, build: (d) => (writeFolder(d, { ...DIRTY, org: "{" }), { to: "sqlite" }) },
@@ -1029,6 +1039,34 @@ describe("B CLI", () => {
 			assert.deepEqual(fs.readFileSync(path.join(out, "graph", "nodes.jsonl")), head);
 		});
 	}
+	test("B20 a lone surrogate in a source id through the CLI: exit 1, the file and id named, nothing written, source bytes unchanged", () => {
+		const dir = mk();
+		writeFolder(dir, { ...DIRTY, sources: LONE_SURROGATE_ID });
+		const before = tree(dir);
+		const r = run(["migrate", "--to", "sqlite", "--data-dir", dir]);
+		assert.equal(r.code, 1, r.out.join("\n"));
+		assert.match(r.err[0] as string, /^lh migrate: .*graph\/sources\.json sources\.id of "a\\ud800b" holds a lone surrogate/);
+		assert.deepEqual(tree(dir), before);
+		assert.equal(readMarkerBytes(dir), undefined);
+		for (const gone of ["graph.sqlite", "migrate-backups", "storage-migrate.journal.json"]) assert.equal(fs.existsSync(path.join(dir, gone)), false, gone);
+	});
+	test("B21 what can be carried unchanged is not refused: a surrogate pair in an id, a lone-surrogate escape inside a record, and export of a lone-surrogate id", () => {
+		const dir = mk();
+		const sources = '{"\\ud83d\\ude00":{"name":"x\\ud800y"}}';
+		writeFolder(dir, { ...DIRTY, sources });
+		const r = run(["migrate", "--to", "sqlite", "--data-dir", dir]);
+		assert.equal(r.code, 0, r.err.join("\n"));
+		const out = path.join(mk(), "o");
+		exportStore(dir, out);
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, "graph", "sources.json"), "utf8")), { "\ud83d\ude00": { name: "x\ud800y" } });
+		assert.ok(fs.readFileSync(path.join(out, "graph", "sources.json"), "utf8").includes("\\ud800"), "the escape stays an escape");
+
+		const lone = mk();
+		writeFolder(lone, { ...DIRTY, sources: LONE_SURROGATE_ID });
+		const e = path.join(mk(), "o");
+		assert.equal(run(["export", "--out", e, "--data-dir", lone]).code, 0, "export keeps it as an escape, so nothing is lost");
+		assert.ok(fs.readFileSync(path.join(e, "graph", "sources.json"), "utf8").includes("a\\ud800b"));
+	});
 	test("B12 every backend name the CLI accepts is one the marker knows", () => {
 		assert.deepEqual([...BACKENDS], ["file", "sqlite", "doltlite"]);
 	});
