@@ -19,11 +19,16 @@ const CATEGORIES = [
 
 const walk = (d: string): string[] => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
 
-/** test id -> declaring files. A declaration is P("ID", ..), T("ID", ..) or it("ID ..") in tests/contract (this file excluded). */
+/** test id -> declaring files. A declaration is P("ID", ..), T("ID", ..) or it("ID ..") in tests/contract (this file excluded) or tests/sql.
+ *  Every id is also keyed `<repo-relative file>#<id>`, so a row can name one file's test when two files use the same id. */
 function declaredIds(): Map<string, string[]> {
 	const out = new Map<string, string[]>();
-	for (const f of walk(here).filter((x) => x.endsWith(".ts") && x !== import.meta.filename)) {
-		for (const m of fs.readFileSync(f, "utf8").matchAll(/(?:\b[PT]\(|\bit\()\s*["'`]([A-Za-z][A-Za-z0-9_-]*)/g)) out.set(m[1]!, [...(out.get(m[1]!) ?? []), f]);
+	const add = (key: string, f: string) => out.set(key, [...(out.get(key) ?? []), f]);
+	for (const f of [...walk(here), ...walk(path.join(repo, "tests", "sql"))].filter((x) => x.endsWith(".ts") && x !== import.meta.filename)) {
+		for (const m of fs.readFileSync(f, "utf8").matchAll(/(?:\b[PT]\(|\bit\()\s*["'`]([A-Za-z][A-Za-z0-9_-]*)/g)) {
+			add(m[1]!, f);
+			add(`${path.relative(repo, f)}#${m[1]!}`, f);
+		}
 	}
 	return out;
 }

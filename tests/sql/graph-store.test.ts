@@ -146,6 +146,33 @@ describe("R rewriteLedgers: exactly kept, in kept order, least churn", () => {
 		r.close();
 	});
 
+	it("R4b equal byte copies of one stored line keep the LOWEST seq: the other equal rows are the ones deleted (lh-bhc d)", () => {
+		const r = rig();
+		const x = node("x", "same");
+		r.graph.appendNode(x); r.graph.appendNode(node("y", "y")); r.graph.appendNode(x); r.graph.appendNode(x);
+		const [lowest, ...others] = seqs(r).filter((row) => (JSON.parse(row.line_json) as GraphNode).id === "x").map((row) => row.seq);
+		assert.equal(others.length, 2);
+		r.log.length = 0;
+		r.graph.rewriteLedgers({ nodes: [norm(x)] }); // a copy: no identity, only bytes; `y` and two of three x rows go
+		assert.deepEqual(seqs(r).map((row) => row.seq), [lowest], "the surviving x row is the lowest seq");
+		assert.deepEqual(kinds(r), ["DELETE", "DELETE", "DELETE"]);
+		r.close();
+	});
+
+	it("R4c byte alignment: copies (no identity) of a subsequence delete only the missing rows; survivors keep their seq and are not rewritten (lh-bhc d)", () => {
+		fc.assert(fc.property(fc.array(fc.boolean(), { minLength: 2, maxLength: 9 }), (mask) => {
+			const r = rig();
+			mask.forEach((_, i) => r.graph.appendNode(node(`n${i}`, `s${i}`)));
+			const before = seqs(r);
+			const kept = mask.flatMap((keep, i) => (keep ? [norm(JSON.parse(before[i]!.line_json) as GraphNode)] : []));
+			r.log.length = 0;
+			r.graph.rewriteLedgers({ nodes: kept });
+			assert.deepEqual(seqs(r).map((row) => row.seq), before.filter((_, i) => mask[i]).map((row) => row.seq), "survivors keep their seq");
+			assert.ok(kinds(r).every((k) => k === "DELETE"), `only DELETEs, got ${kinds(r)}`);
+			r.close();
+		}), { numRuns: 40, examples: [[[true, false, true]], [[false, true, true, false]]] });
+	});
+
 	it("R5 a row imported with non-canonical bytes stays byte-identical when its kept object is unchanged", () => {
 		const r = rig();
 		r.raw.run("INSERT INTO ledger_nodes (line_json) VALUES (?)", JSON.stringify(node("w", "ws"), null, 4));
@@ -421,6 +448,29 @@ describe("S seal failure after COMMIT (N14)", () => {
 
 describe("V revision bump and seal only when rows really changed", () => {
 	const seals = (r: Rig) => r.log.filter((l) => l.startsWith("SEAL"));
+
+	it("V1b a rewrite whose lines already match moves no revision, seals nothing and writes no row: read objects, copies, equal duplicates swapped, non-canonical stored bytes (lh-bhc b)", () => {
+		const r = rig();
+		const dup = node("d", "same");
+		r.graph.appendNode(dup); r.graph.appendNode(node("a", "a")); r.graph.appendNode(dup);
+		r.raw.run("INSERT INTO ledger_nodes (line_json) VALUES (?)", `  ${JSON.stringify(node("w", "spaced"))}  `); // stored with other whitespace
+		r.raw.run("INSERT INTO ledger_chains (line_json) VALUES (?)", JSON.stringify({ id: "arg_1", premises: ["a"], conclusion: "d", createdAt: "t", provenance: [] }));
+		const rev = r.graph.revision();
+		const read = r.graph.readNodes();
+		const variants = [
+			read,
+			read.map(norm), // copies, not the read objects
+			[read[2]!, read[1]!, read[0]!, read[3]!], // the two equal duplicates swapped: a "reorder" by identity, no change by content
+			[read[2]!, read[1]!, read[0]!, read[3]!].map(norm), // the same swap, as copies
+		];
+		for (const nodes of variants) {
+			r.log.length = 0;
+			r.graph.rewriteLedgers({ nodes, chains: r.graph.readChains().map(norm) });
+			assert.deepEqual(r.log, [], `no statement of any kind for ${JSON.stringify(nodes.map((n) => n.id))}`);
+			assert.equal(r.graph.revision(), rev);
+		}
+		r.close();
+	});
 
 	it("V1 no-op writes move neither revision nor seal: identical rewrite, identical upsert, absent delete, duplicate usage", () => {
 		const r = rig();

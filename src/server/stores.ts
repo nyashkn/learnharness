@@ -16,19 +16,23 @@ import { promptOverrides } from "../store/prompt-overrides.ts";
 import { renderSettingsStore } from "../store/render-settings.ts";
 import { resolveSettings, type EffectiveSettings } from "../core/settings-resolution.ts";
 import { PATHS } from "../../config.ts";
-import { openDataFolder } from "../store/marker.ts";
+import { beforeWrite, openDataFolder } from "../store/marker.ts";
+import { createSqlGraphStores } from "../store/sql/open.ts";
+import { emit } from "../core/events.ts";
 import type { Stores } from "../core/ports.ts";
 // OPEN: the marker and format check, once, at module load. A folder this build must not touch
 // (newer layout, corrupt marker, a backend with no adapter, a newer graph format) fails here, for
 // reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
-openDataFolder(PATHS.data);
+const backend = openDataFolder(PATHS.data);
 purgeLegacyLedgers(PATHS.graph); // after open: a refused folder keeps its legacy files
+// sqlite: the ledgers and sources live in graph.sqlite (opened here, eagerly, when it exists); the file graphStore only serves positions.
+const graph = backend === "sqlite" ? createSqlGraphStores(PATHS.data, graphStore, emit, beforeWrite) : { graphStore, sourceOrganizationStore };
 
 /** The wired adapters, typed against the ports. Satisfies core/graph.ts's GraphDeps structurally. */
 export const stores: Stores = {
 	chatStore,
-	graphStore,
-	sourceOrganizationStore,
+	graphStore: graph.graphStore,
+	sourceOrganizationStore: graph.sourceOrganizationStore,
 	jobStore,
 	settingsStore,
 	authStore,

@@ -17,7 +17,7 @@ import { CheckpointLineSchema } from "../../core/contracts/schemas/checkpoint-li
 import { CoverageLineSchema } from "../../core/contracts/schemas/coverage-line.ts";
 import { NodeLineSchema } from "../../core/contracts/schemas/node-line.ts";
 import type { GraphStore } from "../../core/ports.ts";
-import { StorageVersionError } from "../graph-format.ts";
+import { StorageVersionError } from "../../core/contracts/storage.ts";
 import type { SqlDriver } from "./driver";
 import { migrate, type MigrateOptions } from "./migrate";
 import { graphMigration, graphRungs } from "./migrations/graph/index";
@@ -226,6 +226,12 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 		const canon = rows.map((r) => canonical(r.line_json));
 		const text = kept.map((o) => JSON.stringify(o));
 		const n = kept.length;
+		if (rows.length === n && canon.every((c, i) => c === text[i])) {
+			// Nothing to do: the stored lines already ARE kept, in order. Without this, equal duplicates handed back in a different
+			// order (or copies of them) would align by identity into a "reorder" and delete + insert rows for no change, moving the revision.
+			kept.forEach((o, i) => seqOf[key].set(o, rows[i]!.seq));
+			return 0;
+		}
 		const rowAt = new Map(rows.map((r, i) => [r.seq, i]));
 		const used = rows.map(() => false);
 		const align: number[] = kept.map(() => -1);

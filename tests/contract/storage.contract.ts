@@ -729,7 +729,6 @@ export function registerContract(f: AdapterFactory): void {
 			assert.equal(everything(b), before);
 		});
 
-		P("N14", "seal failure after COMMIT is logged, not thrown; the next transaction first seals `recovered: <label>` (item 17, versioned back-ends)", fc.constant(0), () => { throw new Error("pending: SqlDriver.seal"); }, { todo: "lh-rws" });
 
 		P("N15", "round trip with defined normalisation (item 12): CRLF becomes LF, blank lines and a torn tail are dropped; unknown fields, whitespace and key order are kept", fc.tuple(fc.array(fc.tuple(A.verbatimNode, fc.constantFrom("lf", "crlf", "blank-before")), { maxLength: 8 }), fc.constantFrom('{"id":"n9","na', '{', '[1,')), (b, [items, torn]) => {
 			for (const [n, style] of items) {

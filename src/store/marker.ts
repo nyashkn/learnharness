@@ -12,14 +12,16 @@
  *  - OPEN NEVER WRITES. The marker and the store lock are written on the first
  *    write through any data-folder store (`beforeWrite`), never on a read.
  *
- * This build wires only the file backend. `adapterFor` is the ONE place a
- * sqlite or doltlite adapter is added (S5, D3).
+ * This build wires the file and sqlite backends. `adapterFor` is the ONE place a
+ * doltlite adapter is added (D3). A first write that picks sqlite takes the lock, creates and
+ * migrates `graph.sqlite`, and only then writes the marker, so the marker never names a missing store.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { acquireStoreLock, type LockEnv, type StoreLock } from "./sql/lock.ts";
 import { writeFileAtomicSync } from "./atomic-write.ts";
 import { assertGraphFormat, StorageVersionError } from "./graph-format.ts";
+import { ensureGraphDb, graphDbFile } from "./sql/open.ts";
 
 export const CURRENT_LAYOUT = 1;
 export const BACKENDS = ["file", "sqlite", "doltlite"] as const;
@@ -45,9 +47,12 @@ export class NoAdapterError extends Error {
 export const markerFile = (dataDir: string): string => path.join(dataDir, MARKER_NAME);
 const isBackend = (v: unknown): v is Backend => typeof v === "string" && (BACKENDS as readonly string[]).includes(v);
 
-/** The one place adapters are registered. Only `file` exists in this build. */
-function adapterFor(backend: Backend, file: string): "file" {
-	if (backend === "file") return "file";
+/** The backends this build can run. */
+export type RunnableBackend = "file" | "sqlite";
+
+/** The one place adapters are registered. `file` and `sqlite` exist in this build. */
+function adapterFor(backend: Backend, file: string): RunnableBackend {
+	if (backend === "file" || backend === "sqlite") return backend;
 	throw new NoAdapterError(backend, file);
 }
 
@@ -84,7 +89,7 @@ function readMarker(file: string): { backend: Backend; layout: number } | undefi
 }
 
 /** Which backend this folder uses; never writes. Refuses per the rules above. */
-export function resolveBackend(dataDir: string, env: Record<string, string | undefined> = process.env): "file" {
+export function resolveBackend(dataDir: string, env: Record<string, string | undefined> = process.env): RunnableBackend {
 	const file = markerFile(dataDir);
 	const marker = readMarker(file);
 	if (marker) return adapterFor(marker.backend, file);
@@ -99,10 +104,18 @@ export function resolveBackend(dataDir: string, env: Record<string, string | und
 /** The graph-family format stamp lives beside the graph ledgers. */
 export const graphFormatFileIn = (dataDir: string): string => path.join(dataDir, "graph", "format.json");
 
+/** Agreement (architecture 3): a marker that names sqlite needs the store it names. Without a marker, LH_STORAGE=sqlite is only an intent: the store is made on the first write. */
+function assertAgreement(file: string, marker: { backend: Backend } | undefined, dataDir: string): void {
+	if (marker?.backend === "sqlite" && !fs.existsSync(graphDbFile(dataDir))) {
+		throw new StorageMarkerError(file, `the marker names sqlite but ${graphDbFile(dataDir)} is missing; restore it, or remove ${MARKER_NAME} only if you mean to start a new folder`);
+	}
+}
+
 /** OPEN: resolve the backend and check the store is valid. Never writes; a missing folder is fine. */
-export function openDataFolder(dataDir: string, env: Record<string, string | undefined> = process.env): "file" {
+export function openDataFolder(dataDir: string, env: Record<string, string | undefined> = process.env): RunnableBackend {
 	const backend = resolveBackend(dataDir, env);
-	assertGraphFormat(graphFormatFileIn(dataDir)); // file backend: valid = not stamped newer
+	assertAgreement(markerFile(dataDir), readMarker(markerFile(dataDir)), dataDir);
+	assertGraphFormat(graphFormatFileIn(dataDir)); // render settings and positions stay files on every backend, and `file` is valid = not stamped newer
 	return backend;
 }
 
@@ -169,6 +182,7 @@ export function beforeWrite(dataDir: string, lockEnv?: LockEnv): void {
 	const abs = path.resolve(dataDir);
 	const file = markerFile(abs);
 	const existing = readMarker(file); // a newer or corrupt marker refuses the write too
+	assertAgreement(file, existing, abs); // a sqlite marker whose database was deleted refuses writes too, before any lock
 	// Resolve BEFORE the lock: the lock file makes the folder non-empty, which would hide LH_STORAGE.
 	// A refusal (bad value, no adapter) then leaves neither marker nor lock.
 	const backend = existing === undefined ? resolveBackend(abs) : undefined;
@@ -177,6 +191,7 @@ export function beforeWrite(dataDir: string, lockEnv?: LockEnv): void {
 		fs.mkdirSync(abs, { recursive: true });
 		registry().set(abs, { lock: acquireStoreLock(file, lockEnv) });
 	}
+	if (backend === "sqlite") ensureGraphDb(abs); // lock, then the store, then the marker: a marker never names a store that is missing
 	if (backend !== undefined) {
 		writeFileAtomicSync(file, `${JSON.stringify({ backend, layout: CURRENT_LAYOUT }, null, "\t")}\n`, { allowInPlaceFallback: true });
 	}

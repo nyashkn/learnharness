@@ -9,23 +9,29 @@ import { createAuthStore } from "./auth.ts";
 import { createChatStore } from "./chats.ts";
 import { createGraphStore, purgeLegacyLedgers } from "./graph.ts";
 import { createJobStore } from "./jobs.ts";
-import { lockDataFolder, openDataFolder } from "./marker.ts";
+import { beforeWrite, lockDataFolder, openDataFolder } from "./marker.ts";
 import { createPromptOverrides } from "./prompt-overrides.ts";
 import { createRenderSettingsStore } from "./render-settings.ts";
 import { createSettingsStore } from "./settings.ts";
 import { createSourceOrganizationStore } from "./source-organization.ts";
+import { emit } from "../core/events.ts";
+import { createSqlGraphStores } from "./sql/open.ts";
 import type { LockEnv } from "./sql/lock.ts";
 
 /** OPEN a data folder (refuses a newer or unusable one, never writes) and build its stores. `authFile` lives outside the folder. */
 export function createFileStores(dataDir: string, authFile: string): Stores {
-	openDataFolder(dataDir);
+	const backend = openDataFolder(dataDir);
 	const graphDir = path.join(dataDir, "graph");
-	const graphStore = createGraphStore(graphDir, { dataDir });
+	const fileGraph = createGraphStore(graphDir, { dataDir });
 	purgeLegacyLedgers(graphDir); // only after open succeeded: a refused folder keeps its files
+	// On sqlite the ledgers and sources live in graph.sqlite; the file graph store only serves positions (a script must never write JSONL beside the database).
+	const graph = backend === "sqlite"
+		? createSqlGraphStores(dataDir, fileGraph, emit, beforeWrite)
+		: { graphStore: fileGraph, sourceOrganizationStore: createSourceOrganizationStore(graphDir, fileGraph, { dataDir }) };
 	return {
 		chatStore: createChatStore(path.join(dataDir, "chats"), { dataDir }),
-		graphStore,
-		sourceOrganizationStore: createSourceOrganizationStore(graphDir, graphStore, { dataDir }),
+		graphStore: graph.graphStore,
+		sourceOrganizationStore: graph.sourceOrganizationStore,
 		jobStore: createJobStore(path.join(dataDir, "jobs"), { dataDir }),
 		settingsStore: createSettingsStore(dataDir),
 		authStore: createAuthStore(authFile),
