@@ -219,6 +219,10 @@ importers:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
+    optionalDependencies:
+      '@dolthub/doltlite':
+        specifier: 0.51.9
+        version: 0.51.9
 
 packages:
 
@@ -327,6 +331,10 @@ packages:
 
   '@chevrotain/types@11.1.2':
     resolution: {integrity: sha512-U+HFai5+zmJCkK86QsaJtoITlboZHBqrVketcO2ROv865xfCMSFpELQoz1GkX5GzME8pTa+3kbKrZHQtI0gdbw==}
+
+  '@dolthub/doltlite@0.51.9':
+    resolution: {integrity: sha512-1FxBc80qd8Qeg57UF7Dy2phz9Nw+3PTN7dP0FTpUdaD1CQZPxL6CvZ5+rS0Pdm7yaDkaYOUWRX3cTC+GrvtIRg==}
+    engines: {node: '>=18.0.0'}
 
   '@earendil-works/pi-agent-core@1.4.0':
     resolution: {integrity: sha512-PoKY84SKUwnt7S5QBZaGUqfNO1kjP3KHpHUA9QpFTj4cOjaVWMYIcBPJ6FDRCdE8Zen9OSECQUd0uUfVgtSmgA==}
@@ -4533,6 +4541,10 @@ packages:
     resolution: {integrity: sha512-suSdznUPfabdaeLiNERA0LHod14RhcEn8wMPUZEQ6bKvajUCZ+aizY4pIvlLU+gImeLKp2bFDHhOc9yonISsXw==}
     engines: {node: '>=22.12.0'}
 
+  node-addon-api@8.9.2:
+    resolution: {integrity: sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg==}
+    engines: {node: ^18 || ^20 || >= 21}
+
   node-api-version@0.2.1:
     resolution: {integrity: sha512-2xP/IGGMmmSQpI1+O/k72jF/ykvZ89JeuKX3TLJAYPDVLUalrshrLHkeVcCCZqG/eEa635cr8IBYzgnDvM2O8Q==}
 
@@ -5899,6 +5911,11 @@ snapshots:
   '@braintree/sanitize-url@7.1.2': {}
 
   '@chevrotain/types@11.1.2': {}
+
+  '@dolthub/doltlite@0.51.9':
+    dependencies:
+      node-addon-api: 8.9.2
+    optional: true
 
   '@earendil-works/pi-agent-core@1.4.0(@aws-sdk/credential-provider-node@3.972.88)(@modelcontextprotocol/sdk@1.32.1(supports-color@10.2.2)(zod@4.4.3))(@smithy/signature-v4@5.7.4)(supports-color@10.2.2)(undici@7.29.0)(ws@8.21.3)(zod@4.4.3)':
     dependencies:
@@ -10636,6 +10653,9 @@ snapshots:
   node-abi@4.38.0:
     dependencies:
       semver: 7.8.5
+
+  node-addon-api@8.9.2:
+    optional: true
 
   node-api-version@0.2.1:
     dependencies:

@@ -1,6 +1,7 @@
 # pnpm 11 reads only auth and registry settings from .npmrc; everything else lives here.
 nodeLinker: hoisted # electron-builder needs a flat node_modules
 allowBuilds:
+  "@dolthub/doltlite": true # picks a bundled prebuild; node-gyp only on unsupported platforms
   "@google/genai": false # no-op echo
   electron-winstaller: true
   esbuild: true
