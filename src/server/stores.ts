@@ -16,7 +16,7 @@ import { promptOverrides } from "../store/prompt-overrides.ts";
 import { renderSettingsStore } from "../store/render-settings.ts";
 import { resolveSettings, type EffectiveSettings } from "../core/settings-resolution.ts";
 import { PATHS } from "../../config.ts";
-import { beforeWrite, openDataFolder } from "../store/marker.ts";
+import { beforeWrite, openDataFolder, type Backend } from "../store/marker.ts";
 import { createSqlGraphStores } from "../store/sql/open.ts";
 import { emit } from "../core/events.ts";
 import type { Stores } from "../core/ports.ts";
@@ -24,6 +24,7 @@ import type { Stores } from "../core/ports.ts";
 // (newer layout, corrupt marker, a backend with no adapter, a newer graph format) fails here, for
 // reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
 const backend = openDataFolder(PATHS.data);
+export const storageBackend: Backend = backend;
 // sqlite: the ledgers and sources live in graph.sqlite (opened here, eagerly, when it exists); the file graphStore only serves positions.
 const graph = backend === "sqlite" ? createSqlGraphStores(PATHS.data, graphStore, emit, beforeWrite) : { graphStore, sourceOrganizationStore };
 purgeLegacyLedgers(PATHS.graph); // after every refusal, the sqlite one included: a refused folder keeps its legacy files

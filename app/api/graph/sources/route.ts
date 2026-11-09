@@ -1,10 +1,10 @@
-import { deleteSources, readOrganizationAction, sourceDirectory, SourceDeletionError, SourceOrganizationInputError } from "@/src/server";
+import { deleteSources, readOrganizationAction, sourceDirectory, SourceDeletionError, SourceOrganizationInputError, storageBackend } from "@/src/server";
 import { emit } from "@/src/core";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-	try { return Response.json(sourceDirectory.read()); }
+	try { return Response.json({ ...sourceDirectory.read(), keepsHistory: storageBackend === "doltlite" }); }
 	catch { return Response.json({ error: "Could not read source organization." }, { status: 500 }); }
 }
 

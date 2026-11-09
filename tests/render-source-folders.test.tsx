@@ -140,3 +140,12 @@ it("source confirmation explains shared-node survival and makes conversation del
 	assert.match(html, /graph contributions and extraction coverage are cleared/); assert.match(html, /Also delete the 1 selected session/);
 	assert.doesNotMatch(html.match(/<input[^>]+>/)?.[0] ?? "", /checked/);
 });
+
+it("DoltLite history sentence shows only for a DoltLite store with sources selected", () => {
+	const historySentence = "Removed from your graph and every view. It stays in this store's version history until you purge history.";
+	const render = (props: { keepsHistory?: boolean; sources: typeof directory.sources }) => renderToStaticMarkup(<DeleteSourceBody sources={props.sources} folders={[]} deleteSessions={false} onDeleteSessions={() => {}} busy={false} failure="" onClose={() => {}} onRun={() => {}} keepsHistory={props.keepsHistory} />).replaceAll("&#x27;", "'");
+	assert.ok(render({ keepsHistory: true, sources: directory.sources }).includes(historySentence));
+	assert.doesNotMatch(render({ keepsHistory: false, sources: directory.sources }), /version history/);
+	assert.doesNotMatch(render({ sources: directory.sources }), /version history/);
+	assert.doesNotMatch(render({ keepsHistory: true, sources: [] }), /version history/);
+});

@@ -31,6 +31,10 @@ it("GET is a non-writing read and inventories all sessions, imported records and
 	assert.equal(sources.find((s: { id: string }) => s.id === "gone").kind, "missing");
 });
 
+it("GET reports keepsHistory false on the file backend", async () => {
+	assert.equal((await (await GET()).json()).keepsHistory, false);
+});
+
 it("GET projects practice kind without removing or rewriting sessions, historical graph contributions or folder placements", async () => {
 	const practice = stores.chatStore.createChat("Practice source", "practice");
 	stores.graphStore.appendNode({ id: "n_practice", name: "Historical", statement: "Historical practice contribution.", aliases: [], createdAt: "2026-10-30", provenance: [{ chatId: practice.id, messageId: "m" }] });
