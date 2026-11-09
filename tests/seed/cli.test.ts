@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import fc from "fast-check";
 import { calibration, breakCycles, parseCommand, runCli, topoOrder, type CliDeps, type Edge, type LabelledRow } from "../../src/seed/cli";
 import { piModels } from "../../src/agent/models";
+import { signetSummarySource } from "../../src/seed/sources/signet";
 import { createJevApiJudge } from "../../src/seed/judge/jev-api";
 import { createSeedStore, type Verdict } from "../../src/seed/store";
 import type { HarvestItem, LlmPort, RawItem, SessionSource } from "../../src/seed/types";
@@ -856,6 +857,31 @@ describe("scan --since (lh-tw1.2)", () => {
 		const without = rig({ items: [...derived, ...ALPHA] });
 		await without.run("scan");
 		assert.equal(reached(without, "ZQXNOSESSION"), true, "no limit behaves as before");
+	});
+	it("Signet arc and epoch rollups reach neither the wire nor the store under --since; a session row does", async () => {
+		// the real columns and kind values (Signet migration 029); a rollup's latest_at is recent although it spans older sessions
+		const signet = () => {
+			const db = openNodeSqlite(":memory:");
+			db.exec("CREATE TABLE session_summaries (id TEXT PRIMARY KEY, project TEXT, depth INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL CHECK(kind IN ('session', 'arc', 'epoch')), content TEXT NOT NULL, token_count INTEGER, earliest_at TEXT NOT NULL, latest_at TEXT NOT NULL, session_key TEXT, harness TEXT, agent_id TEXT NOT NULL DEFAULT 'default', created_at TEXT NOT NULL); CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, updated_at TEXT NOT NULL, mentions INTEGER NOT NULL, status TEXT)");
+			const row = (id: string, depth: number, kind: string, content: string) =>
+				db.run("INSERT INTO session_summaries (id, project, depth, kind, content, earliest_at, latest_at, session_key, created_at) VALUES (?, '/work/app', ?, ?, ?, ?, ?, ?, ?)", id, depth, kind, content, OLD, RECENT, depth === 0 ? `k-${id}` : null, RECENT);
+			row("s1", 0, "session", "why does ZQXSESSIONROW alpha fail");
+			row("a1", 1, "arc", "why does ZQXARCROW alpha fail");
+			row("e1", 2, "epoch", "why does ZQXEPOCHROW alpha fail");
+			return signetSummarySource({ db: { all: async (sql, params = []) => db.all<Record<string, unknown>>(sql, ...params) }, minMentions: 50 });
+		};
+		const r = rig({ items: ALPHA });
+		r.deps.sources = [...r.deps.sources, signet()];
+		await r.run("scan", "--since", "2026-10-01");
+		for (const marker of ["ZQXARCROW", "ZQXEPOCHROW"]) {
+			assert.equal(reached(r, marker), false, marker);
+			assert.equal(dump(r.db).includes(marker), false, marker);
+		}
+		assert.equal(reached(r, "ZQXSESSIONROW"), true, "a session-level row inside the limit still goes out");
+		const without = rig({ items: ALPHA });
+		without.deps.sources = [...without.deps.sources, signet()];
+		await without.run("scan");
+		assert.equal(reached(without, "ZQXARCROW"), true, "no limit behaves as before");
 	});
 	it("older items do not count toward a repeat that would make a newer item a candidate", async () => {
 		// no confusion cue, so only a repeat across 3 sessions makes this text a candidate
