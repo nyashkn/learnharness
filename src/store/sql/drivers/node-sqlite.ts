@@ -63,6 +63,7 @@ export function openNodeSqlite(file: string, options: NodeSqliteOptions = {}): S
 		},
 		seal: () => null,
 		head: () => null,
+		recover: () => {},
 		close() {
 			if (closed) return;
 			closed = true;

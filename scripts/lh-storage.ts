@@ -1,2 +1,94 @@
-// shortcut: stub so `pnpm run lh` resolves at wave 0; M1 and D4 add the real commands.
-console.log("lh: stub, no storage commands yet (M1 replaces this)");
+// lh storage commands. M1 extends this file; D4 adds `purge`.
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { PATHS } from "../config.ts";
+import { markerFile, readMarker } from "../src/store/marker.ts";
+import { assertStoreNotNewer } from "../src/store/sql/graph-store.ts";
+import { openDoltlite } from "../src/store/sql/drivers/doltlite.ts";
+import { acquireStoreLock, StoreLockedError, type StoreLock } from "../src/store/sql/lock.ts";
+import { PURGE_TEXT, purgeHistory } from "../src/store/sql/purge.ts";
+
+export interface Io {
+	out(line: string): void;
+	err(line: string): void;
+}
+
+function purge(args: string[], io: Io): number {
+	let dataDir: string = PATHS.data;
+	let yes = false;
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
+		if (a === "--yes") yes = true;
+		else if (a === "--data-dir" && args[i + 1] !== undefined) dataDir = path.resolve(args[++i] as string);
+		else {
+			io.err(PURGE_TEXT.usage);
+			return 1;
+		}
+	}
+	const backend = readMarker(markerFile(dataDir))?.backend ?? "file"; // missing marker = file; a newer layout or corrupt marker throws
+	if (backend !== "doltlite") {
+		io.err(PURGE_TEXT.refuseBackend(backend));
+		return 1;
+	}
+	const store = path.join(dataDir, "graph.doltlite");
+	if (!fs.existsSync(store)) {
+		io.err(PURGE_TEXT.refuseNoStore(store));
+		return 1;
+	}
+	if (!yes) {
+		io.out(PURGE_TEXT.explain(store));
+		return 2;
+	}
+	const locks: StoreLock[] = [];
+	try {
+		try {
+			// The app locks the marker file; the driver wants the store's own lock. Take both.
+			locks.push(acquireStoreLock(markerFile(dataDir)), acquireStoreLock(store));
+		} catch (error) {
+			if (!(error instanceof StoreLockedError)) throw error;
+			io.err(PURGE_TEXT.refuseLocked(error.message));
+			return 1;
+		}
+		// Refuse a newer store before any writable open: a read-only handle never commits.
+		const probe = openDoltlite(store, { readOnly: true });
+		try {
+			assertStoreNotNewer(probe, store);
+
+		} finally {
+			probe.close();
+		}
+		const db = openDoltlite(store, { lock: locks[1] as StoreLock });
+		try {
+			db.recover();
+			const r = purgeHistory(db, store);
+			io.out(PURGE_TEXT.done(r.commitsBefore, r.commitsAfter));
+			io.out(PURGE_TEXT.backupSaved(r.backupPath));
+		} finally {
+			db.close();
+		}
+		return 0;
+	} finally {
+		for (const l of locks.reverse()) l.release();
+	}
+}
+
+export function runCli(argv: string[], io: Io): number {
+	const args = argv[0] === "--" ? argv.slice(1) : argv; // pnpm forwards a leading --
+	const [command, ...rest] = args;
+	if (command === "purge") {
+		try {
+			return purge(rest, io);
+		} catch (error) {
+			io.err(`lh purge: ${(error as Error).message}`);
+			return 1;
+		}
+	}
+	io.err(command === undefined ? PURGE_TEXT.usage : PURGE_TEXT.unknownCommand(command));
+	if (command !== undefined) io.err(PURGE_TEXT.usage);
+	return 1;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+	process.exitCode = runCli(process.argv.slice(2), { out: (l) => console.log(l), err: (l) => console.error(l) });
+}

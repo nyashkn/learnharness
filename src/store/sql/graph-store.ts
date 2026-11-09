@@ -76,6 +76,11 @@ export function assertNotNewer(db: SqlDriver, file: string): void {
 	}
 }
 
+/** Refuse a newer store (StorageVersionError); a store with no lh_meta yet is not one. */
+export function assertStoreNotNewer(db: SqlDriver, file: string): void {
+	if (hasMeta(db)) assertNotNewer(db, file);
+}
+
 const hasMeta = (db: SqlDriver) => db.get("SELECT 1 AS x FROM sqlite_schema WHERE type = 'table' AND name = 'lh_meta'") !== undefined;
 
 // ─── ledgers ─────────────────────────────────────────────────────────────────
@@ -111,7 +116,8 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 	const { db, file, positions } = opts;
 	const log = opts.log ?? ((message: string, error?: unknown) => console.error(`[sql-graph-store] ${message}`, error ?? ""));
 
-	if (hasMeta(db)) assertNotNewer(db, file); // StorageVersionError, not S2's MigrationRefusedError (the contract needs the name)
+	assertStoreNotNewer(db, file); // StorageVersionError, not S2's MigrationRefusedError (the contract needs the name)
+	db.recover(); // after the refusal (an older build must not seal a newer build's leftovers), before migrate (they must not fold into its seal)
 	const { storeId } = migrate(db, { ...graphMigration, lhVersion: opts.lhVersion, backupPath: opts.backupPath, log });
 
 	let txn: Txn | null = null;

@@ -41,6 +41,7 @@ export function openDoltlite(file: string, options: DoltliteOptions = {}): SqlDr
 	if (options.lock && options.lock.lockFile !== lockFileFor(file)) {
 		throw new Error(`lock ${options.lock.lockFile} is not the lock of ${file} (expected ${lockFileFor(file)})`);
 	}
+	if (options.lock && !options.lock.held()) throw new Error(`lock ${options.lock.lockFile} is not held (released or taken over); refusing to open ${file}`);
 	return open(file, options.readOnly === true, options.busyTimeoutMs ?? 5000, options.readOnly === true ? undefined : options.lock);
 }
 
@@ -132,6 +133,12 @@ function open(target: string, readOnly: boolean, busyTimeoutMs: number, recoverL
 			return db.doltCommit(message);
 		},
 		head,
+		recover() {
+			// The SQL COMMIT succeeded before a crash, so the leftovers are real data. Only a still-held lock holder may commit.
+			if (!recoverLock || readOnly || !dirty()) return;
+			if (!recoverLock.held()) throw new Error(`recover: lock ${recoverLock.lockFile} is no longer held; the working set is left as it is`);
+			db.doltCommit(RECOVER_MESSAGE);
+		},
 		close() {
 			if (closed) return;
 			closed = true;
@@ -139,15 +146,6 @@ function open(target: string, readOnly: boolean, busyTimeoutMs: number, recoverL
 		},
 	} satisfies SqlDriver;
 
-	// Recover at open: the SQL COMMIT succeeded before a crash, so the leftovers are real data. Only the lock holder may commit.
-	if (recoverLock && dirty()) {
-		try {
-			db.doltCommit(RECOVER_MESSAGE);
-		} catch (error) {
-			driver.close();
-			throw error;
-		}
-	}
 	return driver;
 }
 

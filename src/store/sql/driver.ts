@@ -26,6 +26,12 @@ export interface SqlDriver {
 	seal(message: string): string | null;
 	/** DoltLite HEAD hash. sqlite: null. */
 	head(): string | null;
+	/**
+	 * DoltLite: commit a dirty working set as `recovered at open`, only if this handle was opened writable with a store
+	 * lock that is still held; otherwise a no-op. Never discards the working set. sqlite: no-op.
+	 * Callers run it after the newer-store refusal, never inside open().
+	 */
+	recover(): void;
 	/** Idempotent. */
 	close(): void;
 }

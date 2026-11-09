@@ -18,7 +18,7 @@ import fc from "fast-check";
 import { comparePins } from "../../scripts/check-version-pins";
 import type { SqlDriver } from "../../src/store/sql/driver";
 import { openDoltlite, openReaderAt, RECOVER_MESSAGE } from "../../src/store/sql/drivers/doltlite";
-import { lockFileFor, type StoreLock } from "../../src/store/sql/lock";
+import { acquireStoreLock, lockFileFor, type StoreLock } from "../../src/store/sql/lock";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const nodeRequire = createRequire(import.meta.url);
@@ -28,10 +28,21 @@ let n = 0;
 before(() => {
 	dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-doltlite-facts-"));
 });
-after(() => fs.rmSync(dir, { recursive: true, force: true }));
+const locks = new Map<string, StoreLock>();
+after(() => {
+	for (const l of locks.values()) l.release();
+	fs.rmSync(dir, { recursive: true, force: true });
+});
 const fresh = () => path.join(dir, `s${n++}.db`);
 const open = (file = fresh()) => openDoltlite(file, { busyTimeoutMs: 0 });
-const lockOf = (file: string): StoreLock => ({ lockFile: lockFileFor(file), release() {} });
+/** A REAL store lock (one per file, reused while held): a plain object could never show a lock is held. */
+const lockOf = (file: string): StoreLock => {
+	const known = locks.get(file);
+	if (known?.held()) return known;
+	const lock = acquireStoreLock(file);
+	locks.set(file, lock);
+	return lock;
+};
 const LEDGER = "CREATE TABLE ledger (seq INTEGER PRIMARY KEY, line_json TEXT NOT NULL)";
 const count = (db: SqlDriver, table = "ledger") => db.get<{ c: number }>(`SELECT count(*) AS c FROM ${table}`)?.c;
 const lines = (db: SqlDriver) => db.all<{ line_json: string }>("SELECT line_json FROM ledger ORDER BY seq").map((r) => r.line_json);
@@ -590,6 +601,9 @@ process.kill(process.pid,"SIGKILL");`,
 	test("recover at open, right lock: commits 'recovered at open' once, the working set is then clean, nothing is lost", () => {
 		const { file, commitCount } = store(true);
 		const db = openDoltlite(file, { lock: lockOf(file) });
+		assert.equal(commits(db).length, commitCount, "open itself never commits (lh-pv9)");
+		assert.equal(dirtyTables(db), 1);
+		db.recover();
 		assert.equal(commits(db).length, commitCount + 1);
 		assert.equal(commits(db)[0]?.message, RECOVER_MESSAGE);
 		assert.equal(commits(db)[0]?.commit_hash, db.head());
@@ -597,6 +611,7 @@ process.kill(process.pid,"SIGKILL");`,
 		assert.deepEqual(lines(db), ["base", "leftover"]);
 		db.close();
 		const again = openDoltlite(file, { lock: lockOf(file) });
+		again.recover();
 		assert.equal(commits(again).length, commitCount + 1, "second open has nothing to recover");
 		again.close();
 	});
@@ -604,11 +619,14 @@ process.kill(process.pid,"SIGKILL");`,
 	test("recover at open, refusals: no lock, readOnly, a reader and a clean store make no commit and leave a dirty set dirty", () => {
 		const { file, head, commitCount } = store(true);
 		const unlocked = open(file);
+		unlocked.recover();
 		unlocked.close();
 		const ro = openDoltlite(file, { readOnly: true, lock: lockOf(file) }); // even a lock does not let a read-only handle write
+		ro.recover();
 		ro.close();
 		assert.throws(() => openReaderAt(file, "0".repeat(40)));
 		const reader = openReaderAt(file, head);
+		reader.recover();
 		reader.close();
 		const seen = peek(file);
 		assert.equal(seen.log.length, commitCount);
@@ -617,6 +635,7 @@ process.kill(process.pid,"SIGKILL");`,
 
 		const clean = store(false);
 		const c = openDoltlite(clean.file, { lock: lockOf(clean.file) });
+		c.recover();
 		assert.equal(commits(c).length, clean.commitCount, "a clean store makes no commit");
 		c.close();
 	});
@@ -635,9 +654,40 @@ process.kill(process.pid,"SIGKILL");`,
 		const { file, commitCount } = store(true);
 		const a = openDoltlite(file, { lock: lockOf(file) });
 		const b = openDoltlite(file, { lock: lockOf(file) });
+		a.recover();
+		b.recover();
 		assert.equal(commits(b).length, commitCount + 1);
 		a.close();
 		b.close();
+	});
+
+	test("a lock that is not held is refused at open, and recover() refuses when the lock was released after open", () => {
+		const { file, commitCount } = store(true);
+		const gone = acquireStoreLock(file);
+		gone.release();
+		assert.throws(() => openDoltlite(file, { lock: gone }), /not held/);
+		assert.throws(() => openDoltlite(file, { readOnly: true, lock: gone }), /not held/);
+
+		const live = acquireStoreLock(file);
+		const db = openDoltlite(file, { lock: live });
+		live.release();
+		assert.throws(() => db.recover(), /no longer held/);
+		db.close();
+		const seen = peek(file);
+		assert.equal(seen.log.length, commitCount, "no commit was made");
+		assert.equal(seen.dirty, 1, "the working set was left alone");
+	});
+
+	test("a lock evicted by another holder's content is not held", () => {
+		const file = fresh();
+		const lock = acquireStoreLock(file);
+		assert.equal(lock.held(), true);
+		fs.writeFileSync(lock.lockFile, JSON.stringify({ pid: 1, host: "other", startedAt: "2000-01-01T00:00:00.000Z" }));
+		assert.equal(lock.held(), false);
+		assert.throws(() => openDoltlite(file, { lock }), /not held/);
+		lock.release(); // does not remove the other holder's file
+		assert.ok(fs.existsSync(lockFileFor(file)));
+		fs.rmSync(lockFileFor(file));
 	});
 
 	test("growth per commit: bytes added to the store file by one ledger-shaped append + seal", () => {

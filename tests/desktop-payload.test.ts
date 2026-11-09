@@ -9,6 +9,9 @@ import { describe, it } from "node:test";
 const source = fs.readFileSync(new URL("../scripts/build-server.mjs", import.meta.url), "utf8");
 const STANDALONE = path.join(".next", "standalone");
 const PROMPT = path.join("src", "agent", "system-prompt.md");
+const PLATFORM = `${process.platform}-${process.arch}`;
+const DOLT = path.join(STANDALONE, "node_modules", "@dolthub", "doltlite");
+const DOLT_ADDON = path.join(DOLT, "prebuilds", PLATFORM, "doltlite.node");
 
 function withPayload(test: (fixture: {
 	root: string;
@@ -28,6 +31,7 @@ function withPayload(test: (fixture: {
 		write(path.join("public", "asset.txt"));
 		write(path.join(STANDALONE, PROMPT));
 		write(path.join(STANDALONE, "src", "agent", "prompts", "teacher", "20-teaching.md"));
+		for (const file of ["index.js", "package.json", path.join("prebuilds", PLATFORM, "doltlite.node")]) write(path.join(DOLT, file));
 		test({ root, write, run: () => spawnSync(process.execPath, [path.join(root, "scripts", "build-server.mjs")], {
 			cwd: root, encoding: "utf8", timeout: 10_000,
 		}) });
@@ -91,6 +95,41 @@ describe("desktop standalone payload", () => {
 			const result = run();
 			assert.equal(result.status, 1);
 			assert.match(String(result.stderr), /prompt asset missing/);
+		});
+	});
+
+	it("refuses a doltlite CLI binary in prebuilds", () => {
+		for (const cli of [path.join("prebuilds", "doltlite"), path.join("prebuilds", "doltlite.exe"), path.join("prebuilds", PLATFORM, "doltlite")]) {
+			withPayload(({ write, run }) => {
+				write(path.join(DOLT, cli));
+				const result = run();
+				assert.equal(result.status, 1, cli);
+				assert.match(String(result.stderr), /REFUSING.*doltlite CLI/);
+			});
+		}
+	});
+
+	it("refuses another platform's doltlite prebuild", () => {
+		const other = PLATFORM === "linux-x64" ? "win32-x64" : "linux-x64";
+		withPayload(({ write, run }) => {
+			write(path.join(DOLT, "prebuilds", other, "doltlite.node"));
+			const result = run();
+			assert.equal(result.status, 1);
+			assert.match(String(result.stderr), /REFUSING.*another platform's prebuild/);
+		});
+	});
+
+	it("requires the doltlite addon on darwin-arm64 and only warns elsewhere", () => {
+		withPayload(({ root, run }) => {
+			fs.rmSync(path.join(root, DOLT_ADDON));
+			const result = run();
+			if (PLATFORM === "darwin-arm64") {
+				assert.equal(result.status, 1);
+				assert.match(String(result.stderr), /REFUSING.*doltlite missing/);
+			} else {
+				assert.equal(result.status, 0, String(result.stderr));
+				assert.match(String(result.stderr), /WARNING.*doltlite missing/);
+			}
 		});
 	});
 });

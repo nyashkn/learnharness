@@ -52,6 +52,32 @@ describe("store lock (CB6)", () => {
 		);
 	});
 
+	test("held() follows a model of acquire/release across two contenders", () => {
+		type Op = ["acquire" | "release", 0 | 1];
+		const op = fc.tuple(fc.constantFrom("acquire", "release"), fc.constantFrom(0, 1)) as fc.Arbitrary<Op>;
+		fc.assert(
+			fc.property(fc.array(op, { maxLength: 20 }), (ops) => {
+				const f = store();
+				const handles: (ReturnType<typeof acquireStoreLock> | undefined)[] = [undefined, undefined];
+				let owner: 0 | 1 | null = null; // the model: who holds the lock file
+				for (const [kind, who] of ops) {
+					if (kind === "acquire") {
+						if (owner === null) {
+							handles[who] = acquireStoreLock(f, { pid: who + 1, host: "h1", isAlive: () => true });
+							owner = who;
+						} else assert.throws(() => acquireStoreLock(f, { pid: who + 1, host: "h1", isAlive: () => true }), StoreLockedError);
+					} else {
+						handles[who]?.release();
+						if (owner === who) owner = null;
+					}
+					for (const w of [0, 1] as const) if (handles[w]) assert.equal(handles[w]!.held(), owner === w, `after ${kind} ${who}`);
+				}
+				handles.forEach((h) => h?.release());
+			}),
+			{ numRuns: 40 },
+		);
+	});
+
 	test("release frees the lock, is idempotent, and does not remove a lock someone else now holds", () => {
 		const f = store();
 		const a = acquireStoreLock(f, { pid: 1, host: "h1", isAlive: () => true });

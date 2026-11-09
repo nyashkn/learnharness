@@ -64,6 +64,7 @@ function rig(options: RigOptions = {}): Rig {
 		transaction: (fn) => raw.transaction(fn),
 		seal: (m) => { log.push(`SEAL ${m}`); return raw.seal(m); },
 		head: () => raw.head(),
+		recover: () => raw.recover(),
 		close: () => raw.close(),
 	};
 	const db = options.wrap ? options.wrap(recording, log) : recording;

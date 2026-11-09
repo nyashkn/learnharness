@@ -81,6 +81,7 @@ export function faultyDriver(inner: SqlDriver, fault: Fault): FaultyDriver {
 			return inner.seal(message);
 		},
 		head: () => inner.head(),
+		recover: () => inner.recover(),
 		close: () => inner.close(),
 	};
 }

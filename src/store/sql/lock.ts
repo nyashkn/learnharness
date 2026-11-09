@@ -34,6 +34,8 @@ export class StoreLockedError extends Error {
 
 export interface StoreLock {
 	readonly lockFile: string;
+	/** True only while the lock file still holds exactly this lock's content: false after release, or once evicted. */
+	held(): boolean;
 	/** Idempotent. Removes the lock only if it is still ours. */
 	release(): void;
 }
@@ -113,6 +115,7 @@ export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLoc
 				fs.linkSync(temp, lockFile);
 				return {
 					lockFile,
+					held: () => readText(lockFile) === text,
 					release() {
 						if (readText(lockFile) === text) fs.rmSync(lockFile, { force: true });
 					},
