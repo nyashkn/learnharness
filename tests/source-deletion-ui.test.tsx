@@ -158,3 +158,30 @@ it("minimal home refreshes its snapshot and summary immediately after source del
 	assert.match(document.querySelector('[data-testid="knowledge-summary"]')!.textContent!, /0 imported notes/);
 	assert.equal(document.querySelector('[data-testid="cluster-checkbox-a"]'), null);
 });
+
+const sentence = "Removed from your graph and every view. It stays in this store's version history until you purge history.";
+const history = () => document.querySelector('[data-testid="source-deletion-history"]');
+async function organize() {
+	const drop = new dom.window.Event("drop", { bubbles: true, cancelable: true });
+	Object.defineProperty(drop, "dataTransfer", { value: { getData: () => JSON.stringify({ kind: "source", id: "b" }) } });
+	await act(async () => { document.querySelector('[data-testid="source-root-drop"]')!.dispatchEvent(drop); });
+}
+for (const keepsHistory of [true, false]) it(`the history sentence ${keepsHistory ? "survives" : "never shows after"} an organize action and a deletion (keepsHistory ${keepsHistory})`, async () => {
+	let current = directory(), posts = 0, deletes = 0;
+	globalThis.fetch = async (_url, init) => {
+		if (init?.method === "POST") posts++;
+		if (init?.method === "DELETE") { deletes++; current = { ...current, sources: current.sources.filter((s) => s.id !== "a") }; return Response.json({ ...current, keepsHistory, graphRevision: 1 }); }
+		return Response.json({ ...current, keepsHistory });
+	};
+	const check = async (id: string, select = true) => {
+		if (select) await click(`cluster-checkbox-${id}`);
+		await click("chain-delete");
+		if (keepsHistory) assert.equal(history()!.textContent, sentence); else assert.equal(history(), null);
+	};
+	await mount(<ChainTableOverlay open nodes={[]} chains={[]} sessions={{}} fileSources={{}} onClose={() => {}} />);
+	await check("a"); await click("source-delete-cancel");
+	await organize(); assert.equal(posts, 1);
+	await check("a", false);
+	await click("source-delete-confirm"); assert.equal(deletes, 1);
+	await check("b");
+});

@@ -25,6 +25,8 @@ import type { Stores } from "../core/ports.ts";
 // reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
 const backend = openDataFolder(PATHS.data);
 export const storageBackend: Backend = backend;
+// A versioned store keeps deleted content in its history until purge; the delete dialog says so.
+export const keepsHistoryFor = (b: Backend): boolean => b === "doltlite";
 // sqlite, doltlite: the ledgers and sources live in the store file, graph.sqlite or graph.doltlite (opened here, eagerly, when it exists); the file graphStore only serves positions.
 const graph = backend !== "file" ? createSqlGraphStores(PATHS.data, graphStore, emit, beforeWrite, backend) : { graphStore, sourceOrganizationStore };
 purgeLegacyLedgers(PATHS.graph); // after every refusal, the sqlite one included: a refused folder keeps its legacy files

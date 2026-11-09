@@ -11,7 +11,7 @@ process.env.LH_AUTH_FILE = path.join(root, "auth.json");
 fs.writeFileSync(process.env.LH_AUTH_FILE, "{}\n");
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 const { GET, POST } = await import("../app/api/graph/sources/route.ts");
-const { stores } = await import("../src/server/stores.ts");
+const { stores, keepsHistoryFor } = await import("../src/server/stores.ts");
 const { sourceDirectory } = await import("../src/server/source-organization.ts");
 const { SOURCE_ORGANIZATION_FILE } = await import("../config.ts");
 const change = (action: unknown) => POST(new Request("http://localhost/api/graph/sources", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) }));
@@ -33,6 +33,15 @@ it("GET is a non-writing read and inventories all sessions, imported records and
 
 it("GET reports keepsHistory false on the file backend", async () => {
 	assert.equal((await (await GET()).json()).keepsHistory, false);
+});
+
+it("keepsHistoryFor is true only for doltlite", () => {
+	assert.equal(keepsHistoryFor("file"), false); assert.equal(keepsHistoryFor("sqlite"), false); assert.equal(keepsHistoryFor("doltlite"), true);
+});
+
+it("POST carries keepsHistory like GET (false on the file backend)", async () => {
+	const body = await (await change({ action: "create-folder", name: "Any", parentId: null })).json();
+	assert.equal(body.keepsHistory, false);
 });
 
 it("GET projects practice kind without removing or rewriting sessions, historical graph contributions or folder placements", async () => {
