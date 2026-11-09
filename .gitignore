@@ -21,4 +21,6 @@ xai-credentials.json*
 .fresh-data/
 
 # seed store: harvested session text lives here, never commit
-*.sqlite*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
