@@ -9,8 +9,16 @@ const A62 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 // deterministic mixed letters and digits; 7 is coprime to 62, so no character repeats within 62
 const fake = (n: number) => Array.from({ length: n }, (_, i) => A62[(i * 7 + 3) % 62]).join("");
 
+// Credential flags, with "=" and with whitespace before the value.
+const FLAGS = ["--password", "--passwd", "--token", "--api-key", "--apikey", "--secret", "--auth-token", "--access-token"];
+const FLAG_ROWS = FLAGS.flatMap((f) =>
+	(["=", " "] as const).map((sep) => [`flag ${f} ${sep === "=" ? "equals" : "space"}`, t("run ", f, sep, fake(12), " now"), `run ${f}${sep}[redacted:secret] now`] as const),
+);
+
 // Every expected value is a literal written by hand; none is computed by redact.
 const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: string]> = [
+	...FLAG_ROWS,
+	["flag-like option survives", "run --token-count 5 now", "run --token-count 5 now"],
 	// inline and spaced env
 	["env after &&", "cd app && API_KEY=abc123xyz run", "cd app && API_KEY=[redacted:env] run"],
 	["env with spaces", "API_KEY = abc123xyz", "API_KEY = [redacted:env]"],

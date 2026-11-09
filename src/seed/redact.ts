@@ -21,6 +21,8 @@ const HEADER =
 const PATH_SECRET_URL =
 	/(?:[a-z][a-z0-9+.-]*:\/\/)?(?:hooks\.slack\.com\/services\/|discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/|api\.telegram\.org\/(?:file\/)?bot)[^\s"'<>]+/gi;
 const INLINE_ENV = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]+[ \t]*=(?![=>])[ \t]*)(?!\[redacted:)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g;
+// CLI credential flags: KEY_VALUE only sees "=", and a flag also takes its value after whitespace. `--token-count 5` stays.
+const FLAG = /(?<![A-Za-z0-9-])(--(?:password|passwd|token|api-key|apikey|secret|auth-token|access-token)(?:=|[ \t]+))(?!\[redacted:)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/gi;
 const KEY_VALUE =
 	/(?<![A-Za-z0-9])([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|private[_-]?key|token|credentials?)["']?[ \t]*[:=][ \t]*)(?!\[redacted:)(?:"[^"\n]*"|'[^'\n]*'|[^\s"',;&)}\]]+)/gi;
 // Alnum-only runs: hex digests and similar; the digit+letter test keeps long identifiers out.
@@ -64,6 +66,7 @@ export function redact(text: string): string {
 	out = out.replace(URL_RE, (url) => (/[?]|#[^#\s]*=|\/\/[^/]*@/.test(url) ? "[redacted:url]" : url));
 	out = out.replace(ENV_LINE, "$1=[redacted:env]");
 	out = out.replace(INLINE_ENV, "$1[redacted:env]");
+	out = out.replace(FLAG, "$1[redacted:secret]");
 	out = out.replace(KEY_VALUE, "$1[redacted:secret]");
 	out = out.replace(OPAQUE_RUN, "[redacted:secret]");
 	out = out.replace(SPLIT_RUN, redactSplitRun);
