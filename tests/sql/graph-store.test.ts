@@ -281,6 +281,33 @@ describe("C crash atomicity through the GraphStore (FP-SQLAD-CRASH)", () => {
 		return "ok";
 	});
 
+	it("C4 a bare write that throws part-way and is caught inside transact still dooms the outer one, at every write step", () => {
+		const file = seeded();
+		const probe = rig({ file }); const baseline = state(probe); probe.close();
+		let steps = 0;
+		for (let nth = 1; nth < 20; nth++) {
+			const { r, fd } = faultyRig(file, { kind: "after", nth, match: /^\s*(UPDATE|DELETE)\b.*\bledger_/is }); // the rewrite's own row writes, never the append after the catch
+			try {
+				let caught = 0;
+				const run = () => r.graph.transact("outer", () => {
+					try { r.graph.rewriteLedgers({ nodes: [node("n1", "edited")], chains: [] }); } catch (e) { assert.ok(e instanceof InjectedFault, String(e)); caught++; }
+					r.graph.appendNode(node("n4", "four"));
+					return "swallowed";
+				});
+				let threw = false;
+				try { run(); } catch { threw = true; }
+				if (!fd().fired) break;
+				steps = nth;
+				assert.equal(caught, 1, `step ${nth}: the bare write should have thrown into the caller's catch`);
+				assert.ok(threw, `step ${nth}: the outer transact committed after a caught bare-write failure`);
+				assert.equal(state(r), baseline, `step ${nth} left a trace`);
+				assert.deepEqual(r.log.filter((l) => l.startsWith("SEAL")), [], "sealed a doomed transaction");
+			} finally { r.close(); }
+			const check = rig({ file }); assert.equal(state(check), baseline, `step ${nth}: durable state changed`); check.close();
+		}
+		assert.ok(steps >= 2, `the bare write must have several write steps to fail part-way, saw ${steps}`);
+	});
+
 	for (const kind of ["before", "after", "enospc"] as const) {
 		it(`C1 ${kind}: a fault at every write step of a transact leaves no trace, no event and no seal`, () => {
 			const file = seeded();
@@ -433,14 +460,17 @@ describe("V revision bump and seal only when rows really changed", () => {
 		r.close();
 	});
 
-	it("V5 revision scope matches the file adapter: ledgers and the sources map move it; the source-organization document does not (it still seals)", () => {
+	it("V5 a changed source-organization write moves the revision and seals; an identical one does neither (items 9, 16)", () => {
 		const r = rig();
 		const rev = r.graph.revision(); r.log.length = 0;
 		r.sourceOrg.write(org("one"));
-		assert.equal(r.graph.revision(), rev, "source organization is outside the revision, as in the file adapter");
+		assert.equal(r.graph.revision(), rev + 1, "a changed source-organization write moves the revision");
 		assert.deepEqual(seals(r), ["SEAL auto:sourceOrg.write"]);
+		r.sourceOrg.write(org("one"));
+		assert.equal(r.graph.revision(), rev + 1, "an identical write moves nothing");
+		assert.deepEqual(seals(r), ["SEAL auto:sourceOrg.write"], "an identical write does not seal");
 		r.graph.upsertSource(src("src_1"));
-		assert.equal(r.graph.revision(), rev + 1);
+		assert.equal(r.graph.revision(), rev + 2);
 		r.close();
 	});
 

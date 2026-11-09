@@ -1,9 +1,8 @@
 /**
  * SourceOrganizationStore on the graph store's SQL core (architecture 4.1: `documents` row 'source-organization').
  * Factory only. The write joins an open GraphStore.transact: it and its event wait for COMMIT; outside one it
- * wraps itself in `auto:sourceOrg.write`. It seals (the working set changed) but does not move
- * GraphStore.revision(), which covers the four ledgers and the sources map only (the file adapter's
- * revision stats the same files and not source-organization.json).
+ * wraps itself in `auto:sourceOrg.write`. A write that changes the row seals and moves GraphStore.revision()
+ * (architecture 2.1 items 9 and 16); an identical write does neither.
  */
 import { emptySourceOrganization, parseSourceOrganization } from "../../core/source-organization.ts";
 import type { SourceOrganizationStore } from "../../core/ports.ts";
@@ -32,7 +31,7 @@ export function createSourceOrganizationStore({ core, emit }: SourceOrganization
 			core.bare("auto:sourceOrg.write", () => {
 				const prev = db.get<{ json: string }>("SELECT json FROM documents WHERE key = ?", KEY);
 				if (prev?.json !== text && db.run("INSERT INTO documents (key, json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET json = excluded.json", KEY, text).changes > 0) {
-					core.changed({ revision: false });
+					core.changed();
 				}
 				core.afterCommit(() => emit("sources-changed", {}));
 			});

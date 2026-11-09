@@ -178,7 +178,7 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 	const core: GraphCore = {
 		db,
 		guard,
-		bare: (label, fn) => (txn ? fn() : transact(label, fn)),
+		bare: (label, fn) => (txn ? db.transaction(fn) : transact(label, fn)), // nested, so a throw part-way dooms the outer even if the caller catches it
 		changed(o) {
 			if (!txn) throw new Error("GraphCore.changed outside a transaction");
 			txn.dirty = true;
