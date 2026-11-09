@@ -5,12 +5,14 @@
  * folder. High risk: it moves real user data, so every step is ordered to leave the source untouched.
  *
  * Normalisation (architecture 2.1 item 12): CRLF becomes LF, blank lines and a torn tail are dropped and counted,
- * nothing else changes. `export(import(export(x))) == export(x)` byte for byte.
+ * nothing else changes. `export(import(export(x))) == export(x)` byte for byte. Input that cannot be carried unchanged
+ * (invalid UTF-8, an SQL row that is not one line of text) refuses the run.
  *
  * migrate order: refusals (no lock, no write) -> locks -> newer probes (read-only) -> snapshot -> journal check ->
- * backup -> one transaction per entity (journal updated after each) -> verify (target read back == source) ->
+ * backup -> one transaction per entity (journal updated after each) -> verify (stored bytes == expected bytes) ->
  * journal removed -> marker written LAST. A crash anywhere reruns: same source + direction resumes, anything else restarts.
- * The source is never written: a file source is only read, an SQL source is only opened read-only.
+ * The source is never written: a file source is only read, an SQL source is only opened read-only. The main store file
+ * stays byte-identical; SQLite may still create or update its -wal and -shm files beside a source (owner decision, in the usage text).
  *
  * shortcut: a snapshot holds the whole store in memory (the app's own reader does the same); stream per ledger if stores outgrow RAM.
  */
@@ -31,10 +33,12 @@ import { acquireStoreLock, type StoreLock } from "./sql/lock.ts";
 
 // ─── text ────────────────────────────────────────────────────────────────────
 
+const SOURCE_NOTE = "The source store file is never changed. SQLite may create or update the -wal and -shm files beside it; that changes no data.";
+
 /** Every user-facing string of the two commands, one place (the way PURGE_TEXT does it). */
 export const MIGRATE_TEXT = {
-	usage: "usage: lh migrate --to <file|sqlite|doltlite> [--data-dir <path>]",
-	exportUsage: "usage: lh export [--out <dir>] [--data-dir <path>]",
+	usage: `usage: lh migrate --to <file|sqlite|doltlite> [--data-dir <path>] [--allow-empty-source]\n  An empty source refuses to replace a target that holds data unless --allow-empty-source is passed.\n  ${SOURCE_NOTE}`,
+	exportUsage: `usage: lh export [--out <dir>] [--data-dir <path>]\n  ${SOURCE_NOTE}`,
 	noDataDir: (dir: string) => `the data folder ${dir} does not exist`,
 	doltliteTarget: "this build cannot open a DoltLite data folder yet, so migrating to it would leave the app unable to start; nothing was changed. DoltLite as a source (the exit path) works",
 	sameBackend: (backend: string) => `the data folder already uses the ${backend} backend; nothing to migrate`,
@@ -42,6 +46,10 @@ export const MIGRATE_TEXT = {
 	markerChanged: "the storage marker changed while taking the locks; nothing was changed, run again",
 	badSources: (file: string, why: string) => `${file} ${why}; refusing, because the app would read it as empty and the sources would be lost`,
 	badJson: (file: string) => `${file} is not valid JSON; refusing, so nothing is lost silently`,
+	notUtf8: (file: string, where?: string) => `${file}${where === undefined ? "" : ` ${where}`} is not valid UTF-8; refusing, because carrying it over would change its bytes. Nothing was changed`,
+	notText: (file: string, where: string, type: string) => `${file} ${where} holds ${type}, not text; refusing, because exporting it would change it. Nothing was changed`,
+	multiline: (file: string, where: string) => `${file} ${where} holds a line break, so it is not one ledger line; refusing, because exporting it would split it. Nothing was changed`,
+	emptySource: (backend: string) => `the source holds no data but the ${backend} target does, and migrating would replace it with nothing. Nothing was changed. Pass --allow-empty-source if that is what you want`,
 	badFormat: (file: string, version: number) => `${file} has version ${version}; a format version must be a positive integer`,
 	notAStore: (file: string) => `${file} is not a LearnHarness graph store (no lh_meta table)`,
 	badMeta: (file: string, key: string, value: string | undefined) => `${file}: lh_meta.${key} is ${value === undefined ? "missing" : JSON.stringify(value)}`,
@@ -49,7 +57,7 @@ export const MIGRATE_TEXT = {
 	unknownDocument: (file: string, key: string) => `${file} has a documents row this build does not know (${key}); refusing, so it is not lost silently`,
 	badRecord: (file: string, what: string, id: string) => `${file}: ${what} ${JSON.stringify(id)} holds invalid JSON; refusing`,
 	outNotEmpty: (out: string) => `${out} already exists and is not empty; an export never overwrites`,
-	verifyFailed: (path: string) => `verification failed: the target differs from the source at ${path}; the marker was NOT written, the source is untouched, and the backup is kept`,
+	verifyFailed: (path: string) => `verification failed: the target differs from the source at ${path}; the marker was NOT written, the source is untouched, and the backup is kept; run again to restart from a fresh backup`,
 	migrated: (from: string, to: string, resumed: boolean) => `migrated ${from} -> ${to}${resumed ? " (resumed an interrupted run)" : ""}`,
 	counts: (c: Counts) => `  nodes ${c.nodes}, chains ${c.chains}, sessions ${c.checkpoints}, coverage ${c.coverage}, sources ${c.sources}`,
 	dropped: (d: Dropped) => `  normalised: ${d.crlf} CRLF line ends, ${d.blank} blank lines dropped, ${d.torn} torn tail lines dropped`,
@@ -137,13 +145,61 @@ export interface Snapshot {
 
 const SourcesShape = Type.Record(Type.String(), Type.Unknown());
 
-function readOptional(file: string): string | undefined {
+function readBytes(file: string): Buffer | undefined {
 	try {
-		return fs.readFileSync(file, "utf8");
+		return fs.readFileSync(file);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
 	}
+}
+
+/** undefined when the bytes are not valid UTF-8: nothing is ever rewritten as U+FFFD. ignoreBOM keeps a BOM as content. */
+function utf8(bytes: Uint8Array): string | undefined {
+	try {
+		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+	} catch {
+		return undefined;
+	}
+}
+
+/** A JSON document or a stamp. */
+function readText(file: string): string | undefined {
+	const bytes = readBytes(file);
+	if (bytes === undefined) return undefined;
+	const text = utf8(bytes);
+	if (text === undefined) throw new MigrateRefusedError(MIGRATE_TEXT.notUtf8(file));
+	return text;
+}
+
+/** A crash can cut an append inside a character: valid UTF-8 up to an unfinished last character. */
+function endsInsideCharacter(tail: Uint8Array): boolean {
+	if (tail.length === 0 || utf8(tail) !== undefined) return false;
+	try {
+		new TextDecoder("utf-8", { fatal: true }).decode(tail, { stream: true });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function firstBadLine(bytes: Buffer): number {
+	for (let line = 1, start = 0; ; line++) {
+		const newline = bytes.indexOf(0x0a, start);
+		if (newline === -1 || utf8(bytes.subarray(start, newline)) === undefined) return line;
+		start = newline + 1;
+	}
+}
+
+/** Invalid UTF-8 refuses: a TEXT column cannot carry it unchanged and the defined normalisation does not cover it. An append cut inside a character IS a torn tail, so it is dropped and counted. */
+function readLedger(file: string): Dropped & { lines: string[] } {
+	const bytes = readBytes(file) ?? Buffer.alloc(0);
+	const body = bytes.subarray(0, bytes.lastIndexOf(0x0a) + 1);
+	const cut = endsInsideCharacter(bytes.subarray(body.length));
+	const text = utf8(cut ? body : bytes);
+	if (text === undefined) throw new MigrateRefusedError(MIGRATE_TEXT.notUtf8(file, `line ${firstBadLine(bytes)}`));
+	const n = normaliseLedger(text);
+	return cut ? { ...n, torn: n.torn + 1 } : n;
 }
 function parseJson(file: string, text: string): unknown {
 	try {
@@ -166,12 +222,12 @@ export function snapshotFile(dataDir: string): Snapshot {
 	const dropped: Dropped = { crlf: 0, blank: 0, torn: 0 };
 	const ledgers = {} as Record<Ledger, string[]>;
 	for (const l of LEDGERS) {
-		const n = normaliseLedger(readOptional(path.join(g, l.file)) ?? "");
+		const n = readLedger(path.join(g, l.file));
 		ledgers[l.entity] = n.lines;
 		add(dropped, n);
 	}
 	const sourcesFile = path.join(g, "sources.json");
-	const sourcesText = readOptional(sourcesFile);
+	const sourcesText = readText(sourcesFile);
 	let sources: [string, unknown][] = [];
 	if (sourcesText !== undefined) {
 		const parsed = parseJson(sourcesFile, sourcesText);
@@ -179,12 +235,12 @@ export function snapshotFile(dataDir: string): Snapshot {
 		sources = Object.entries(parsed); // entries the app's guard would skip are kept: dropping them would lose data
 	}
 	const orgFile = path.join(g, "source-organization.json");
-	const orgText = readOptional(orgFile);
+	const orgText = readText(orgFile);
 	const organization = orgText === undefined ? undefined : { value: parseJson(orgFile, orgText) };
 	// graph-format.ts stampedVersion: absent, corrupt or non-integer = v1
 	const formatFile = path.join(g, "format.json");
 	let lineFormat = 1;
-	const formatText = readOptional(formatFile);
+	const formatText = readText(formatFile);
 	if (formatText !== undefined) {
 		try {
 			const v = (JSON.parse(formatText) as { version?: unknown } | null)?.version;
@@ -202,6 +258,29 @@ const KNOWN_TABLES = new Set(["lh_meta", "sources", "documents", ...LEDGERS.map(
 const openReadOnly = (file: string, backend: "sqlite" | "doltlite"): SqlDriver =>
 	backend === "sqlite" ? openNodeSqlite(file, { readOnly: true }) : openDoltlite(file, { readOnly: true });
 
+interface Cell {
+	type: string;
+	bytes: Uint8Array;
+}
+/** Each row's columns as stored: storage class plus exact bytes, nothing decoded yet. */
+function rawRows(db: SqlDriver, table: string, columns: readonly string[], order = ""): Cell[][] {
+	const select = columns.map((c, i) => `typeof(${c}) AS t${i}, CAST(${c} AS BLOB) AS b${i}`).join(", ");
+	return db.all<Record<string, unknown>>(`SELECT ${select} FROM ${table} ${order}`).map((row) => columns.map((_, i) => ({ type: String(row[`t${i}`]), bytes: row[`b${i}`] as Uint8Array })));
+}
+
+/** rawRows decoded strictly. A value that is not text, or not valid UTF-8, refuses: reading it would change it. */
+function textRows(db: SqlDriver, file: string, table: string, columns: readonly string[], order = ""): string[][] {
+	return rawRows(db, table, columns, order).map((cells, row) =>
+		cells.map(({ type, bytes }, c) => {
+			const where = `${table}.${columns[c]} row ${row + 1}`;
+			if (type !== "text") throw new MigrateRefusedError(MIGRATE_TEXT.notText(file, where, type));
+			const text = utf8(bytes);
+			if (text === undefined) throw new MigrateRefusedError(MIGRATE_TEXT.notUtf8(file, where));
+			return text;
+		}),
+	);
+}
+
 /** Read an SQL store READ-ONLY (a writable DoltLite open appends bytes). Reads the working set, so uncommitted rows count. */
 export function snapshotSql(file: string, backend: "sqlite" | "doltlite"): Snapshot {
 	const db = openReadOnly(file, backend);
@@ -214,23 +293,26 @@ export function snapshotSql(file: string, backend: "sqlite" | "doltlite"): Snaps
 		const dropped: Dropped = { crlf: 0, blank: 0, torn: 0 };
 		const ledgers = {} as Record<Ledger, string[]>;
 		for (const l of LEDGERS) {
-			const rows = db.all<{ line_json: string }>(`SELECT line_json FROM ${l.table} ORDER BY seq`).map((r) => String(r.line_json));
+			const rows = textRows(db, file, l.table, ["line_json"], "ORDER BY seq").map(([line], i) => {
+				if ((line as string).includes("\n")) throw new MigrateRefusedError(MIGRATE_TEXT.multiline(file, `${l.table}.line_json row ${i + 1}`));
+				return line as string;
+			});
 			const n = normaliseLedger(rows.length === 0 ? "" : `${rows.join("\n")}\n`); // the same normaliser, so the first export is already a fixed point
 			ledgers[l.entity] = n.lines;
 			add(dropped, n);
 		}
-		const sources = db.all<{ id: string; record_json: string }>("SELECT id, record_json FROM sources").map(({ id, record_json }): [string, unknown] => {
+		const sources = textRows(db, file, "sources", ["id", "record_json"]).map(([id, record]): [string, unknown] => {
 			try {
-				return [id, JSON.parse(record_json)];
+				return [id as string, JSON.parse(record as string)];
 			} catch {
-				throw new MigrateRefusedError(MIGRATE_TEXT.badRecord(file, "source", id));
+				throw new MigrateRefusedError(MIGRATE_TEXT.badRecord(file, "source", id as string));
 			}
 		});
 		let organization: Snapshot["organization"];
-		for (const { key, json } of db.all<{ key: string; json: string }>("SELECT key, json FROM documents")) {
-			if (key !== ORG_KEY) throw new MigrateRefusedError(MIGRATE_TEXT.unknownDocument(file, key));
+		for (const [key, json] of textRows(db, file, "documents", ["key", "json"])) {
+			if (key !== ORG_KEY) throw new MigrateRefusedError(MIGRATE_TEXT.unknownDocument(file, key as string));
 			try {
-				organization = { value: JSON.parse(json) };
+				organization = { value: JSON.parse(json as string) };
 			} catch {
 				throw new MigrateRefusedError(MIGRATE_TEXT.badRecord(file, "document", key));
 			}
@@ -241,6 +323,7 @@ export function snapshotSql(file: string, backend: "sqlite" | "doltlite"): Snaps
 	}
 }
 
+const holdsData = (s: Snapshot): boolean => s.sources.length > 0 || s.organization !== undefined || LEDGERS.some((l) => s.ledgers[l.entity].length > 0);
 const countsOf = (s: Snapshot): Counts => ({ nodes: s.ledgers.nodes.length, chains: s.ledgers.chains.length, checkpoints: s.ledgers.checkpoints.length, coverage: s.ledgers.coverage.length, sources: s.sources.length });
 
 /** relative path -> exact text of a file-backend folder, in path order. No marker. positions and render settings are not in it (copied bytes). */
@@ -271,14 +354,16 @@ function requireDataDir(dataDir: string): void {
 	if (!fs.statSync(dataDir, { throwIfNoEntry: false })?.isDirectory()) throw new MigrateRefusedError(MIGRATE_TEXT.noDataDir(dataDir));
 }
 
-/** Refusals shared by both entry points, in order: no lock and no write yet. Returns the backend the marker names. */
-function refusals(dataDir: string): Backend {
+type Marker = ReturnType<typeof readMarker>;
+
+/** Refusals shared by both entry points, in order: no lock and no write yet. Returns the ONE marker read of the run: the backend comes from it and it is what is compared under the locks. */
+function refusals(dataDir: string): { marker: Marker; backend: Backend } {
 	requireDataDir(dataDir);
 	const marker = readMarker(markerFile(dataDir)); // a newer layout or a corrupt marker throws
 	assertGraphFormat(graphFormatFileIn(dataDir)); // every backend: render settings and positions stay files, and `file` is valid = not stamped newer
 	const backend = marker?.backend ?? "file";
 	if (isSql(backend) && !fs.existsSync(storeFile(dataDir, backend))) throw new MigrateRefusedError(MIGRATE_TEXT.missingStore(storeFile(dataDir, backend), backend));
-	return backend;
+	return { marker, backend };
 }
 
 /** READ-ONLY: a store newer than this build refuses before anything is written. */
@@ -310,12 +395,12 @@ class Locks {
 	}
 }
 
-const sameMarker = (a: ReturnType<typeof readMarker>, b: ReturnType<typeof readMarker>): boolean => JSON.stringify(a) === JSON.stringify(b);
+const sameMarker = (a: Marker, b: Marker): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 // ─── export ──────────────────────────────────────────────────────────────────
 
 export interface ExportOptions {
-	/** Tests only: called at after-lock. */
+	/** Tests only: called at after-refusals and after-lock. */
 	checkpoint?: (name: string) => void;
 	now?: () => Date;
 }
@@ -328,13 +413,13 @@ export interface ExportReport {
 /** Write the store as a plain file-backend folder (graph/*), no marker. Built beside `out` and renamed in, so a half export is never mistaken for a whole one. */
 export function exportStore(dataDirIn: string, outIn?: string, options: ExportOptions = {}): ExportReport {
 	const dataDir = path.resolve(dataDirIn);
-	const backend = refusals(dataDir);
+	const { marker, backend } = refusals(dataDir);
+	options.checkpoint?.("after-refusals");
 	const out = path.resolve(outIn ?? path.join(dataDir, `export-${stamp((options.now ?? (() => new Date()))())}`));
 	const existing = fs.statSync(out, { throwIfNoEntry: false });
 	if (existing && (!existing.isDirectory() || fs.readdirSync(out).length > 0)) throw new MigrateRefusedError(MIGRATE_TEXT.outNotEmpty(out));
 
 	const mfile = markerFile(dataDir);
-	const marker = readMarker(mfile);
 	const locks = new Locks();
 	try {
 		locks.take(mfile);
@@ -388,10 +473,10 @@ interface Journal {
 }
 const journalFile = (dataDir: string): string => path.join(dataDir, "storage-migrate.journal.json");
 function readJournal(file: string): Journal | undefined {
-	const text = readOptional(file);
-	if (text === undefined) return undefined;
+	const bytes = readBytes(file);
+	if (bytes === undefined) return undefined;
 	try {
-		const value: unknown = JSON.parse(text);
+		const value: unknown = JSON.parse(bytes.toString("utf8"));
 		return Value.Check(JournalSchema, value) ? (value as Journal) : undefined;
 	} catch {
 		return undefined; // a corrupt journal is a fresh run
@@ -400,9 +485,11 @@ function readJournal(file: string): Journal | undefined {
 const writeJournal = (file: string, j: Journal): void => writeFileAtomicSync(file, `${JSON.stringify(j, null, "\t")}\n`, { allowInPlaceFallback: true });
 
 export interface MigrateOptions {
-	/** Tests only: called at after-lock, after-backup, after-journal, commit:<entity>, after:<entity>, before-verify, after-verify, after-journal-removed, after-marker. A throw is a crash. */
+	/** Tests only: called at after-refusals, after-lock, after-backup, after-journal, commit:<entity>, after:<entity>, before-verify, after-verify, after-journal-removed, after-marker. A throw is a crash. */
 	checkpoint?: (name: string) => void;
 	now?: () => Date;
+	/** `--allow-empty-source`: let a source with no data replace a target that holds data. */
+	allowEmptySource?: boolean;
 	/** Test only. D3 adds the doltlite adapter, removes the refusal in migrateBackend and removes this option. The CLI never passes it. */
 	allowDoltliteTarget?: boolean;
 }
@@ -514,20 +601,21 @@ function sqlTarget(dataDir: string, to: SqlBackend, snap: Snapshot, lock: StoreL
 	};
 }
 
+const FILE_OF: Record<Entity, string> = {
+	meta: "graph/format.json",
+	nodes: "graph/nodes.jsonl",
+	chains: "graph/chains.jsonl",
+	coverage: "graph/coverage.jsonl",
+	checkpoints: "graph/sessions.jsonl",
+	sources: "graph/sources.json",
+	organization: "graph/source-organization.json",
+};
+
 function fileTarget(dataDir: string, rendered: Map<string, string>): Target {
-	const rel: Record<Entity, string> = {
-		meta: "graph/format.json",
-		nodes: "graph/nodes.jsonl",
-		chains: "graph/chains.jsonl",
-		coverage: "graph/coverage.jsonl",
-		checkpoints: "graph/sessions.jsonl",
-		sources: "graph/sources.json",
-		organization: "graph/source-organization.json",
-	};
 	return {
 		write(entity) {
-			const file = path.join(dataDir, rel[entity]);
-			const text = rendered.get(rel[entity]);
+			const file = path.join(dataDir, FILE_OF[entity]);
+			const text = rendered.get(FILE_OF[entity]);
 			if (text === undefined) {
 				fs.rmSync(file, { force: true }); // no document in the source: a stale one in the target goes (it is in the backup)
 				return;
@@ -539,9 +627,36 @@ function fileTarget(dataDir: string, rendered: Map<string, string>): Target {
 	};
 }
 
-function firstDifference(a: Map<string, string>, b: Map<string, string>): string | undefined {
-	for (const p of new Set([...a.keys(), ...b.keys()])) if (a.get(p) !== b.get(p)) return p;
+// Verify compares stored bytes with expected bytes, never through the reader or the normaliser: a check built on them cannot see what they remove.
+
+function fileDifference(dataDir: string, rendered: Map<string, string>): string | undefined {
+	for (const name of FAMILY_FILES) {
+		const rel = `graph/${name}`;
+		const want = rendered.get(rel);
+		const got = readBytes(path.join(dataDir, rel));
+		if (want === undefined ? got !== undefined : !got?.equals(Buffer.from(want, "utf8"))) return rel;
+	}
 	return undefined;
+}
+
+function sqlDifference(file: string, backend: SqlBackend, snap: Snapshot): string | undefined {
+	const byId = [...snap.sources].sort(([a], [b]) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+	const expected = [
+		...LEDGERS.map((l) => ({ table: l.table, columns: ["line_json"], order: "ORDER BY seq", want: snap.ledgers[l.entity].map((line) => [line]) })),
+		{ table: "sources", columns: ["id", "record_json"], order: "ORDER BY CAST(id AS BLOB)", want: byId.map(([id, record]) => [id, JSON.stringify(record)]) },
+		{ table: "documents", columns: ["key", "json"], order: "", want: snap.organization ? [[ORG_KEY, JSON.stringify(snap.organization.value)]] : [] },
+	];
+	const db = openReadOnly(file, backend);
+	try {
+		for (const { table, columns, order, want } of expected) {
+			const got = rawRows(db, table, columns, order);
+			const same = got.length === want.length && got.every((cells, r) => cells.every((cell, c) => cell.type === "text" && Buffer.from(want[r]?.[c] as string, "utf8").equals(cell.bytes)));
+			if (!same) return table;
+		}
+		return db.get<{ value: string }>("SELECT value FROM lh_meta WHERE key = 'line_format'")?.value === String(snap.lineFormat) ? undefined : "lh_meta.line_format";
+	} finally {
+		db.close();
+	}
 }
 
 export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateOptions = {}): MigrateReport {
@@ -552,10 +667,10 @@ export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateO
 	// a. refusals: before any write or lock
 	if (!(BACKENDS as readonly string[]).includes(to)) throw new MigrateRefusedError(MIGRATE_TEXT.usage);
 	if (to === "doltlite" && options.allowDoltliteTarget !== true) throw new MigrateRefusedError(MIGRATE_TEXT.doltliteTarget);
-	const from = refusals(dataDir);
+	const { marker, backend: from } = refusals(dataDir);
 	if (from === to) throw new MigrateRefusedError(MIGRATE_TEXT.sameBackend(from));
+	checkpoint("after-refusals");
 	const mfile = markerFile(dataDir);
-	const marker = readMarker(mfile);
 
 	const locks = new Locks();
 	let target: Target | undefined;
@@ -576,10 +691,14 @@ export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateO
 		const rendered = renderExport(snap);
 		const fp = fingerprint(rendered);
 
+		// An empty source would replace real data with nothing. The check reads only: nothing has been changed yet.
+		if (options.allowEmptySource !== true && !holdsData(snap) && (to === "file" || fs.existsSync(storeFile(dataDir, to))) && holdsData(snapshotOf(dataDir, to))) throw new MigrateRefusedError(MIGRATE_TEXT.emptySource(to));
+
 		// e. journal: same direction and same source resumes, anything else is a fresh run
 		const jfile = journalFile(dataDir);
 		const prior = readJournal(jfile);
-		const resumed = prior !== undefined && prior.from === from && prior.to === to && prior.fingerprint === fp && fs.existsSync(prior.backupDir);
+		const targetSurvived = (done: readonly string[]): boolean => done.length === 0 || (isSql(to) ? fs.existsSync(storeFile(dataDir, to)) : (done as Entity[]).every((e) => !rendered.has(FILE_OF[e]) || fs.existsSync(path.join(dataDir, FILE_OF[e]))));
+		const resumed = prior !== undefined && prior.from === from && prior.to === to && prior.fingerprint === fp && fs.existsSync(prior.backupDir) && targetSurvived(prior.done);
 		let journal: Journal;
 		if (resumed) {
 			journal = prior!;
@@ -611,8 +730,11 @@ export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateO
 		target.close();
 		target = undefined;
 		checkpoint("before-verify");
-		const diff = firstDifference(rendered, renderExport(snapshotOf(dataDir, to)));
-		if (diff !== undefined) throw new Error(MIGRATE_TEXT.verifyFailed(diff));
+		const diff = isSql(to) ? sqlDifference(storeFile(dataDir, to), to, snap) : fileDifference(dataDir, rendered);
+		if (diff !== undefined) {
+			fs.rmSync(jfile, { force: true }); // this target is wrong: the next run starts over from a fresh backup instead of trusting it
+			throw new Error(MIGRATE_TEXT.verifyFailed(diff));
+		}
 		checkpoint("after-verify");
 
 		// i. journal removed, then the marker: literally the last write

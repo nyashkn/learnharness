@@ -88,6 +88,10 @@ function writeFolder(dir: string, raw: Raw): void {
 	}
 }
 
+const bytes = (...parts: (string | number[])[]): Buffer => Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p, "utf8") : Buffer.from(p))));
+const LATIN1_E9 = [0xe9]; // é in Latin-1: not valid UTF-8 when a quote follows it
+const graphFile = (dir: string, name: string): string => path.join(dir, "graph", name);
+
 /** Dirty on purpose: CRLF, blank interior lines, a corrupt line, duplicates, unicode, odd whitespace, a parseable unterminated tail. */
 const DIRTY: Raw = {
 	nodes: `{"id":"n1","name":"é☃"}\r\n\r\n{"id":"n1","name":"é☃"}\n  \n not json \n{"id":"n2"} \r\n{"id":"n3"}`,
@@ -349,6 +353,23 @@ describe("S source never modified", () => {
 		assert.deepEqual(sourceState(dir, "sqlite"), before, "migrate");
 		assert.equal(fs.readFileSync(file)[WRITE_VERSION], 1);
 	});
+	test("S sidecar exemption (owner decision, named in the usage): on a WAL sqlite source only -shm and an empty -wal may change; the main store file stays byte-identical", () => {
+		const dir = mk();
+		seedSql(dir, "sqlite", ROWS, true);
+		const file = path.join(dir, "graph.sqlite");
+		const raw = (): Record<string, string> => Object.fromEntries(fs.readdirSync(dir).filter((n) => n.startsWith("graph.sqlite")).map((n) => [n, sha(fs.readFileSync(path.join(dir, n)))]));
+		const before = raw();
+		const mtime = fs.statSync(file).mtimeMs;
+		exportStore(dir, path.join(mk(), "out"), { now });
+		const after = raw();
+		assert.equal(after["graph.sqlite"], before["graph.sqlite"], "the main store file is byte-identical");
+		assert.equal(fs.statSync(file).mtimeMs, mtime);
+		for (const n of Object.keys(after)) if (after[n] !== before[n]) assert.match(n, /^graph\.sqlite-(shm|wal)$/, `only a sidecar may differ: ${n}`);
+		if (fs.existsSync(`${file}-wal`) && before["graph.sqlite-wal"] === undefined) assert.equal(fs.statSync(`${file}-wal`).size, 0, "a -wal that appears is empty");
+		mig(dir, "file", { now });
+		assert.equal(sha(fs.readFileSync(file)), before["graph.sqlite"], "migrate leaves it byte-identical too");
+		for (const usage of [MIGRATE_TEXT.usage, MIGRATE_TEXT.exportUsage]) assert.match(usage, /-wal and -shm/);
+	});
 	test("S crash at every checkpoint also leaves the source alone (6 directions, one point each)", () => {
 		for (const [from, to] of DIRS) {
 			const dir = mk();
@@ -477,6 +498,24 @@ describe("C crash at every checkpoint, then resume", () => {
 		}
 	});
 
+	test("C-gone: the half-built target was deleted after a crash: the rerun starts over from a fresh backup and completes", () => {
+		for (const to of ["sqlite", "doltlite", "file"] as const) {
+			const from = to === "file" ? "sqlite" : "file";
+			const ref = reference(from, to);
+			for (const name of ["after:nodes", "before-verify", "after-verify"]) {
+				const dir = mk();
+				buildState(dir, from, to);
+				assert.throws(() => mig(dir, to, { now, checkpoint: (n) => { if (n === name) throw new Error("crash"); } }), /crash/);
+				if (to === "file") fs.rmSync(graphFile(dir, "nodes.jsonl"));
+				else for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(path.join(dir, `${storeName(to)}${suffix}`), { force: true });
+				const r = mig(dir, to, { now });
+				assert.equal(r.resumed, false, `${to} @ ${name}`);
+				assert.deepEqual(exportOf(dir), ref.exportTree, `${to} @ ${name}`);
+				assert.equal(fs.existsSync(journalPath(dir)), false);
+			}
+		}
+	});
+
 	for (const to of ["sqlite", "doltlite"] as const) {
 		test(`C-kill: a real SIGKILL mid-migration (file -> ${to}); the stale lock is reclaimed and the resume completes`, async () => {
 			const ref = reference("file", to);
@@ -514,7 +553,7 @@ migrateBackend(dir, to, { allowDoltliteTarget: true, checkpoint(n) { if (n === "
 // ─── M marker last, verify ───────────────────────────────────────────────────
 
 describe("M marker last and verify", () => {
-	test("M1 a target that differs from the source at verify: refused, no marker, journal and backup kept", () => {
+	test("M1 a target that differs from the source at verify: refused, no marker, backup kept, journal removed so the next run restarts and succeeds", () => {
 		for (const to of ["sqlite", "doltlite"] as const) {
 			const dir = mk();
 			buildState(dir, "file", to);
@@ -534,10 +573,55 @@ describe("M marker last and verify", () => {
 				/verification failed/,
 			);
 			assert.equal(readMarkerBytes(dir), undefined, `${to}: no marker`);
-			assert.ok(fs.existsSync(journalPath(dir)), `${to}: journal kept`);
+			assert.equal(fs.existsSync(journalPath(dir)), false, `${to}: journal removed`);
 			assert.ok(fs.existsSync(path.join(dir, "migrate-backups")), `${to}: backup kept`);
+			assert.equal(mig(dir, to, { now }).resumed, false, `${to}: the rerun starts over`);
+			assert.deepEqual(exportOf(dir), reference("file", to).exportTree, `${to}: and ends right`);
 		}
 	});
+	const refusedAtVerify = (dir: string, to: Backend, tamperTarget: () => void, ctx: string): void => {
+		assert.throws(() => mig(dir, to, { now, checkpoint: (n) => { if (n === "before-verify") tamperTarget(); } }), /verification failed/, ctx);
+		assert.equal(readMarkerBytes(dir)?.includes(`"${to}"`) ?? false, false, `${ctx}: no marker for the target`);
+	};
+	test("M3 verify is byte-for-byte on a file target: what the normaliser would remove is still a difference", () => {
+		const edits: Record<string, (t: string) => string> = {
+			"CRLF and a blank line appended": (t) => `${t}\r\n\n`,
+			"a blank line appended": (t) => `${t}\n`,
+			"a torn tail appended": (t) => `${t}{"x`,
+			"CR before the last LF": (t) => t.replace(/\n$/, "\r\n"),
+		};
+		for (const [name, edit] of Object.entries(edits)) {
+			const dir = mk();
+			buildState(dir, "sqlite", "file");
+			const f = graphFile(dir, "nodes.jsonl");
+			refusedAtVerify(dir, "file", () => fs.writeFileSync(f, edit(fs.readFileSync(f, "utf8"))), name);
+		}
+		const dir = mk();
+		seedSql(dir, "sqlite", { ...ROWS, org: undefined }, true);
+		refusedAtVerify(dir, "file", () => fs.writeFileSync(graphFile(dir, "source-organization.json"), "{}\n"), "a stray document");
+	});
+	for (const to of ["sqlite", "doltlite"] as const) {
+		test(`M4 verify is byte-for-byte on a ${to} target: rows the reader would normalise, a BLOB, a reformatted record`, () => {
+			const statements: Record<string, string> = {
+				"a blank row": "INSERT INTO ledger_nodes (seq, line_json) VALUES (999, '')",
+				"a trailing CR": "UPDATE ledger_nodes SET line_json = line_json || char(13) WHERE seq = 1",
+				"a BLOB with the same bytes": "UPDATE ledger_nodes SET line_json = CAST(line_json AS BLOB) WHERE seq = 1",
+				"a source record with the same JSON, other bytes": "UPDATE sources SET record_json = ' ' || record_json WHERE id = 'a'",
+				"a document with the same JSON, other bytes": "UPDATE documents SET json = ' ' || json",
+			};
+			for (const [name, sql] of Object.entries(statements)) {
+				const dir = mk();
+				buildState(dir, "file", to);
+				const file = path.join(dir, storeName(to));
+				const held = { lockFile: `${file}.lock`, held: () => true, release: () => {} };
+				refusedAtVerify(dir, to, () => {
+					const db = openRW(file, to, held);
+					db.exec(sql);
+					db.close();
+				}, name);
+			}
+		});
+	}
 	test("M2 the marker is written after the journal is removed, and is the last write", () => {
 		const dir = mk();
 		buildState(dir, "file", "sqlite");
@@ -621,6 +705,22 @@ const REFUSALS: Refusal[] = [
 	{ name: "target store lock held", migrateOnly: true, expect: StoreLockedError, build: (d) => { writeFolder(d, DIRTY); const l = acquireStoreLock(path.join(d, "graph.sqlite")); return { to: "sqlite", cleanup: () => l.release() }; } },
 	{ name: "same backend", migrateOnly: true, expect: /nothing to migrate/, build: (d) => (writeFolder(d, DIRTY), { to: "file" }) },
 	...['{', "[]", '"x"', "null", ""].map((text): Refusal => ({ name: `corrupt sources.json ${JSON.stringify(text)}`, expect: /sources/, build: (d) => (writeFolder(d, { ...DIRTY, sources: text }), { to: "sqlite" }) })),
+	{ name: "invalid UTF-8 in a ledger line", expect: /nodes\.jsonl line 2 is not valid UTF-8/, build: (d) => (writeFolder(d, DIRTY), fs.writeFileSync(graphFile(d, "nodes.jsonl"), bytes('{"id":"n1"}\n{"name":"caf', LATIN1_E9, '"}\n{"id":"n2"}\n')), { to: "sqlite" }) },
+	{ name: "invalid UTF-8 in an unterminated last line that is not a cut character", expect: /nodes\.jsonl line 2 is not valid UTF-8/, build: (d) => (writeFolder(d, DIRTY), fs.writeFileSync(graphFile(d, "nodes.jsonl"), bytes('{"id":"n1"}\n{"name":"caf', LATIN1_E9, '"}')), { to: "sqlite" }) },
+	...(["sources", "org", "format"] as const).map((k): Refusal => ({ name: `invalid UTF-8 in ${GRAPH_FILES[k]}`, expect: /is not valid UTF-8/, build: (d) => (writeFolder(d, DIRTY), fs.writeFileSync(graphFile(d, GRAPH_FILES[k] as string), bytes('{"name":"caf', LATIN1_E9, '"}')), { to: "sqlite" }) })),
+	...(["sqlite", "doltlite"] as const).flatMap((b): Refusal[] => {
+		const withRow = (sql: string) => (d: string) => (seedSql(d, b, ROWS, true), tamper(d, b, sql), { to: "file" as Backend });
+		const line = (value: string) => `INSERT INTO ledger_nodes (seq, line_json) VALUES (99, ${value})`;
+		return [
+			{ name: `${b} ledger row with invalid UTF-8`, expect: /ledger_nodes\.line_json row 5 is not valid UTF-8/, build: withRow(line("CAST(x'7bff7d' AS TEXT)")) },
+			{ name: `${b} source record with invalid UTF-8`, expect: /sources\.record_json row \d+ is not valid UTF-8/, build: withRow("UPDATE sources SET record_json = CAST(x'7bff7d' AS TEXT) WHERE id = 'a'") },
+			{ name: `${b} document with invalid UTF-8`, expect: /documents\.json row 1 is not valid UTF-8/, build: withRow("UPDATE documents SET json = CAST(x'7bff7d' AS TEXT)") },
+			{ name: `${b} ledger row holding a newline`, expect: /ledger_nodes\.line_json row 5 holds a line break/, build: withRow(line("'{}' || char(10) || '{}'")) },
+			{ name: `${b} ledger row that is a BLOB`, expect: /ledger_nodes\.line_json row 5 holds blob/, build: withRow(line("x'7b7d'")) },
+		];
+	}),
+	{ name: "empty source, sqlite target holds data", migrateOnly: true, expect: /holds no data/, build: (d) => (seedSql(d, "sqlite", STALE, false), { to: "sqlite" }) },
+	{ name: "empty sqlite source, file target holds data", migrateOnly: true, expect: /holds no data/, build: (d) => (seedSql(d, "sqlite", { ...STALE, nodes: [] }, true), writeFolder(d, { nodes: '{"id":"keep"}\n', chains: "", sessions: "", coverage: "" }), { to: "file" }) },
 	{ name: "corrupt source-organization.json", expect: /not valid JSON/, build: (d) => (writeFolder(d, { ...DIRTY, org: "{" }), { to: "sqlite" }) },
 ];
 
@@ -663,6 +763,23 @@ describe("X refusals change nothing (bytes, no backup, no journal, no lock)", ()
 			assert.equal(fs.existsSync(journalPath(dir)), false);
 			assert.equal(fs.existsSync(out), false);
 			assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith(".lock")), []);
+		});
+	}
+	for (const entry of ["migrate", "export"] as const) {
+		test(`X ${entry}: a marker appearing before the locks refuses: the backend comes from the one marker read, so stale data cannot replace a live store`, () => {
+			const dir = mk();
+			writeFolder(dir, DIRTY);
+			const out = path.join(mk(), "out");
+			let live = "";
+			const checkpoint = (n: string): void => {
+				if (n !== "after-refusals") return;
+				seedSql(dir, "sqlite", STALE, true);
+				live = sha(fs.readFileSync(path.join(dir, "graph.sqlite")));
+			};
+			assert.throws(() => (entry === "migrate" ? mig(dir, "sqlite", { now, checkpoint }) : exportStore(dir, out, { now, checkpoint })), /marker changed/);
+			assert.equal(sha(fs.readFileSync(path.join(dir, "graph.sqlite"))), live, "the live store is untouched");
+			assert.equal(fs.existsSync(path.join(dir, "migrate-backups")), false);
+			assert.equal(fs.existsSync(out), false);
 		});
 	}
 	test("X a missing data folder refuses both", () => {
@@ -845,6 +962,73 @@ describe("B CLI", () => {
 			assert.equal(JSON.parse(readMarkerBytes(dir) as string).backend, to);
 		}
 	});
+	test("B15 --allow-empty-source lets an empty source replace a target that holds data, which stays in the backup", () => {
+		const dir = mk();
+		seedSql(dir, "sqlite", STALE, false);
+		const before = tree(dir);
+		const refused = run(["migrate", "--to", "sqlite", "--data-dir", dir]);
+		assert.equal(refused.code, 1);
+		assert.match(refused.err[0] as string, /--allow-empty-source/);
+		assert.deepEqual(tree(dir), before);
+		const r = run(["migrate", "--to", "sqlite", "--data-dir", dir, "--allow-empty-source"]);
+		assert.equal(r.code, 0, r.err.join("\n"));
+		assert.equal(JSON.parse(readMarkerBytes(dir) as string).backend, "sqlite");
+		const backups = fs.readdirSync(path.join(dir, "migrate-backups"));
+		assert.equal(backups.length, 1);
+		const store = path.join(dir, "migrate-backups", backups[0] as string, "target", "graph.sqlite");
+		assert.ok(fs.existsSync(store), "the target that held data is in the backup");
+		const out = path.join(mk(), "o");
+		exportStore(dir, out);
+		assert.equal(fs.readFileSync(path.join(out, "graph", "nodes.jsonl"), "utf8"), "");
+	});
+	test("B16 an empty source over a missing or empty target needs no flag", () => {
+		const none = mk();
+		fs.mkdirSync(path.join(none, "graph"));
+		assert.equal(run(["migrate", "--to", "sqlite", "--data-dir", none]).code, 0);
+		const empty = mk();
+		seedSql(empty, "sqlite", { ...STALE, nodes: [] }, false);
+		assert.equal(run(["migrate", "--to", "sqlite", "--data-dir", empty]).code, 0);
+	});
+	for (const argv of [["migrate", "--to", "sqlite"], ["export", "--out", "OUT"]]) {
+		test(`B17 caf\\xE9 through \`lh ${argv[0]}\`: exit 1, the file and line named, nothing written, the bytes still there`, () => {
+			const dir = mk();
+			writeFolder(dir, { nodes: "", chains: "", sessions: "", coverage: "" });
+			const dirty = bytes('{"id":"n1"}\n{"name":"caf', LATIN1_E9, '"}\n');
+			fs.writeFileSync(graphFile(dir, "nodes.jsonl"), dirty);
+			const out = path.join(mk(), "out");
+			const r = run([...argv.map((a) => (a === "OUT" ? out : a)), "--data-dir", dir]);
+			assert.equal(r.code, 1, r.out.join("\n"));
+			assert.match(r.err[0] as string, new RegExp(`^lh ${argv[0]}: .*nodes\\.jsonl line 2 is not valid UTF-8`));
+			assert.deepEqual(fs.readFileSync(graphFile(dir, "nodes.jsonl")), dirty);
+			assert.equal(readMarkerBytes(dir), undefined);
+			for (const gone of [path.join(dir, "graph.sqlite"), path.join(dir, "migrate-backups"), out]) assert.equal(fs.existsSync(gone), false, gone);
+		});
+	}
+	test("B18 an invalid SQL row through the CLI refuses both commands, naming the row", () => {
+		const dir = mk();
+		seedSql(dir, "sqlite", ROWS, true);
+		tamper(dir, "sqlite", "INSERT INTO ledger_nodes (seq, line_json) VALUES (99, CAST(x'7bff7d' AS TEXT))");
+		for (const argv of [["migrate", "--to", "file"], ["export", "--out", path.join(mk(), "o")]]) {
+			const r = run([...argv, "--data-dir", dir]);
+			assert.equal(r.code, 1);
+			assert.match(r.err[0] as string, /row 5 is not valid UTF-8/);
+		}
+		assert.equal(JSON.parse(readMarkerBytes(dir) as string).backend, "sqlite");
+	});
+	for (const [name, tail] of [["a JSON-shaped prefix", bytes('{"name":"caf', [0xc3])], ["a prefix that parses alone", bytes("123", [0xe2, 0x98])]] as const) {
+		test(`B19 an append cut inside a character (${name}) is a torn tail: dropped, counted, and a BOM before it survives`, () => {
+			const dir = mk();
+			const head = bytes('\uFEFF{"id":"n1"}\n');
+			writeFolder(dir, { nodes: "", chains: "", sessions: "", coverage: "" });
+			fs.writeFileSync(graphFile(dir, "nodes.jsonl"), Buffer.concat([head, tail]));
+			const r = run(["migrate", "--to", "sqlite", "--data-dir", dir]);
+			assert.equal(r.code, 0, r.err.join("\n"));
+			assert.ok(r.out.some((l) => l.includes("1 torn tail lines dropped")), r.out.join("\n"));
+			const out = path.join(mk(), "o");
+			exportStore(dir, out);
+			assert.deepEqual(fs.readFileSync(path.join(out, "graph", "nodes.jsonl")), head);
+		});
+	}
 	test("B12 every backend name the CLI accepts is one the marker knows", () => {
 		assert.deepEqual([...BACKENDS], ["file", "sqlite", "doltlite"]);
 	});

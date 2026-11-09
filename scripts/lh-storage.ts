@@ -77,9 +77,11 @@ function purge(args: string[], io: Io): number {
 function migrate(args: string[], io: Io): number {
 	let dataDir: string = PATHS.data;
 	let to: string | undefined;
+	let allowEmptySource = false;
 	for (let i = 0; i < args.length; i++) {
 		const a = args[i];
 		if (a === "--to" && args[i + 1] !== undefined) to = args[++i];
+		else if (a === "--allow-empty-source") allowEmptySource = true;
 		else if (a === "--data-dir" && args[i + 1] !== undefined) dataDir = path.resolve(args[++i] as string);
 		else {
 			io.err(MIGRATE_TEXT.usage);
@@ -90,7 +92,7 @@ function migrate(args: string[], io: Io): number {
 		io.err(MIGRATE_TEXT.usage);
 		return 1;
 	}
-	const r = migrateBackend(dataDir, to as Backend);
+	const r = migrateBackend(dataDir, to as Backend, { allowEmptySource });
 	io.out(MIGRATE_TEXT.migrated(r.from, r.to, r.resumed));
 	io.out(MIGRATE_TEXT.counts(r.counts));
 	io.out(MIGRATE_TEXT.dropped(r.dropped));
