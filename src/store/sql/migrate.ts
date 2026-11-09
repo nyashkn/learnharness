@@ -70,9 +70,6 @@ function checkStore(db: SqlDriver, opts: MigrateOptions, top: number): number {
 	if (!hasMeta(db)) return 0;
 	const meta = readMeta(db);
 	const version = parseInt1(meta.get("schema_version"), "schema_version");
-	// Every rung's writeMeta sets these; a store without them was not made by this runner and would crash later (revision) or lose its identity.
-	if (!/^(0|[1-9]\d{0,14})$/.test(meta.get("revision") ?? "")) throw new MigrationRefusedError("malformed-meta", `lh_meta.revision is ${meta.has("revision") ? `malformed (${JSON.stringify(meta.get("revision"))})` : "missing"}`);
-	if (!meta.get("store_id")) throw new MigrationRefusedError("malformed-meta", "lh_meta.store_id is missing");
 	if (meta.get("store_kind") !== opts.kind) {
 		throw new MigrationRefusedError("wrong-kind", `store_kind is ${JSON.stringify(meta.get("store_kind"))}, expected ${JSON.stringify(opts.kind)}`);
 	}
@@ -85,6 +82,9 @@ function checkStore(db: SqlDriver, opts: MigrateOptions, top: number): number {
 			throw new MigrationRefusedError("newer-line-format", `line_format ${format} is newer than this build (${opts.lineFormat})`);
 		}
 	}
+	// After the newer checks: a newer build may store these differently. Every rung's writeMeta sets them, so a store without them was not made by this runner.
+	if (!/^(0|[1-9]\d{0,14})$/.test(meta.get("revision") ?? "")) throw new MigrationRefusedError("malformed-meta", `lh_meta.revision is ${meta.has("revision") ? `malformed (${JSON.stringify(meta.get("revision"))})` : "missing"}`);
+	if (!meta.get("store_id")) throw new MigrationRefusedError("malformed-meta", "lh_meta.store_id is missing");
 	return version;
 }
 
