@@ -91,6 +91,15 @@ const nextConfig: NextConfig = {
 			// Wave E stage 2: resvg rasterizes visual-maker SVGs natively; same
 			// per-platform-binary story as the canvas above (one per build).
 			"node_modules/@resvg/resvg-js-*/**/*",
+			// DoltLite (bead D2): index.js loads prebuilds/<platform>-<arch>/doltlite.node
+			// through a computed path the tracer cannot see, and nothing imports the
+			// driver until D3, so these includes are what put it in the payload.
+			// NEVER a whole-package glob: prebuilds/ holds ~45 MB for five platforms
+			// plus a `doltlite` CLI. Per-OS builds, so exactly one addon ships;
+			// scripts/build-server.mjs refuses a CLI or another platform's prebuild.
+			"node_modules/@dolthub/doltlite/index.js",
+			"node_modules/@dolthub/doltlite/package.json",
+			`node_modules/@dolthub/doltlite/prebuilds/${process.platform}-${process.arch}/doltlite.node`,
 			"node_modules/@earendil-works/pi-ai/dist/providers/data/**/*",
 			// Public native OAuth factories load these flows through variable imports.
 			// Electron main uses the same standalone SDK; the offline runtime gate
@@ -118,6 +127,7 @@ const nextConfig: NextConfig = {
 		"@napi-rs/canvas", // native binding — bundling breaks the .node require
 		"@silvia-odwyer/photon-node", // CJS loads its adjacent WASM from disk
 		"@resvg/resvg-js", // native binding — same
+		"@dolthub/doltlite", // native binding — same
 	],
 };
 
