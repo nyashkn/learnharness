@@ -33,13 +33,13 @@ const backupPathIn = (dataDir: string) => (from: number): string =>
  * Create `graph.sqlite` and bring it to the top rung. Idempotent. A failure leaves no half-made file behind
  * (an empty graph.sqlite with no marker would make the next start read the folder as `file`).
  */
-export function ensureGraphDb(dataDir: string): void {
+export function ensureGraphDb(dataDir: string, migration = graphMigration): void { // `migration` is for tests (a failing rung); the app never passes it
 	const file = graphDbFile(dataDir);
 	const existed = fs.existsSync(file);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const db = openNodeSqlite(file);
 	try {
-		migrate(db, { ...graphMigration, lhVersion: pkg.version, backupPath: backupPathIn(dataDir) });
+		migrate(db, { ...migration, lhVersion: pkg.version, backupPath: backupPathIn(dataDir) });
 	} catch (error) {
 		db.close();
 		if (!existed) for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(`${file}${suffix}`, { force: true });
@@ -130,7 +130,8 @@ export function createSqlGraphStores(
 	// shortcut: transact counts as a write on entry, so a read-only transact on an empty folder writes the marker, lock and database. Upgrade to
 	// taking beforeWrite on the first write inside the transaction (GraphCore.changed) when a read-only transact on a fresh folder matters.
 
-	const graphStore: GraphStore = {
+	const graphStore: GraphStore & { corruptLines(): number } = {
+		corruptLines: () => current().store.corruptLines(),
 		appendNode: (n) => write((o) => o.store.appendNode(n)),
 		readNodes: () => current().store.readNodes(),
 		appendChain: (c) => write((o) => o.store.appendChain(c)),

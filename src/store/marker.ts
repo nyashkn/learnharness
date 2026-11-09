@@ -111,11 +111,27 @@ function assertAgreement(file: string, marker: { backend: Backend } | undefined,
 	}
 }
 
-/** OPEN: resolve the backend and check the store is valid. Never writes; a missing folder is fine. */
+/** The stores were built for one backend and the marker now names another (another process made the first write). Writing on would strand the data. */
+function assertMarkerMatches(file: string, marker: { backend: Backend } | undefined, backend: RunnableBackend): void {
+	if (marker && marker.backend !== backend) throw new StorageMarkerError(file, `this process opened the folder as ${backend} but the marker now names ${marker.backend}; restart so the stores match it`);
+}
+
+/** What this process built its stores on, per absolute folder. resolveBackend depends on what is in the folder, so asking it again after a stray file comes or goes can split the stores from the marker. On globalThis for the reason given at REGISTRY_KEY. */
+const DECISIONS_KEY = "__lhStoreBackends";
+function decisions(): Map<string, RunnableBackend> {
+	const g = globalThis as unknown as Record<string, Map<string, RunnableBackend> | undefined>;
+	return (g[DECISIONS_KEY] ??= new Map());
+}
+
+/** OPEN: resolve the backend and check the store is valid. Never writes; a missing folder is fine. Without a marker the first open's answer stands, for every later open and for the first write. */
 export function openDataFolder(dataDir: string, env: Record<string, string | undefined> = process.env): RunnableBackend {
-	const backend = resolveBackend(dataDir, env);
-	assertAgreement(markerFile(dataDir), readMarker(markerFile(dataDir)), dataDir);
-	assertGraphFormat(graphFormatFileIn(dataDir)); // render settings and positions stay files on every backend, and `file` is valid = not stamped newer
+	const abs = path.resolve(dataDir);
+	const file = markerFile(abs);
+	const marker = readMarker(file);
+	const backend = marker ? adapterFor(marker.backend, file) : (decisions().get(abs) ?? resolveBackend(abs, env));
+	assertAgreement(file, marker, abs);
+	assertGraphFormat(graphFormatFileIn(abs)); // render settings and positions stay files on every backend, and `file` is valid = not stamped newer
+	decisions().set(abs, backend);
 	return backend;
 }
 
@@ -183,18 +199,20 @@ export function beforeWrite(dataDir: string, lockEnv?: LockEnv): void {
 	const file = markerFile(abs);
 	const existing = readMarker(file); // a newer or corrupt marker refuses the write too
 	assertAgreement(file, existing, abs); // a sqlite marker whose database was deleted refuses writes too, before any lock
-	// Resolve BEFORE the lock: the lock file makes the folder non-empty, which would hide LH_STORAGE.
-	// A refusal (bad value, no adapter) then leaves neither marker nor lock.
-	const backend = existing === undefined ? resolveBackend(abs) : undefined;
+	// The open's answer. Resolved here only for a folder this process never opened, and BEFORE the lock:
+	// the lock file makes the folder non-empty, which would hide LH_STORAGE. A refusal (bad value, no adapter) then leaves neither marker nor lock.
+	const backend = decisions().get(abs) ?? resolveBackend(abs);
+	assertMarkerMatches(file, existing, backend);
 	if (!holdsStoreLock(abs)) {
 		registry().delete(abs);
 		fs.mkdirSync(abs, { recursive: true });
 		registry().set(abs, { lock: acquireStoreLock(file, lockEnv) });
 	}
+	const locked = readMarker(file); // another process may have made the first write while this one waited to lock
+	assertMarkerMatches(file, locked, backend);
+	if (locked) return;
 	if (backend === "sqlite") ensureGraphDb(abs); // lock, then the store, then the marker: a marker never names a store that is missing
-	if (backend !== undefined) {
-		writeFileAtomicSync(file, `${JSON.stringify({ backend, layout: CURRENT_LAYOUT }, null, "\t")}\n`, { allowInPlaceFallback: true });
-	}
+	writeFileAtomicSync(file, `${JSON.stringify({ backend, layout: CURRENT_LAYOUT }, null, "\t")}\n`, { allowInPlaceFallback: true });
 }
 
 /** Scripts: take the lock at start (after checking the folder opens), release in finally. */

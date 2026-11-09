@@ -24,9 +24,9 @@ import type { Stores } from "../core/ports.ts";
 // (newer layout, corrupt marker, a backend with no adapter, a newer graph format) fails here, for
 // reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
 const backend = openDataFolder(PATHS.data);
-purgeLegacyLedgers(PATHS.graph); // after open: a refused folder keeps its legacy files
 // sqlite: the ledgers and sources live in graph.sqlite (opened here, eagerly, when it exists); the file graphStore only serves positions.
 const graph = backend === "sqlite" ? createSqlGraphStores(PATHS.data, graphStore, emit, beforeWrite) : { graphStore, sourceOrganizationStore };
+purgeLegacyLedgers(PATHS.graph); // after every refusal, the sqlite one included: a refused folder keeps its legacy files
 
 /** The wired adapters, typed against the ports. Satisfies core/graph.ts's GraphDeps structurally. */
 export const stores: Stores = {

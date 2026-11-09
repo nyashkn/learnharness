@@ -8,7 +8,7 @@ import fc from "fast-check";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, describe, it } from "node:test";
+import { after, describe, it, mock } from "node:test";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-sqlite-backend-"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -20,7 +20,8 @@ process.env.LH_STORAGE = "sqlite"; // the intent every test below relies on; res
 const marker = await import("../src/store/marker.ts");
 const { createFileStores, runStoreScript } = await import("../src/store/file-stores.ts");
 const { createGraphStore } = await import("../src/store/graph.ts");
-const { createSqlGraphStores, releaseGraphDb, graphDbFile } = await import("../src/store/sql/open.ts");
+const { createSqlGraphStores, ensureGraphDb, releaseGraphDb, graphDbFile } = await import("../src/store/sql/open.ts");
+const { graphMigration } = await import("../src/store/sql/migrations/graph/index.ts");
 const { openNodeSqlite } = await import("../src/store/sql/drivers/node-sqlite.ts");
 const { StorageVersionError } = await import("../src/store/graph-format.ts");
 
@@ -151,6 +152,143 @@ describe("LH_STORAGE=sqlite on an empty folder", () => {
 		db.close();
 		assert.throws(() => createFileStores(dir, auth(dir)), StorageVersionError);
 		assert.equal(fs.existsSync(path.join(dir, "storage.json.lock")), false);
+	});
+});
+
+const markerOf = (dir: string): unknown => JSON.parse(fs.readFileSync(path.join(dir, "storage.json"), "utf8"));
+const idsAfterRestart = (dir: string): string[] => {
+	letGo(dir);
+	const old = process.env.LH_STORAGE;
+	delete process.env.LH_STORAGE;
+	try { return createFileStores(dir, auth(dir)).graphStore.readNodes().map((x) => x.id); } finally { process.env.LH_STORAGE = old; letGo(dir); }
+};
+
+describe("lh-q1o: the backend is decided once per folder", () => {
+	for (const stray of [".DS_Store", "seed-optout.txt", "seeds.sqlite"]) {
+		it(`${stray} appearing between open and the first write leaves a sqlite folder sqlite, and the node survives a restart`, () => {
+			const dir = fresh();
+			const s = createFileStores(dir, auth(dir));
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, stray), "stray");
+			assert.equal(marker.openDataFolder(dir), "sqlite", "another module instance opening now gets the same answer");
+			s.graphStore.appendNode(NODE("a"));
+			assert.deepEqual(markerOf(dir), { backend: "sqlite", layout: 1 });
+			assert.deepEqual(s.graphStore.readNodes().map((x) => x.id), ["a"]);
+			assert.deepEqual(ledgers(dir), []);
+			assert.deepEqual(idsAfterRestart(dir), ["a"]);
+		});
+	}
+
+	it("a stray file going away before the first write leaves a file folder file, and the node survives a restart", () => {
+		const dir = fresh();
+		fs.mkdirSync(dir);
+		fs.writeFileSync(path.join(dir, ".DS_Store"), "stray");
+		const s = createFileStores(dir, auth(dir));
+		fs.rmSync(path.join(dir, ".DS_Store"));
+		assert.equal(marker.openDataFolder(dir), "file", "another module instance opening now gets the same answer");
+		s.graphStore.appendNode(NODE("a"));
+		assert.deepEqual(markerOf(dir), { backend: "file", layout: 1 });
+		assert.equal(fs.existsSync(path.join(dir, "graph.sqlite")), false);
+		assert.ok(fs.existsSync(path.join(dir, "graph", "nodes.jsonl")));
+		assert.deepEqual(idsAfterRestart(dir), ["a"]);
+	});
+
+	/** Run `beforeWrite` with another process writing `text` as the marker just before this one takes the lock. */
+	function raceTheLock(dir: string, text: string): void {
+		const real = fs.mkdirSync;
+		let fired = false;
+		const spy = mock.method(fs, "mkdirSync", ((...args: Parameters<typeof fs.mkdirSync>) => {
+			const out = real.apply(fs, args);
+			if (!fired) { fired = true; fs.writeFileSync(path.join(dir, "storage.json"), text); }
+			return out;
+		}) as typeof fs.mkdirSync);
+		try { marker.beforeWrite(dir); } finally { spy.mock.restore(); }
+	}
+
+	it("a marker another process wrote while this one took the lock is left alone when it agrees", () => {
+		const dir = fresh();
+		assert.equal(marker.openDataFolder(dir), "sqlite");
+		const theirs = '{ "backend": "sqlite",   "layout": 1 }';
+		raceTheLock(dir, theirs);
+		assert.equal(fs.readFileSync(path.join(dir, "storage.json"), "utf8"), theirs);
+		letGo(dir);
+	});
+
+	it("a marker naming another backend refuses the write, before the lock and after it, and is left alone", () => {
+		const before = fresh();
+		assert.equal(marker.openDataFolder(before), "sqlite");
+		fs.mkdirSync(before);
+		const theirs = '{ "backend": "file",   "layout": 1 }';
+		fs.writeFileSync(path.join(before, "storage.json"), theirs);
+		assert.throws(() => marker.beforeWrite(before), (e: unknown) => (e as Error).name === "StorageMarkerError" && /restart/.test((e as Error).message));
+		assert.deepEqual(listing(before), ["storage.json"], "refused before the lock");
+		letGo(before);
+
+		const during = fresh();
+		assert.equal(marker.openDataFolder(during), "sqlite");
+		assert.throws(() => raceTheLock(during, theirs), (e: unknown) => (e as Error).name === "StorageMarkerError" && /restart/.test((e as Error).message));
+		assert.equal(fs.readFileSync(path.join(during, "storage.json"), "utf8"), theirs);
+		assert.equal(fs.existsSync(path.join(during, "graph.sqlite")), false);
+		letGo(during);
+	});
+});
+
+describe("a refused open keeps the legacy ledgers", () => {
+	const LEGACY: Record<string, string> = { "edges.jsonl": "edge bytes\r\n", "events.jsonl": "event bytes\n" };
+	const legacy = (dir: string) => Object.keys(LEGACY).map((f) => fs.readFileSync(path.join(dir, "graph", f), "utf8"));
+	function newerSqliteFolder(dir: string): void {
+		createFileStores(dir, auth(dir)).graphStore.appendNode(NODE("a"));
+		letGo(dir);
+		const db = openNodeSqlite(path.join(dir, "graph.sqlite"));
+		db.run("UPDATE lh_meta SET value = '99' WHERE key = 'schema_version'");
+		db.close();
+		fs.mkdirSync(path.join(dir, "graph"), { recursive: true });
+		for (const [f, text] of Object.entries(LEGACY)) fs.writeFileSync(path.join(dir, "graph", f), text);
+	}
+
+	it("createFileStores (scripts)", () => {
+		const dir = fresh();
+		newerSqliteFolder(dir);
+		assert.throws(() => createFileStores(dir, auth(dir)), StorageVersionError);
+		assert.deepEqual(legacy(dir), Object.values(LEGACY));
+	});
+
+	it("src/server/stores.ts (the app)", async () => {
+		const dir = process.env.LH_DATA_DIR!;
+		newerSqliteFolder(dir);
+		await assert.rejects(import("../src/server/stores.ts"), StorageVersionError);
+		assert.deepEqual(legacy(dir), Object.values(LEGACY));
+	});
+});
+
+describe("the first sqlite write when the database step fails", () => {
+	it("no marker names the missing database, and the next write succeeds", () => {
+		const dir = fresh();
+		const s = createFileStores(dir, auth(dir));
+		fs.mkdirSync(path.join(dir, "graph.sqlite"), { recursive: true }); // a directory: sqlite cannot open it
+		assert.throws(() => s.graphStore.appendNode(NODE("a")));
+		assert.equal(fs.existsSync(path.join(dir, "storage.json")), false, "the marker is written only after the store exists");
+		fs.rmSync(path.join(dir, "graph.sqlite"), { recursive: true });
+		s.graphStore.appendNode(NODE("a"));
+		assert.deepEqual(markerOf(dir), { backend: "sqlite", layout: 1 });
+		assert.deepEqual(idsAfterRestart(dir), ["a"]);
+	});
+
+	const failing = { ...graphMigration, rungs: [{ version: 1, name: "boom", up: (db: { exec(sql: string): void }) => { db.exec("CREATE TABLE half (x)"); throw new Error("boom"); } }] };
+
+	it("a failed create leaves no half-made graph.sqlite, -wal or -shm", () => {
+		const dir = fresh();
+		fs.mkdirSync(dir);
+		assert.throws(() => ensureGraphDb(dir, failing), /boom/);
+		assert.deepEqual(listing(dir), []);
+	});
+
+	it("a failed migrate leaves a database that already existed in place", () => {
+		const dir = fresh();
+		fs.mkdirSync(dir);
+		openNodeSqlite(path.join(dir, "graph.sqlite")).close();
+		assert.throws(() => ensureGraphDb(dir, failing), /boom/);
+		assert.ok(fs.existsSync(path.join(dir, "graph.sqlite")));
 	});
 });
 

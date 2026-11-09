@@ -23,11 +23,11 @@ export function createFileStores(dataDir: string, authFile: string): Stores {
 	const backend = openDataFolder(dataDir);
 	const graphDir = path.join(dataDir, "graph");
 	const fileGraph = createGraphStore(graphDir, { dataDir });
-	purgeLegacyLedgers(graphDir); // only after open succeeded: a refused folder keeps its files
 	// On sqlite the ledgers and sources live in graph.sqlite; the file graph store only serves positions (a script must never write JSONL beside the database).
 	const graph = backend === "sqlite"
 		? createSqlGraphStores(dataDir, fileGraph, emit, beforeWrite)
 		: { graphStore: fileGraph, sourceOrganizationStore: createSourceOrganizationStore(graphDir, fileGraph, { dataDir }) };
+	purgeLegacyLedgers(graphDir); // after every refusal, the sqlite one included: a refused folder keeps its files
 	return {
 		chatStore: createChatStore(path.join(dataDir, "chats"), { dataDir }),
 		graphStore: graph.graphStore,

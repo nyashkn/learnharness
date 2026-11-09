@@ -26,6 +26,9 @@ const KNOWN_GAPS: Record<string, Record<string, string>> = {
 	sqlite: {
 		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
 	},
+	"sqlite-app": {
+		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+	},
 };
 
 
