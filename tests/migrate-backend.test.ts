@@ -994,6 +994,37 @@ describe("B CLI", () => {
 		assert.deepEqual(tree(newer), before);
 		assert.equal(readMarkerBytes(newer), undefined);
 	});
+	test("B22 off macOS arm64 (platform faked) `--to doltlite` refuses with the platform named and changes nothing; the exit path still works", () => {
+		const real = { platform: process.platform, arch: process.arch };
+		const fake = (platform: string, arch: string) => {
+			Object.defineProperty(process, "platform", { value: platform, configurable: true });
+			Object.defineProperty(process, "arch", { value: arch, configurable: true });
+		};
+		try {
+			for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["win32", "x64"], ["darwin", "x64"]] as const) {
+				fake(platform, arch);
+				for (const from of ["file", "sqlite"] as const) {
+					const dir = mk();
+					if (from === "file") writeFolder(dir, DIRTY);
+					else seedSql(dir, "sqlite", ROWS, true);
+					const before = tree(dir);
+					const marker = readMarkerBytes(dir);
+					const r = run(["migrate", "--to", "doltlite", "--data-dir", dir]);
+					assert.equal(r.code, 1, `${platform}-${arch} from ${from}`);
+					assert.match(r.err[0] as string, new RegExp(`^lh migrate: DoltLite runs only on macOS arm64 .*this machine is ${platform}-${arch}.*nothing was changed`));
+					assert.deepEqual(tree(dir), before, "no graph.doltlite, backup, journal or lock");
+					assert.equal(readMarkerBytes(dir), marker);
+				}
+				const src = mk();
+				seedSql(src, "doltlite", ROWS, true);
+				const out = run(["migrate", "--to", "sqlite", "--data-dir", src]);
+				assert.equal(out.code, 0, `exit path on ${platform}-${arch}: ${out.err.join("\n")}`);
+				assert.equal(JSON.parse(readMarkerBytes(src) as string).backend, "sqlite");
+			}
+		} finally {
+			fake(real.platform, real.arch);
+		}
+	});
 	test("B14 DoltLite as a source needs no option: the exit path (--to file and --to sqlite) works through the CLI", () => {
 		for (const to of ["file", "sqlite"] as const) {
 			const dir = mk();
