@@ -4,19 +4,21 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { describe, it, mock } from "node:test";
 import fc from "fast-check";
-import { clipSnippet, createAllowEgress, MAX_SNIPPET_CHARS } from "../../src/seed/egress";
+import { canonProject, clipSnippet, createAllowEgress, MAX_SNIPPET_CHARS } from "../../src/seed/egress";
 import { redact } from "../../src/seed/redact";
 import { findRepeats, tagSignal } from "../../src/seed/signals";
 import { claudeHistorySource } from "../../src/seed/sources/claude-history";
 import { harvest } from "../../src/seed/sources/harvest";
 import { ompHistorySource, ompMemorySource, ompRecapSource } from "../../src/seed/sources/omp";
 import { signetSummarySource } from "../../src/seed/sources/signet";
+import { openNodeSqlite } from "../../src/store/sql/drivers/node-sqlite";
 import type { HarvestItem, ReadOnlyDb, ReadOnlyFiles, SessionSource } from "../../src/seed/types";
 
 // ---- fake ports -----------------------------------------------------------
 
 type Rows = Record<string, Record<string, unknown>[]>;
 
+/** Ignores SQL, so it is only for rows a typed column would refuse (malformed-row tests). Everything else uses sqliteDb. */
 function fakeDb(tables: Rows) {
 	const statements: string[] = [];
 	const db: ReadOnlyDb = {
@@ -58,28 +60,53 @@ function fakeFiles(files: Record<string, string>): ReadOnlyFiles {
 const T = 1_760_000_000; // seconds
 const ISO = "2026-03-01T00:00:00.000Z";
 
-/** One valid input per adapter input, all carrying `text`; 7 items expected. */
-function allSources(text: string, project: string, memorySlug = "plain-slug") {
-	const history = fakeDb({ history: [{ id: 1, prompt: text, created_at: T, cwd: project, session_id: "s1" }] });
-	const recapDb = fakeDb({ session_recaps: [{ id: 1, session_id: "s2", cwd: project, recap: text, created_at: T }] });
-	const agent = fakeDb({ stage1_outputs: [{ thread_id: "t1", generated_at: T, rollout_summary: text, cwd: project }] });
-	const signet = fakeDb({
-		session_summaries: [{ id: "x1", project, content: text, latest_at: ISO, session_key: "k1" }],
-		entities: [{ id: "e1", name: "concept", description: text, updated_at: ISO, mentions: 9 }],
+/** The real column layout of the stores the adapters read, so their SQL runs for real. */
+const DDL = `
+CREATE TABLE history (id INTEGER PRIMARY KEY, prompt TEXT NOT NULL, created_at INTEGER NOT NULL, cwd TEXT, session_id TEXT, use_count INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE session_recaps (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, cwd TEXT NOT NULL, recap TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE stage1_outputs (thread_id TEXT PRIMARY KEY, source_updated_at INTEGER NOT NULL, raw_memory TEXT NOT NULL, rollout_summary TEXT NOT NULL, rollout_slug TEXT, generated_at INTEGER NOT NULL);
+CREATE TABLE threads (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, rollout_path TEXT NOT NULL, cwd TEXT NOT NULL, source_kind TEXT NOT NULL);
+CREATE TABLE session_summaries (id TEXT PRIMARY KEY, project TEXT, kind TEXT NOT NULL, content TEXT NOT NULL, earliest_at TEXT NOT NULL, latest_at TEXT NOT NULL, session_key TEXT, created_at TEXT NOT NULL);
+CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, updated_at TEXT NOT NULL, mentions INTEGER NOT NULL, status TEXT);
+`;
+
+/** In-memory SQLite behind the adapters' read-only port; every statement is recorded so the SELECT-only rule stays checkable. */
+function sqliteDb(seed: (run: (sql: string, ...params: (string | number | null)[]) => void) => void) {
+	const raw = openNodeSqlite(":memory:");
+	raw.exec(DDL);
+	seed((sql, ...params) => void raw.run(sql, ...params));
+	const statements: string[] = [];
+	const db: ReadOnlyDb = {
+		async all(sql, params = []) {
+			statements.push(sql);
+			return raw.all<Record<string, unknown>>(sql, ...params);
+		},
+	};
+	return { db, statements, close: () => raw.close() };
+}
+
+/** One valid input per adapter input, all carrying `text`; 7 items expected. `rawMemory` is planted where the adapters must never look. */
+function allSources(text: string, project: string, memorySlug = "plain-slug", rawMemory = "not selected") {
+	const sql = sqliteDb((run) => {
+		run("INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (1, ?, ?, ?, 's1')", text, T, project);
+		run("INSERT INTO session_recaps (id, session_id, cwd, recap, created_at) VALUES (1, 's2', ?, ?, ?)", project, text, T);
+		run("INSERT INTO threads (id, updated_at, rollout_path, cwd, source_kind) VALUES ('t1', ?, '/r', ?, 'cli')", T, project);
+		run("INSERT INTO stage1_outputs (thread_id, source_updated_at, raw_memory, rollout_summary, generated_at) VALUES ('t1', ?, ?, ?, ?)", T, rawMemory, text, T);
+		run("INSERT INTO session_summaries (id, project, kind, content, earliest_at, latest_at, session_key, created_at) VALUES ('x1', ?, 'k', ?, ?, ?, 'k1', ?)", project, text, ISO, ISO, ISO);
+		run("INSERT INTO entities (id, name, description, updated_at, mentions) VALUES ('e1', 'concept', ?, ?, 9)", text, ISO);
 	});
 	const files = fakeFiles({
 		"/h/history.jsonl": JSON.stringify({ display: text, pastedContents: {}, timestamp: T * 1000, project, sessionId: "s0" }),
 		[`/mem/${memorySlug}/learned.md`]: text,
 	});
-	const dbs = [history, recapDb, agent, signet];
 	const sources: SessionSource[] = [
 		claudeHistorySource({ files, path: "/h/history.jsonl" }),
-		ompHistorySource(history.db),
-		ompRecapSource(recapDb.db),
-		ompMemorySource({ agentDb: agent.db, files, memoriesDir: "/mem" }),
-		signetSummarySource({ db: signet.db, minMentions: 3 }),
+		ompHistorySource(sql.db),
+		ompRecapSource(sql.db),
+		ompMemorySource({ agentDb: sql.db, files, memoriesDir: "/mem" }),
+		signetSummarySource({ db: sql.db, minMentions: 3 }),
 	];
-	return { sources, statements: () => dbs.flatMap((d) => d.statements) };
+	return { sources, statements: () => sql.statements, close: sql.close };
 }
 
 async function collect(sources: SessionSource[]): Promise<HarvestItem[]> {
@@ -284,8 +311,9 @@ describe("malformed rows and lines", () => {
 
 describe("read-only adapters", () => {
 	it("every SQL statement is a single SELECT", async () => {
-		const { sources, statements } = allSources("explain eigenvalues", "/work/a");
+		const { sources, statements, close } = allSources("explain eigenvalues", "/work/a");
 		await collect(sources);
+		close();
 		const all = statements();
 		assert.ok(all.length >= 5);
 		for (const sql of all) {
@@ -295,14 +323,23 @@ describe("read-only adapters", () => {
 	});
 
 	it("entities below minMentions are not read in", async () => {
-		const db = fakeDb({
-			entities: [
-				{ id: "lo", name: "rare", description: null, updated_at: ISO, mentions: 2 },
-				{ id: "hi", name: "common", description: "a concept", updated_at: ISO, mentions: 3 },
-			],
-		}).db;
-		const out = await collect([signetSummarySource({ db, minMentions: 3 })]);
+		const sql = sqliteDb((run) => {
+			run("INSERT INTO entities (id, name, description, updated_at, mentions) VALUES ('lo', 'rare', NULL, ?, 2)", ISO);
+			run("INSERT INTO entities (id, name, description, updated_at, mentions) VALUES ('hi', 'common', 'a concept', ?, 3)", ISO);
+		});
+		const out = await collect([signetSummarySource({ db: sql.db, minMentions: 3 })]);
+		sql.close();
 		assert.deepEqual(out.map((i) => i.textRedacted), ["common\na concept"]);
+	});
+
+	it("raw_memory is never selected: a marker planted there reaches no output", async () => {
+		const MARK = "RAWMEMORY_MARKER_w4p";
+		const { sources, close } = allSources("explain eigenvalues", "/work/a", "plain-slug", MARK);
+		const out = await collect(sources);
+		close();
+		const memory = out.filter((i) => i.source === "omp-memory" && i.sessionId === "t1");
+		assert.deepEqual(memory.map((i) => i.textRedacted), ["explain eigenvalues"]);
+		assert.ok(!JSON.stringify(out).includes(MARK));
 	});
 });
 
@@ -322,6 +359,18 @@ describe("allowEgress", () => {
 	});
 	it("ignores blank entries instead of blocking everything", () => {
 		assert.equal(createAllowEgress([""," "])("~/anything"), true);
+	});
+	it("canonProject flattens paths, slugs and punctuation to one form", () => {
+		assert.equal(canonProject("/Users/alice/work/client_x"), "work-client-x");
+		assert.equal(canonProject("~/work/client-x"), "work-client-x");
+		assert.equal(canonProject("-Users-alice-work-client-x"), "work-client-x");
+		assert.equal(canonProject("Client.X "), "client-x");
+		assert.equal(canonProject("  / _ "), "");
+		assert.equal(canonProject("Caf\u0065\u0301"), "caf\u00e9");
+	});
+	it("blank projects count as null", () => {
+		assert.equal(createAllowEgress(["secretco"])(""), true);
+		assert.equal(createAllowEgress(["secretco"])("  "), true);
 	});
 	it("clips snippets to the cap", () => {
 		assert.equal(MAX_SNIPPET_CHARS, 300);
