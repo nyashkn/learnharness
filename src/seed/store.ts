@@ -140,8 +140,8 @@ export function createSeedStore(db: SeedDb) {
 						   first_seen = excluded.first_seen, last_seen = excluded.last_seen, n_items = excluded.n_items, n_projects = excluded.n_projects,
 						   rank_score = excluded.rank_score, merged_into = excluded.merged_into`,
 						p.id,
-						p.title,
-						p.why,
+						redact(p.title), // model-written, so it gets the same pass as harvested text
+						redact(p.why),
 						p.kind,
 						p.prereqOf,
 						p.firstSeen,

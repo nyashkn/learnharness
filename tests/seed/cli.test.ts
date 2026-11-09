@@ -28,6 +28,7 @@ interface Knobs {
 	uniform: boolean;
 	topics: string[];
 	choice?: (id: string, options: string[]) => string | undefined;
+	draft?: { title: string; why: string };
 }
 
 /** A real jev-api judge over a fake wire: the egress guard, cache and parsing under test are the shipped ones. */
@@ -80,7 +81,7 @@ function rig(opts: { items: RawItem[]; optOut?: string[]; token?: boolean }) {
 			if ("topics" in props) return { topics: knobs.topics } as never;
 			const ids = [...prompt.matchAll(/^\[([0-9a-f]{64})\]/gm)].map((m) => m[1]!);
 			const alpha = prompt.toLowerCase().includes("alpha");
-			return { title: alpha ? "Alpha concepts" : "Beta concepts", why: "recurs", kind: "concept", evidenceIds: ids } as never;
+			return { title: knobs.draft?.title ?? (alpha ? "Alpha concepts" : "Beta concepts"), why: knobs.draft?.why ?? "recurs", kind: "concept", evidenceIds: ids } as never;
 		},
 	};
 
@@ -826,14 +827,49 @@ describe("rank config", () => {
 	});
 });
 
-describe("propose: snippet only from allowed evidence", () => {
-	it("an opted-out evidence item never appears in the stored first message", async () => {
-		const items = [raw("a1", "why does alpha ZQXOK fail", { project: "/work/ok" }), raw("a2", "why is alpha ZQXBLOCKED odd", { project: "/work/blocked", at: "2026-10-01T00:00:00.000Z" })];
+describe("propose: every evidence item must be allowed to leave", () => {
+	const items = [raw("a1", "why does alpha ZQXOK fail", { project: "/work/ok" }), raw("a2", "why is alpha ZQXBLOCKED odd", { project: "/work/blocked", at: "2026-10-01T00:00:00.000Z" })];
+	it("an opt-out added after the scan skips the proposal: no POST, no accept, status unchanged", async () => {
+		for (const entry of ["blocked", "ok"]) {
+			const { r, p } = await labelled({ items });
+			r.deps.allowEgress = composeAllowEgress([entry]);
+			assert.equal(await r.run("propose"), 0);
+			assert.equal(r.chat.calls.length, 0, entry);
+			assert.equal(r.store.accepts().length, 0);
+			assert.equal(r.store.loadProposals().find((x) => x.id === p.id)!.status, "proposed");
+			assert.ok(r.lines.some((l) => l.startsWith(`skipped ${p.id}: some of its evidence is opted out`)));
+		}
+	});
+	it("with nothing opted out the same proposal is posted, with the first message from the oldest evidence", async () => {
 		const { r } = await labelled({ items });
-		r.deps.allowEgress = composeAllowEgress(["blocked"]);
-		assert.equal(await r.run("propose"), 0);
-		const msg = r.store.accepts()[0]!.firstMessage;
-		assert.ok(msg.includes("ZQXOK"));
-		assert.equal(msg.includes("ZQXBLOCKED"), false);
+		r.deps.allowEgress = composeAllowEgress(["unrelated"]);
+		await r.run("propose");
+		assert.equal(r.chat.calls.length, 1);
+		assert.ok(r.store.accepts()[0]!.firstMessage.includes("ZQXBLOCKED"));
+	});
+});
+
+describe("topic prompt clips every snippet (lh-j2c)", () => {
+	it("items longer than the cap reach the topic prompt at exactly 300 characters", async () => {
+		const long = (n: string) => raw(n, `why does alpha borrowing fail ${"word ".repeat(200)}`);
+		const r = rig({ items: [long("l1"), long("l2")] });
+		await r.run("scan");
+		const topic = r.prompts.find((p) => p.startsWith("Name the distinct teachable topics"))!;
+		const snippets = topic.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(2));
+		assert.equal(snippets.length, 2);
+		for (const line of snippets) assert.equal(line.length, 300);
+	});
+});
+
+describe("model-written title and why are redacted on write (lh-j2c)", () => {
+	it("a planted secret and home path in the draft reach no table column", async () => {
+		const r = rig({ items: ALPHA });
+		r.knobs.draft = { title: `Alpha ${SECRET}`, why: `see /Users/bob/notes and ${SECRET}` };
+		await r.run("scan");
+		assert.equal(r.store.loadProposals().length, 1);
+		const d = dump(r.db);
+		assert.equal(d.includes("ZZZZ1111YYYY2222XXXX3333"), false);
+		assert.equal(d.includes("/Users/bob"), false);
+		assert.ok(d.includes("Alpha [redacted:secret]"));
 	});
 });

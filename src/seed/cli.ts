@@ -596,10 +596,16 @@ async function propose(deps: CliDeps): Promise<number> {
 	let failed = 0;
 	let created = 0;
 	for (const p of todo) {
-		const evidence = p.evidenceIds.flatMap((id) => items.get(id) ?? []).filter((i) => allowEgress(i.project)).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
+		const all = p.evidenceIds.flatMap((id) => items.get(id) ?? []);
+		// runJudge needs every project allowed, so the title is held to the same rule: it was written from all the evidence.
+		const evidence = all.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
 		const first = evidence[0];
 		if (!first) {
-			out(`skipped ${p.id}: no evidence item is allowed to leave (egress opt-out), so nothing was posted`);
+			out(`skipped ${p.id}: it has no evidence items, so nothing was posted`);
+			continue;
+		}
+		if (!evidence.every((i) => allowEgress(i.project))) {
+			out(`skipped ${p.id}: some of its evidence is opted out (egress), so nothing was posted`);
 			continue;
 		}
 		const firstMessage = `I keep running into ${p.title} (for example: ${clipSnippet(first.textRedacted)}). Teach me it from first principles, then check my understanding.`;
