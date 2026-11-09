@@ -18,8 +18,9 @@ import { deleteSourcesTraces } from "../../src/core/graph-deletion";
 import type { SqlDriver } from "../../src/store/sql/driver";
 import { openDoltlite, openReaderAt, RECOVER_MESSAGE } from "../../src/store/sql/drivers/doltlite";
 import { faultyDriver, InjectedFault } from "../../src/store/sql/drivers/faulty";
+import { StorageVersionError } from "../../src/store/graph-format";
 import { openGraphStore, type OpenedGraph } from "../../src/store/sql/graph-store";
-import { acquireStoreLock, lockFileFor, type StoreLock } from "../../src/store/sql/lock";
+import { acquireStoreLock, type StoreLock } from "../../src/store/sql/lock";
 import { PURGE_TEXT, PurgeRefusedError, purgeHistory } from "../../src/store/sql/purge";
 
 let dir: string;
@@ -27,10 +28,25 @@ let n = 0;
 before(() => {
 	dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-purge-"));
 });
-after(() => fs.rmSync(dir, { recursive: true, force: true }));
+const locks = new Map<string, StoreLock>();
+after(() => {
+	for (const l of locks.values()) l.release();
+	fs.rmSync(dir, { recursive: true, force: true });
+});
 
 const TABLES = ["ledger_nodes", "ledger_chains", "ledger_coverage", "ledger_checkpoints", "sources", "documents", "lh_meta"];
-const lockOf = (file: string): StoreLock => ({ lockFile: lockFileFor(file), release() {} });
+/** A REAL store lock, one per file while held. */
+const lockOf = (file: string): StoreLock => {
+	const known = locks.get(file);
+	if (known?.held()) return known;
+	const lock = acquireStoreLock(file);
+	locks.set(file, lock);
+	return lock;
+};
+const unlock = (file: string) => {
+	locks.get(file)?.release();
+	locks.delete(file);
+};
 const marker = (tag = "M") => `${tag}-${randomUUID()}`; // runtime: this file never contains a searchable literal
 const node = (id: string, statement: string, source: string): GraphNode => ({ id, name: id, statement, aliases: [], createdAt: "t", provenance: [{ chatId: source, messageId: "m1" }] });
 const notes = (id: string): NotesSource => ({ id, filePath: `/x/${id}`, importedAt: "t" });
@@ -146,6 +162,7 @@ function spy(db: SqlDriver, events: string[]): SqlDriver {
 		transaction: (f) => db.transaction(f),
 		seal: (m) => (events.push("seal"), db.seal(m)),
 		head: () => db.head(),
+		recover: () => db.recover(),
 		close: () => db.close(),
 	};
 }
@@ -220,7 +237,7 @@ describe("P5 refusals", () => {
 		const boom = () => {
 			throw new Error("touched");
 		};
-		const fake = { engine: "sqlite", engineVersion: "x", exec: boom, run: boom, all: boom, get: boom, transaction: boom, seal: boom, head: boom, close: boom } as unknown as SqlDriver;
+		const fake = { engine: "sqlite", engineVersion: "x", exec: boom, run: boom, all: boom, get: boom, transaction: boom, seal: boom, head: boom, recover: boom, close: boom } as unknown as SqlDriver;
 		assert.throws(() => purgeHistory(fake, path.join(dir, "nope")), PurgeRefusedError);
 	});
 
@@ -250,6 +267,7 @@ function dataFolder(backend = "doltlite") {
 	r.graph.appendNode(node("d", gone, "d"));
 	deleteSource(r, "d");
 	r.db.close();
+	unlock(store);
 	return { folder, store, gone };
 }
 const cli = (...argv: string[]) => {
@@ -411,4 +429,96 @@ describe("P7 model: random append/delete/seal sequences", () => {
 			{ numRuns: 12 },
 		);
 	});
+});
+
+/** Stamp lh_meta as a newer build would, sealed; or leave a dirty working set when `dirty`. Closed again. */
+function stamp(store: string, key: "schema_version" | "line_format", value: string): void {
+	const db = openDoltlite(store, { lock: lockOf(store) });
+	db.run("UPDATE lh_meta SET value = ? WHERE key = ?", value, key);
+	db.seal(`newer ${key}`);
+	db.close();
+	unlock(store);
+}
+function leaveDirty(store: string): void {
+	const db = openDoltlite(store, { lock: lockOf(store) });
+	db.run("INSERT INTO ledger_nodes (line_json) VALUES ('{}')");
+	db.close();
+	unlock(store);
+}
+const peek = (store: string) => {
+	const db = openDoltlite(store, { readOnly: true });
+	try {
+		return { commits: logCount(db), dirty: db.get<{ c: number }>("SELECT count(*) AS c FROM dolt_status")?.c ?? 0, head: db.head() };
+	} finally {
+		db.close();
+	}
+};
+
+describe("P8 lh-pv9: recover waits for the newer-store check", () => {
+	test("newer stamp + dirty working set: openGraphStore refuses, no commit, still dirty", () => {
+		const f = dataFolder();
+		stamp(f.store, "schema_version", "999");
+		leaveDirty(f.store);
+		const before = peek(f.store);
+		assert.equal(before.dirty, 1);
+		const db = openDoltlite(f.store, { lock: lockOf(f.store) });
+		assert.throws(() => openGraphStore({ db, file: f.store, lhVersion: "test", positions: positions(), log: () => {} }), StorageVersionError);
+		db.close();
+		assert.deepEqual(peek(f.store), before);
+	});
+
+	test("without a newer stamp, openGraphStore recovers the leftovers as 'recovered at open'", () => {
+		const f = dataFolder();
+		leaveDirty(f.store);
+		const before = peek(f.store);
+		const r = rig(f.store);
+		assert.equal(logCount(r.db), before.commits + 1);
+		assert.equal(r.db.get<{ message: string }>("SELECT message FROM dolt_log LIMIT 1")?.message, RECOVER_MESSAGE);
+		assert.equal(r.db.get<{ c: number }>("SELECT count(*) AS c FROM dolt_status")?.c, 0);
+		r.db.close();
+	});
+});
+
+describe("P9 lh-17q: the CLI refuses a newer store before any write", () => {
+	type F = ReturnType<typeof dataFolder>;
+	const refused = (label: string, setup: (f: F) => void) =>
+		test(label, () => {
+			const f = dataFolder();
+			setup(f);
+			const before = peek(f.store);
+			const bytes = sha(f.store);
+			const r = cli("purge", "--data-dir", f.folder, "--yes");
+			assert.equal(r.code, 1, r.err);
+			assert.deepEqual(peek(f.store), before);
+			assert.equal(sha(f.store), bytes);
+			assert.equal(backups(f.store).length, 0, "no backup");
+			assert.deepEqual(fs.readdirSync(f.folder).filter((x) => x.endsWith(".lock")), []);
+		});
+	refused("lh_meta schema_version=999", (f) => stamp(f.store, "schema_version", "999"));
+	refused("lh_meta line_format=999", (f) => stamp(f.store, "line_format", "999"));
+	refused("storage.json layout=999", (f) => fs.writeFileSync(path.join(f.folder, "storage.json"), JSON.stringify({ backend: "doltlite", layout: 999 })));
+	refused("newer stamp + dirty working set stays dirty", (f) => (stamp(f.store, "schema_version", "999"), leaveDirty(f.store)));
+	test("a dirty working set on a current store is recovered, then purged", () => {
+		const g = dataFolder();
+		leaveDirty(g.store);
+		assert.equal(cli("purge", "--data-dir", g.folder, "--yes").code, 0);
+		assert.deepEqual(peek(g.store), { commits: 2, dirty: 0, head: peek(g.store).head });
+	});
+});
+
+describe("P10 lh-pv9 follow-up: the backup keeps the store's permission bits", () => {
+	for (const [mode, umask] of [[0o600, 0o000], [0o640, 0o077], [0o644, 0o277]] as const)
+		test(`a ${mode.toString(8)} store gives a ${mode.toString(8)} backup under umask ${umask.toString(8).padStart(3, "0")}`, () => {
+			const r = rig();
+			r.graph.appendNode(node("a", "x", "a"));
+			fs.chmodSync(r.file, mode);
+			const old = process.umask(umask);
+			try {
+				const res = purgeHistory(r.db, r.file);
+				assert.equal(fs.statSync(res.backupPath).mode & 0o777, mode);
+			} finally {
+				process.umask(old);
+				r.db.close();
+			}
+		});
 });

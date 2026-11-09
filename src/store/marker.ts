@@ -61,7 +61,7 @@ function folderIsEmpty(dir: string): boolean {
 }
 
 /** Parse the marker. Returns undefined when absent; refuses anything else that is not a valid marker. */
-function readMarker(file: string): { backend: Backend; layout: number } | undefined {
+export function readMarker(file: string): { backend: Backend; layout: number } | undefined {
 	let text: string;
 	try {
 		text = fs.readFileSync(file, "utf8");
@@ -187,5 +187,5 @@ export function lockDataFolder(dataDir: string, lockEnv?: LockEnv): StoreLock {
 	openDataFolder(dataDir);
 	beforeWrite(dataDir, lockEnv);
 	const held = registry().get(path.resolve(dataDir))!;
-	return { lockFile: held.lock.lockFile, release: () => releaseStoreLock(dataDir) };
+	return { lockFile: held.lock.lockFile, held: () => held.lock.held(), release: () => releaseStoreLock(dataDir) };
 }

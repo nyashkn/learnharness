@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PATHS } from "../config.ts";
-import { BACKENDS, markerFile } from "../src/store/marker.ts";
+import { markerFile, readMarker } from "../src/store/marker.ts";
+import { assertStoreNotNewer } from "../src/store/sql/graph-store.ts";
 import { openDoltlite } from "../src/store/sql/drivers/doltlite.ts";
 import { acquireStoreLock, StoreLockedError, type StoreLock } from "../src/store/sql/lock.ts";
 import { PURGE_TEXT, purgeHistory } from "../src/store/sql/purge.ts";
@@ -11,20 +12,6 @@ import { PURGE_TEXT, purgeHistory } from "../src/store/sql/purge.ts";
 export interface Io {
 	out(line: string): void;
 	err(line: string): void;
-}
-
-/** Missing marker = file (marker.ts). A corrupt marker is refused by the app; here it throws too. */
-function markerBackend(dataDir: string): string {
-	let text: string;
-	try {
-		text = fs.readFileSync(markerFile(dataDir), "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "file";
-		throw error;
-	}
-	const backend = (JSON.parse(text) as { backend?: unknown }).backend;
-	if (typeof backend !== "string" || !(BACKENDS as readonly string[]).includes(backend)) throw new Error(`${markerFile(dataDir)}: unknown backend ${JSON.stringify(backend)}`);
-	return backend;
 }
 
 function purge(args: string[], io: Io): number {
@@ -39,7 +26,7 @@ function purge(args: string[], io: Io): number {
 			return 1;
 		}
 	}
-	const backend = markerBackend(dataDir);
+	const backend = readMarker(markerFile(dataDir))?.backend ?? "file"; // missing marker = file; a newer layout or corrupt marker throws
 	if (backend !== "doltlite") {
 		io.err(PURGE_TEXT.refuseBackend(backend));
 		return 1;
@@ -63,8 +50,17 @@ function purge(args: string[], io: Io): number {
 			io.err(PURGE_TEXT.refuseLocked(error.message));
 			return 1;
 		}
+		// Refuse a newer store before any writable open: a read-only handle never commits.
+		const probe = openDoltlite(store, { readOnly: true });
+		try {
+			assertStoreNotNewer(probe, store);
+
+		} finally {
+			probe.close();
+		}
 		const db = openDoltlite(store, { lock: locks[1] as StoreLock });
 		try {
+			db.recover();
 			const r = purgeHistory(db, store);
 			io.out(PURGE_TEXT.done(r.commitsBefore, r.commitsAfter));
 			io.out(PURGE_TEXT.backupSaved(r.backupPath));

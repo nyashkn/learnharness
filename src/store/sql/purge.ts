@@ -66,9 +66,28 @@ export function purgeHistory(db: SqlDriver, file: string, options: PurgeOptions 
 	for (const reader of options.readers ?? []) reader.close(); // pinned readers hold old chunks open
 
 	const backupPath = backupPathFor(file, (options.now?.() ?? new Date()).toISOString().replace(/[:.]/g, "-"));
-	if (fs.existsSync(backupPath)) throw new Error(`backup ${backupPath} already exists; nothing was changed`);
-	db.exec(`VACUUM INTO ${quote(backupPath)}`);
-	if (!fs.existsSync(backupPath) || fs.statSync(backupPath).size === 0) throw new Error(`backup ${backupPath} was not written; nothing was changed`);
+	// Create the backup exclusively with the store's mode (fchmod defeats the umask), then VACUUM INTO the empty file:
+	// it is never more open than the store, and an existing file is never overwritten.
+	const mode = fs.statSync(file).mode & 0o777;
+	let fd: number;
+	try {
+		fd = fs.openSync(backupPath, "wx", mode);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`backup ${backupPath} already exists; nothing was changed`);
+		throw error;
+	}
+	try {
+		fs.fchmodSync(fd, mode);
+	} finally {
+		fs.closeSync(fd);
+	}
+	try {
+		db.exec(`VACUUM INTO ${quote(backupPath)}`);
+		if (fs.statSync(backupPath).size === 0) throw new Error(`backup ${backupPath} was not written; nothing was changed`);
+	} catch (error) {
+		fs.rmSync(backupPath, { force: true }); // the file we created
+		throw error;
+	}
 
 	const commitsBefore = countLog(db);
 	const root = db.all<{ commit_hash: string }>("SELECT commit_hash FROM dolt_log").at(-1)?.commit_hash;
