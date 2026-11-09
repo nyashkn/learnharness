@@ -22,6 +22,13 @@ import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
  *                    src/seed gets a driver injected by scripts/seed.ts
  *   src/seed/**    →  never imports src/store, src/server, src/agent (CB7:
  *                    scripts/seed.ts is the only composition root)
+ *   src/store/**   →  never imports src/server, src/agent (adapters implement
+ *                    core ports; architecture §1 names src/store/file and
+ *                    src/store/sql, but the file adapter sits flat in src/store,
+ *                    so the zone is the whole of src/store)
+ *   migration rungs (src/store/sql/migrations/**\/[0-9]*.ts) → type imports only:
+ *                    the R6 hash covers only the rung's own source, so a value
+ *                    import would let a rung change behaviour unhashed
  *
  * tests/ and scripts/ are internal — unrestricted.
  */
@@ -55,6 +62,19 @@ const driverSyntax = [
 	`ImportExpression[source.expressions.length=0][source.quasis.0.value.cooked=${driverSource}]`,
 	`CallExpression[callee.name="require"][arguments.0.value=${driverSource}]`,
 ].map((selector) => ({ selector, message: driverMessage }));
+
+// R6 hashes a rung's own source only, so what it imports must not be able to change what it does: type imports only.
+const rungMessage = "Migration rungs may have type imports only (R6 hashes the rung's own source, not what it imports).";
+const rungSyntax = [
+	"ImportDeclaration[importKind!='type'] > ImportDefaultSpecifier",
+	"ImportDeclaration[importKind!='type'] > ImportNamespaceSpecifier",
+	"ImportDeclaration[importKind!='type'] > ImportSpecifier[importKind!='type']",
+	"ImportDeclaration[importKind!='type'][specifiers.length=0]",
+	"ExportAllDeclaration",
+	"ExportNamedDeclaration[source][exportKind!='type']",
+	"ImportExpression",
+	"CallExpression[callee.name='require']",
+].map((selector) => ({ selector, message: rungMessage }));
 
 export default defineConfig([
 	// electron/** — the desktop shell: plain Node, no framework, outside the
@@ -106,6 +126,12 @@ export default defineConfig([
 								"The agent layer receives its dependencies (storage ports via factories/closures) — it never imports the server layer or store adapters (architecture: docs/architecture.md).",
 						},
 						{
+							target: "./src/store",
+							from: ["./src/server", "./src/agent"],
+							message:
+								"Store adapters (file, sql) implement core ports; they never import the server or agent layers (architecture §1).",
+						},
+						{
 							target: "./src/seed",
 							from: ["./src/store", "./src/server", "./src/agent"],
 							message:
@@ -119,6 +145,10 @@ export default defineConfig([
 	{
 		files: ["src/store/sql/drivers/**"],
 		rules: { "no-restricted-imports": "off", "no-restricted-syntax": "off" },
+	},
+	{
+		files: ["src/store/sql/migrations/**/[0-9]*.ts"],
+		rules: { "no-restricted-syntax": ["error", ...driverSyntax, ...rungSyntax] }, // replaces the base list, so the driver selectors repeat
 	},
 	{
 		files: ["src/server/**/*.{ts,tsx}"],

@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { GRAPH_FORMAT_FILE } from "../../config.ts";
 import { CURRENT_GRAPH_FORMAT_VERSION } from "../core/contracts/graph.ts";
+import { StorageVersionError } from "../core/contracts/storage.ts";
 import { writeFileAtomicSync } from "./atomic-write.ts";
 
 function stampedVersion(formatFile: string): number | null {
@@ -39,19 +40,7 @@ function stampedVersion(formatFile: string): number | null {
 	}
 }
 
-/** A data folder stamped by a NEWER build than this one (item 5). */
-export class StorageVersionError extends Error {
-	override name = "StorageVersionError";
-	constructor(readonly file: string, readonly found: number, readonly supported: number, kind: "graph format" | "storage layout" = "graph format") {
-		super(
-			kind === "graph format"
-				? `Graph data is stamped with format version ${found}, but this build understands only ${supported}. ` +
-						"The app is older than its data — upgrade the app before touching the knowledge map."
-				: `${file}: the data folder uses storage layout ${found}, but this build understands only ${supported}. ` +
-						"The app is older than its data — upgrade the app before opening this folder.",
-		);
-	}
-}
+export { StorageVersionError };
 
 /** GUARD for every graph-family read AND write: throws when the data dir was
  *  written by a NEWER build. Never writes (the golden fixtures pin reads as

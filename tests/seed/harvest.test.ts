@@ -66,7 +66,7 @@ CREATE TABLE history (id INTEGER PRIMARY KEY, prompt TEXT NOT NULL, created_at I
 CREATE TABLE session_recaps (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, cwd TEXT NOT NULL, recap TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE stage1_outputs (thread_id TEXT PRIMARY KEY, source_updated_at INTEGER NOT NULL, raw_memory TEXT NOT NULL, rollout_summary TEXT NOT NULL, rollout_slug TEXT, generated_at INTEGER NOT NULL);
 CREATE TABLE threads (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, rollout_path TEXT NOT NULL, cwd TEXT NOT NULL, source_kind TEXT NOT NULL);
-CREATE TABLE session_summaries (id TEXT PRIMARY KEY, project TEXT, kind TEXT NOT NULL, content TEXT NOT NULL, earliest_at TEXT NOT NULL, latest_at TEXT NOT NULL, session_key TEXT, created_at TEXT NOT NULL);
+CREATE TABLE session_summaries (id TEXT PRIMARY KEY, project TEXT, depth INTEGER NOT NULL DEFAULT 0, kind TEXT NOT NULL CHECK(kind IN ('session', 'arc', 'epoch')), content TEXT NOT NULL, token_count INTEGER, earliest_at TEXT NOT NULL, latest_at TEXT NOT NULL, session_key TEXT, harness TEXT, agent_id TEXT NOT NULL DEFAULT 'default', created_at TEXT NOT NULL);
 CREATE TABLE entities (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, updated_at TEXT NOT NULL, mentions INTEGER NOT NULL, status TEXT);
 `;
 
@@ -92,7 +92,7 @@ function allSources(text: string, project: string, memorySlug = "plain-slug", ra
 		run("INSERT INTO session_recaps (id, session_id, cwd, recap, created_at) VALUES (1, 's2', ?, ?, ?)", project, text, T);
 		run("INSERT INTO threads (id, updated_at, rollout_path, cwd, source_kind) VALUES ('t1', ?, '/r', ?, 'cli')", T, project);
 		run("INSERT INTO stage1_outputs (thread_id, source_updated_at, raw_memory, rollout_summary, generated_at) VALUES ('t1', ?, ?, ?, ?)", T, rawMemory, text, T);
-		run("INSERT INTO session_summaries (id, project, kind, content, earliest_at, latest_at, session_key, created_at) VALUES ('x1', ?, 'k', ?, ?, ?, 'k1', ?)", project, text, ISO, ISO, ISO);
+		run("INSERT INTO session_summaries (id, project, kind, content, earliest_at, latest_at, session_key, created_at) VALUES ('x1', ?, 'session', ?, ?, ?, 'k1', ?)", project, text, ISO, ISO, ISO);
 		run("INSERT INTO entities (id, name, description, updated_at, mentions) VALUES ('e1', 'concept', ?, ?, 9)", text, ISO);
 	});
 	const files = fakeFiles({
@@ -330,6 +330,37 @@ describe("read-only adapters", () => {
 		const out = await collect([signetSummarySource({ db: sql.db, minMentions: 3 })]);
 		sql.close();
 		assert.deepEqual(out.map((i) => i.textRedacted), ["common\na concept"]);
+	});
+
+	it("session time comes from the session, not from when a derived row was written (lh-f6o)", async () => {
+		const OLD_S = 1_750_000_000; // 2025-06-15, seconds
+		const NEW_S = 1_760_000_000; // 2025-10-09, seconds
+		const sql = sqliteDb((run) => {
+			run("INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (1, 'first prompt', ?, '/w', 'sx')", OLD_S - 60);
+			run("INSERT INTO history (id, prompt, created_at, cwd, session_id) VALUES (2, 'last prompt', ?, '/w', 'sx')", OLD_S);
+			run("INSERT INTO session_recaps (id, session_id, cwd, recap, created_at) VALUES (1, 'sx', '/w', 'recap of sx', ?)", NEW_S);
+			run("INSERT INTO session_recaps (id, session_id, cwd, recap, created_at) VALUES (2, 'sy', '/w', 'recap with no history', ?)", NEW_S);
+			run("INSERT INTO threads (id, updated_at, rollout_path, cwd, source_kind) VALUES ('t1', ?, '/r', '/w', 'cli')", NEW_S);
+			run("INSERT INTO stage1_outputs (thread_id, source_updated_at, raw_memory, rollout_summary, generated_at) VALUES ('t1', ?, 'x', 'summary of t1', ?)", OLD_S, NEW_S);
+			run("INSERT INTO session_summaries (id, project, kind, content, earliest_at, latest_at, session_key, created_at) VALUES ('x1', '/w', 'session', 'signet summary', '2025-06-01T00:00:00.000Z', '2025-06-15T00:00:00.000Z', 'k1', '2025-10-09T00:00:00.000Z')");
+			run("INSERT INTO session_summaries (id, project, depth, kind, content, earliest_at, latest_at, session_key, created_at) VALUES ('a1', '/w', 1, 'arc', 'arc rollup', '2025-05-01T00:00:00.000Z', '2025-10-08T00:00:00.000Z', NULL, '2025-10-09T00:00:00.000Z')");
+			run("INSERT INTO session_summaries (id, project, depth, kind, content, earliest_at, latest_at, session_key, created_at) VALUES ('p1', '/w', 2, 'epoch', 'epoch rollup', '2025-01-01T00:00:00.000Z', '2025-10-08T00:00:00.000Z', NULL, '2025-10-09T00:00:00.000Z')");
+			run("INSERT INTO entities (id, name, description, updated_at, mentions) VALUES ('e1', 'concept', 'all-time', '2025-10-09T00:00:00.000Z', 9)");
+		});
+		const files = fakeFiles({ "/mem/proj/learned.md": "an all-time rollup" });
+		const out = await collect([ompRecapSource(sql.db), ompMemorySource({ agentDb: sql.db, files, memoriesDir: "/mem" }), signetSummarySource({ db: sql.db, minMentions: 3 })]);
+		sql.close();
+		const byText = new Map(out.map((i) => [i.textRedacted, (i as { sessionAt?: string | null }).sessionAt]));
+		assert.deepEqual(Object.fromEntries(byText), {
+			"recap of sx": "2025-06-15T15:06:40.000Z",
+			"recap with no history": null,
+			"summary of t1": "2025-06-15T15:06:40.000Z",
+			"an all-time rollup": null,
+			"signet summary": "2025-06-15T00:00:00.000Z",
+			"arc rollup": null,
+			"epoch rollup": null,
+			"concept\nall-time": null,
+		});
 	});
 
 	it("raw_memory is never selected: a marker planted there reaches no output", async () => {

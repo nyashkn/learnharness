@@ -2,12 +2,13 @@
 
 Each failpoint appears **once**. `tests/contract/failpoints-coverage.contract.ts` parses this table and fails when a
 row is duplicated, a category is missing or unknown, a test id is not declared in `tests/contract/**`, or a `todo`
-row does not name an owning bead that the declaring file also carries. It runs under `pnpm run test:contract`
+row does not name an owning bead that the declaring file also carries.
+A test id lives in `tests/contract/**` or `tests/sql/**`; an id that exists in both (`C1` is in each) is written `<file>#<id>` so the row cannot be satisfied by the wrong one. It runs under `pnpm run test:contract`
 (imported by `model-based.contract.ts`).
 
 Scope: `all` = every adapter (file now, sqlite, doltlite via the glob); `sql` = SQL driver level, run over the real
 node:sqlite driver wrapped by `src/store/sql/drivers/faulty.ts` (test-only). Crash atomicity across files does not
-exist for the file adapter, so crash rows are SQL-only. Adapter-level SQL rows are `todo` until the adapter exists.
+exist for the file adapter, so crash rows are SQL-only. Adapter-level SQL rows point at the real tests in `tests/sql/graph-store.test.ts` (S = seal, C = crash); the DoltLite row is `todo` until D3.
 
 | category | failpoint | scope | test id | status |
 |---|---|---|---|---|
@@ -24,9 +25,9 @@ exist for the file adapter, so crash rows are SQL-only. Adapter-level SQL rows a
 | newer-version-open | newer format refused at open | all | N3 | test |
 | newer-version-write | newer format refuses writes | all | G2 | test |
 | seal-failure-driver | seal failure after COMMIT, commit stays durable | sql | FP-SQL-SEAL | test |
-| seal-failure-adapter | seal failure after COMMIT logged, next transaction seals `recovered:` | sql | N14 | todo:lh-rws |
+| seal-failure-adapter | seal failure after COMMIT logged, next transaction seals `recovered:` | sql | tests/sql/graph-store.test.ts#S2 | test |
 | disk-full | disk full mid-transaction | sql | FP-SQL-ENOSPC | test |
 | corrupt-line | corrupt line skipped and counted | all | N2 | test |
 | rewrite-modified-copies | rewrite with modified copies of kept lines | all | MB3 | test |
-| sql-adapter-crash | crash atomicity through the sqlite GraphStore | sql | FP-SQLAD-CRASH | todo:lh-bhc |
+| sql-adapter-crash | crash atomicity through the sqlite GraphStore | sql | tests/sql/graph-store.test.ts#C1 | test |
 | doltlite-crash | crash atomicity through the doltlite GraphStore | sql | FP-DOLT-CRASH | todo:lh-bkg |

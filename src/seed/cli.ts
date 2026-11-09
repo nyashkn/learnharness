@@ -42,7 +42,8 @@ export const DESKTOP_NOTE =
 export const HELP = [
 	"pnpm run seed -- <command> [--judge clef|typesafe|openrouter|configured-llm] [--url <dev server>]",
 	"",
-	"  scan [--goals \"<text>\"]   harvest, redact, screen, propose and rank teaching sessions",
+	"  scan [--goals \"<text>\"] [--since YYYY-MM-DD]",
+	"                            harvest, redact, screen, propose and rank teaching sessions; --since (UTC) leaves older items unread",
 	"  list                      show proposed and review sessions with evidence",
 	"  label <id> learn|know|skip",
 	"  propose                   start a titled chat for every `learn` label (POST /api/chats {title}); the first message is stored for the Home panel",
@@ -55,7 +56,7 @@ export const HELP = [
 export type Parsed =
 	| { kind: "help" }
 	| { kind: "error"; message: string }
-	| { kind: "scan"; goals: string | null }
+	| { kind: "scan"; goals: string | null; since: string | null }
 	| { kind: "list" }
 	| { kind: "report" }
 	| { kind: "propose" }
@@ -76,11 +77,8 @@ export function parseCommand(rawArgv: readonly string[]): Parsed {
 			return noArgs({ kind: "report" });
 		case "propose":
 			return noArgs({ kind: "propose" });
-		case "scan": {
-			if (rest.length === 0) return { kind: "scan", goals: null };
-			if (rest.length === 2 && rest[0] === "--goals" && rest[1]!.trim() !== "") return { kind: "scan", goals: redact(rest[1]!) };
-			return { kind: "error", message: 'scan takes only --goals "<text>"' };
-		}
+		case "scan":
+			return parseScan(rest);
 		case "label": {
 			const [id, verdict] = rest;
 			if (rest.length !== 2 || id === undefined || verdict === undefined || !VERDICTS.includes(verdict)) {
@@ -91,6 +89,31 @@ export function parseCommand(rawArgv: readonly string[]): Parsed {
 		default:
 			return { kind: "error", message: `unknown command: ${command}` };
 	}
+}
+
+const SCAN_USAGE = 'scan takes only --goals "<text>" and --since YYYY-MM-DD';
+
+/** --since is a UTC calendar date; it becomes the instant at which that day starts. */
+function parseSince(value: string): string | null {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+	const iso = `${value}T00:00:00.000Z`;
+	const at = new Date(iso);
+	return !Number.isNaN(at.getTime()) && at.toISOString() === iso ? iso : null;
+}
+
+function parseScan(rest: readonly string[]): Parsed {
+	let goals: string | null = null;
+	let since: string | null = null;
+	for (let i = 0; i < rest.length; i += 2) {
+		const [flag, value] = [rest[i], rest[i + 1]];
+		if (value === undefined) return { kind: "error", message: SCAN_USAGE };
+		if (flag === "--goals" && goals === null && value.trim() !== "") goals = redact(value);
+		else if (flag === "--since" && since === null) {
+			since = parseSince(value);
+			if (since === null) return { kind: "error", message: `--since needs a real calendar date as YYYY-MM-DD, got ${value}` };
+		} else return { kind: "error", message: SCAN_USAGE };
+	}
+	return { kind: "scan", goals, since };
 }
 
 const UNCALIBRATED = "note: rank values are uncalibrated until the owner's labels (GK) are in.";
@@ -107,7 +130,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
 			return 2;
 		case "scan":
 			if (!deps.policy.calibrated) deps.out(UNCALIBRATED);
-			return scan(deps, parsed.goals);
+			return scan(deps, parsed.goals, parsed.since);
 		case "list":
 			if (!deps.policy.calibrated) deps.out(UNCALIBRATED);
 			return list(deps);
@@ -252,6 +275,9 @@ const DECISION_INSTRUCTIONS =
 /** The judge could not run because no token is configured: nothing else will work either. */
 class NoTokenError extends Error {}
 
+/** A seeding scan stops on the first judge or extractor failure (DECISION lh-iqc): an outage must not keep sending candidates. */
+class StopError extends Error {}
+
 const noulOf = (o: JudgeOutcome & { kind: "answered" }, id: string): number => {
 	const a = o.answers[id];
 	return a?.kind === "noul" ? a.probability : Number.NaN;
@@ -261,7 +287,7 @@ const topProbability = (probabilities: Record<string, number>) => Math.max(...Ob
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-async function scan(deps: CliDeps, goals: string | null): Promise<number> {
+async function scan(deps: CliDeps, goals: string | null, since: string | null): Promise<number> {
 	const { store, allowEgress, llm, policy, out, now } = deps;
 	const stamp = now();
 	const reviews: Omit<ReviewRow, "id" | "at">[] = [];
@@ -271,18 +297,29 @@ async function scan(deps: CliDeps, goals: string | null): Promise<number> {
 	const ask = async (req: JudgeRequest): Promise<JudgeOutcome> => {
 		const o = await deps.judge.ask(req);
 		if (o.kind === "no-decision" && o.reason === "no-token") throw new NoTokenError();
+		// egress-denied is the opt-out working, not a failure
+		if (o.kind === "no-decision" && o.reason !== "egress-denied") throw new StopError(`the judge gave no decision (${o.reason})`);
 		return o;
 	};
 
 	try {
-		// 1. harvest
+		// 1. harvest. With --since, only items whose session time is on or after the date take part: one with no session time
+		// (an all-time rollup) or an unreadable one is left out, and so is anything an earlier run stored, which is not dated here.
+		const sinceMs = since === null ? null : Date.parse(since);
 		const harvested: HarvestItem[] = [];
-		for await (const item of harvest(deps.sources)) harvested.push(item);
+		let older = 0;
+		for await (const item of harvest(deps.sources)) {
+			if (sinceMs === null || (item.sessionAt !== null && Date.parse(item.sessionAt) >= sinceMs)) harvested.push(item);
+			else older++;
+		}
 		store.upsertItems(harvested);
 		for (const s of deps.sources) if (s.stats.skipped > 0) out(`${s.name}: skipped ${s.stats.skipped} malformed rows`);
-		const stored = store.items();
+		if (since !== null) out(`since ${since.slice(0, 10)}: ${older} items older or without a session time not read in`);
+		const thisRun = new Set(harvested.map((i) => i.id));
+		const inRange = (item: HarvestItem) => sinceMs === null || thisRun.has(item.id);
+		const stored = store.items().filter(inRange);
 		store.markRepeats([...findRepeats(stored.map((i) => ({ id: i.id, sessionId: i.sessionId, text: i.textRedacted })))]);
-		const items = store.items();
+		const items = store.items().filter(inRange);
 		const byId = new Map(items.map((i) => [i.id, i]));
 		out(`harvested ${harvested.length} items (${items.length} stored)`);
 
@@ -324,14 +361,14 @@ async function scan(deps: CliDeps, goals: string | null): Promise<number> {
 			try {
 				reply = await llm.complete(prompt, TopicsSchema);
 			} catch {
-				for (const item of batch) note("topic-llm-failed", item.id);
-				continue;
+				throw new StopError("the extractor failed while naming topics");
 			}
-			if (!Value.Check(TopicsSchema, reply)) {
-				for (const item of batch) note("topic-invalid-output", item.id);
-				continue;
+			if (!Value.Check(TopicsSchema, reply)) throw new StopError("the extractor's topic reply did not match the schema");
+			// model-written text goes to the judge as choice options, so it gets the same redact and clip as harvested text
+			for (const raw of reply.topics) {
+				const t = clipSnippet(redact(raw).trim()).trim();
+				if (t !== "" && !topics.has(t.toLowerCase())) topics.set(t.toLowerCase(), t);
 			}
-			for (const t of reply.topics) if (t.trim() !== "" && !topics.has(t.trim().toLowerCase())) topics.set(t.trim().toLowerCase(), t.trim());
 		}
 		const topicList = [...topics.values()];
 		const clusters = new Map<string, HarvestItem[]>();
@@ -364,7 +401,8 @@ async function scan(deps: CliDeps, goals: string | null): Promise<number> {
 		for (const key of [...clusters.keys()].sort()) {
 			const result = await extractDraft(clusters.get(key)!, { llm, allowEgress });
 			if (result.kind === "draft") drafts.push(result.draft);
-			else reviews.push({ proposalId: null, reason: `extract-${result.reason}`, detail: topicOf(topicList, key) });
+			else if (result.reason === "egress-denied") reviews.push({ proposalId: null, reason: `extract-${result.reason}`, detail: topicOf(topicList, key) });
+			else throw new StopError(`the extractor failed while drafting a title (${result.reason})`);
 		}
 
 		// 5. align and merge
@@ -536,6 +574,10 @@ async function scan(deps: CliDeps, goals: string | null): Promise<number> {
 	} catch (error) {
 		if (error instanceof NoTokenError) {
 			out("scan stopped: no judge token is configured (set the profile's token variable, or use --judge configured-llm). Nothing further was written.");
+			return 1;
+		}
+		if (error instanceof StopError) {
+			out(`scan stopped: ${error.message}. Nothing more was sent; this run's results are incomplete.`);
 			return 1;
 		}
 		throw error;

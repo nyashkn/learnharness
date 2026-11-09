@@ -52,7 +52,7 @@ type MarkerState =
 	| { kind: "absent" }
 	| { kind: "text"; text: string };
 type Folder = "no-folder" | "empty" | "leftover-jsonl" | "chat-file";
-type Outcome = "file" | "version" | "corrupt" | "no-adapter";
+type Outcome = "file" | "sqlite" | "version" | "corrupt" | "no-adapter";
 
 const BAD_MARKERS: { text: string; outcome: Outcome }[] = [
 	{ text: "{not json", outcome: "corrupt" },
@@ -72,7 +72,7 @@ const BAD_MARKERS: { text: string; outcome: Outcome }[] = [
 	{ text: '{"backend":"file","layout":99}', outcome: "version" },
 	{ text: '{"backend":"mysql","layout":2}', outcome: "version" }, // a newer build may know the backend: version wins
 	{ text: '{"backend":"file","layout":1}', outcome: "file" },
-	{ text: '{"backend":"sqlite","layout":1}', outcome: "no-adapter" },
+	{ text: '{"backend":"sqlite","layout":1}', outcome: "corrupt" }, // agreement: the marker names graph.sqlite, which the table never builds
 	{ text: '{"backend":"doltlite","layout":1}', outcome: "no-adapter" },
 ];
 const ENVS = [undefined, "", "file", "sqlite", "doltlite", "bogus"] as const;
@@ -83,7 +83,8 @@ function oracle(m: MarkerState, folder: Folder, env: string | undefined): Outcom
 	const empty = folder === "no-folder" || folder === "empty";
 	if (!empty || env === undefined || env === "") return "file"; // missing marker = file; LH_STORAGE ignored on a non-empty folder
 	if (env === "file") return "file";
-	if (env === "sqlite" || env === "doltlite") return "no-adapter";
+	if (env === "sqlite") return "sqlite"; // an intent only: the store is made on the first write
+	if (env === "doltlite") return "no-adapter";
 	return "corrupt"; // an unknown LH_STORAGE on an empty folder
 }
 
@@ -96,7 +97,7 @@ function build(dir: string, m: MarkerState, folder: Folder): void {
 }
 
 function outcomeOf(fn: () => unknown): Outcome {
-	try { fn(); return "file"; } catch (e) {
+	try { return fn() === "sqlite" ? "sqlite" : "file"; } catch (e) {
 		if (e instanceof StorageVersionError) return "version";
 		const name = (e as Error).name;
 		if (name === "StorageMarkerError") return "corrupt";
@@ -127,7 +128,8 @@ describe("marker resolution (open)", () => {
 			examples: [
 				[{ kind: "absent" }, "leftover-jsonl", "sqlite"], // LH_STORAGE on a non-empty folder: ignored, not a conflict
 				[{ kind: "absent" }, "chat-file", "bogus"], // even a bogus value is ignored there
-				[{ kind: "absent" }, "empty", "sqlite"], // honoured on an empty folder -> no adapter in this build
+				[{ kind: "absent" }, "empty", "sqlite"], // honoured on an empty folder -> the sqlite backend (nothing written at open)
+				[{ kind: "absent" }, "empty", "doltlite"], // honoured on an empty folder -> no adapter in this build
 				[{ kind: "absent" }, "no-folder", "file"],
 				[{ kind: "text", text: '{"backend":"file","layout":2}' }, "leftover-jsonl", undefined],
 				[{ kind: "text", text: "{not json" }, "leftover-jsonl", undefined], // a corrupt marker is never "missing"
@@ -249,7 +251,7 @@ describe("marker and lock are written on the first write, not before", () => {
 	});
 
 	it("LH_STORAGE is honoured at the first write: a refused choice leaves no marker and no lock (lh-uwy)", () => {
-		const cases: [string, "no-adapter" | "corrupt"][] = [["sqlite", "no-adapter"], ["doltlite", "no-adapter"], ["bogus", "corrupt"]];
+		const cases: [string, "no-adapter" | "corrupt"][] = [["doltlite", "no-adapter"], ["bogus", "corrupt"]];
 		for (const [value, outcome] of cases) {
 			const dir = fresh();
 			fs.mkdirSync(dir);

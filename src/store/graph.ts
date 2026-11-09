@@ -34,6 +34,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { PATHS } from "../../config.ts";
 import { assertGraphFormat, ensureGraphFormat } from "./graph-format.ts";
 import { beforeWrite } from "./marker.ts";
@@ -44,11 +46,14 @@ import type {
 	ExtractionRunUsage,
 	NotesSource,
 	Position,
-	ProvenancePoint,
-	CoverageEntry,
+		CoverageEntry,
 	SessionCheckpoint,
 } from "../core/contracts.ts";
 import type { GraphStore } from "../core/ports.ts";
+import { ChainLineSchema } from "../core/contracts/schemas/chain-line.ts";
+import { CheckpointLineSchema } from "../core/contracts/schemas/checkpoint-line.ts";
+import { CoverageLineSchema } from "../core/contracts/schemas/coverage-line.ts";
+import { NodeLineSchema } from "../core/contracts/schemas/node-line.ts";
 
 // ─── JSONL primitives ────────────────────────────────────────────────────────
 
@@ -223,25 +228,32 @@ export function sameOnDisk(file: string, body: string): boolean {
 	}
 }
 
-function readRawLines(file: string): unknown[] {
+/** Parse a ledger: every parsable line, plus the count of lines that are not records (item 2, 12).
+ *  Counted as bad: an unparsable line, a blank interior line, a torn tail. The newline that ends the
+ *  file is not a line. Schema failures are the caller's (it knows the schema). */
+function scanLines(file: string): { parsed: unknown[]; unparsable: number } {
 	let raw: string;
 	try {
 		raw = fs.readFileSync(file, "utf-8");
 	} catch {
-		return []; // no ledger yet — nothing has ever been emitted
+		return { parsed: [], unparsable: 0 }; // no ledger yet — nothing has ever been emitted
 	}
-	const out: unknown[] = [];
-	for (const line of raw.split("\n")) {
+	const parsed: unknown[] = [];
+	let unparsable = 0;
+	const lines = raw.split("\n");
+	lines.forEach((line, i) => {
 		const trimmed = line.trim();
-		if (trimmed.length === 0) continue;
-		try {
-			out.push(JSON.parse(trimmed));
-		} catch {
-			// Corrupt line: skip rather than fail the whole read — a torn
-			// append must never take the home graph down with it.
+		if (trimmed.length === 0) {
+			if (!(i === lines.length - 1 && line === "")) unparsable++; // blank interior line; the final "" is the normal trailing newline
+			return;
 		}
-	}
-	return out;
+		try {
+			parsed.push(JSON.parse(trimmed));
+		} catch {
+			unparsable++; // a torn append must never take the home graph down with it: skipped here, counted by corruptLines()
+		}
+	});
+	return { parsed, unparsable };
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -250,59 +262,34 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 const isString = (v: unknown): v is string => typeof v === "string";
 
-/** Strict shape guards — anything not matching a W4 ledger shape is skipped. */
-function readValid<T>(c: Ctx, file: string, isValid: (v: unknown) => v is T): T[] {
+/** Strict shape guards: the S4 line schemas, `Value.Check` ONLY. Never Convert/Clean: lines are verbatim (CB5).
+ *  Anything not matching a ledger shape is skipped (and counted by corruptLines). */
+function readValid<T>(c: Ctx, file: string, schema: TSchema): T[] {
 	assertGraphFormat(c.files.format); // honest refusal on a newer-stamped data dir
-	let records = readRawLines(file);
+	let records = scanLines(file).parsed;
 	if (c.txn) {
 		for (const op of c.txn.ops) {
 			if (op.t === "append" && op.file === file) records.push(viaDisk(op.record));
 			else if (op.t === "rewrite" && op.file === file) records = op.records.map(viaDisk);
 		}
 	}
-	return records.filter(isValid);
+	return records.filter((r): r is T => Value.Check(schema, r));
 }
 
-/** Provenance points are (chatId, messageId) pairs — message-granular. */
-const isProvenancePoint = (v: unknown): v is ProvenancePoint =>
-	isRecord(v) && isString(v.chatId) && isString(v.messageId);
-
-
-const isGraphNode = (v: unknown): v is GraphNode =>
-	isRecord(v) &&
-	isString(v.id) &&
-	isString(v.name) &&
-	isString(v.statement) &&
-	Array.isArray(v.aliases) &&
-	v.aliases.every(isString) &&
-	isString(v.createdAt) &&
-	Array.isArray(v.provenance) &&
-	v.provenance.every(isProvenancePoint);
-
-/** A chain line: premises ≥ 1 (a chain IS an argument — bare propositions
- *  ride the node ledger alone), every member a string, conclusion a string.
- *  Endpoint EXISTENCE is the derivation's concern (it drops dangling
- *  chains); the store only shapes. */
-const isGraphChain = (v: unknown): v is GraphChain =>
-	isRecord(v) &&
-	isString(v.id) &&
-	Array.isArray(v.premises) &&
-	v.premises.length > 0 &&
-	v.premises.every(isString) &&
-	isString(v.conclusion) &&
-	Array.isArray(v.provenance) &&
-	v.provenance.every(isProvenancePoint) &&
-	isString(v.createdAt);
-
-const isCheckpoint = (v: unknown): v is SessionCheckpoint =>
-	isRecord(v) && isString(v.chatId) && isString(v.foldedAt);
-
-const isCoverageEntry = (v: unknown): v is CoverageEntry =>
-	isRecord(v) && isString(v.chatId) && isString(v.fp) && typeof v.tokens === "number" && isString(v.foldedAt);
+/** Lines that are not records across the four ledgers, from disk only (pending transact ops are not lines yet). Stateless. */
+function corruptLinesOf(c: Ctx): number {
+	assertGraphFormat(c.files.format);
+	let bad = 0;
+	for (const [file, schema] of [[c.files.nodes, NodeLineSchema], [c.files.chains, ChainLineSchema], [c.files.sessions, CheckpointLineSchema], [c.files.coverage, CoverageLineSchema]] as const) {
+		const { parsed, unparsable } = scanLines(file);
+		bad += unparsable + parsed.filter((r) => !Value.Check(schema, r)).length;
+	}
+	return bad;
+}
 
 // ─── the port implementation ────────────────────────────────────────────────
 
-function build(c: Ctx): GraphStore {
+function build(c: Ctx): GraphStore & { corruptLines(): number } {
 	return {
 		appendNode(node: GraphNode): void {
 			appendLine(c, c.files.nodes, node);
@@ -311,7 +298,7 @@ function build(c: Ctx): GraphStore {
 		 *  one line (a later session's LINK-append: phrasings + provenance); the
 		 *  derivation (core/graph.ts getGraph) merges lines by id. */
 		readNodes(): GraphNode[] {
-			return readValid(c, c.files.nodes, isGraphNode);
+			return readValid<GraphNode>(c, c.files.nodes, NodeLineSchema);
 		},
 
 		/** Append one chain ASSERTION; readers merge lines by (premises,
@@ -320,21 +307,21 @@ function build(c: Ctx): GraphStore {
 			appendLine(c, c.files.chains, assertion);
 		},
 		readChains(): GraphChain[] {
-			return readValid(c, c.files.chains, isGraphChain);
+			return readValid<GraphChain>(c, c.files.chains, ChainLineSchema);
 		},
 
 		appendCheckpoint(checkpoint: SessionCheckpoint): void {
 			appendLine(c, c.files.sessions, checkpoint);
 		},
 		readCheckpoints(): SessionCheckpoint[] {
-			return readValid(c, c.files.sessions, isCheckpoint);
+			return readValid<SessionCheckpoint>(c, c.files.sessions, CheckpointLineSchema);
 		},
 
 		appendCoverage(entry: CoverageEntry): void {
 			appendLine(c, c.files.coverage, entry);
 		},
 		readCoverage(): CoverageEntry[] {
-			return readValid(c, c.files.coverage, isCoverageEntry);
+			return readValid<CoverageEntry>(c, c.files.coverage, CoverageLineSchema);
 		},
 
 		// ── imported-notes bookkeeping (config.SOURCES_FILE — a JSON map) ──
@@ -409,6 +396,8 @@ function build(c: Ctx): GraphStore {
 
 		transact: <T>(label: string, fn: () => T) => transact(c, label, fn),
 		revision: () => revisionNow(c),
+		/** Not on the GraphStore port (a port change needs an ADR, CB1): the contract suite reads it by cast. */
+		corruptLines: () => corruptLinesOf(c),
 	};
 }
 

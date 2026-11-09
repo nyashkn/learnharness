@@ -3,5 +3,9 @@
 	"recencyHalfLifeDays": 60,
 	"goalWeight": 1,
 	"minMentions": 50,
-	"learnableTau": 0.5
+	"learnableTau": 0.5,
+	"extractor": {
+		"provider": "cloudflare-workers-ai",
+		"id": "@cf/deepseek-ai/deepseek-v4.1-flash-1017"
+	}
 }

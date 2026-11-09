@@ -53,9 +53,8 @@ for (const f of await discoverAdapters()) {
 		});
 	});
 }
-// Adapter-level crash atomicity: registered `todo` so the matrix row cannot pass silently (S5 / D3 replace the body).
+// Adapter-level crash atomicity: the sqlite row is tests/sql/graph-store.test.ts#C1; DoltLite stays `todo` so its matrix row cannot pass silently (D3 replaces the body).
 describe("SQL adapters: crash atomicity through the GraphStore", () => {
-	it("FP-SQLAD-CRASH sqlite GraphStore: a crash at every write step of a transact leaves no trace", { todo: "lh-bhc" }, () => { throw new Error("pending: sqlite GraphStore (S5)"); });
 	it("FP-DOLT-CRASH doltlite GraphStore: a crash at every write step of a transact leaves no trace and no commit", { todo: "lh-bkg" }, () => { throw new Error("pending: doltlite GraphStore (D3)"); });
 });
 void Cmd;
