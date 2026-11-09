@@ -55,9 +55,91 @@ const HOME_PATHS: readonly RegExp[] = [
 	new RegExp(`${NOT_ALNUM}-(?:Users|home)-[^-\\s/]+`, "g"), // cwd slug form
 ];
 
+// ---- tokens wrapped across a line ----
+// Each line fragment of a wrapped token is too short for any rule, so a run that ends a line is joined to the run that
+// starts the next (after indentation or a "> " or "│ " prefix) and the joined view is scanned with the same rules.
+const RUN = "[A-Za-z0-9_.-]";
+const WRAP_SEP = "\\r?\\n[ \\t]*(?:[>│][ \\t]*)*";
+const WRAP_CHAIN = new RegExp(`(?<!${RUN})${RUN}+(?:${WRAP_SEP}${RUN}+)+`, "g");
+const WRAP_SPLIT = new RegExp(`(${WRAP_SEP})`);
+// A plain word of 5 or more letters is prose, not a token fragment.
+const PLAIN_WORD = /^(?:[a-z]{5,}|[A-Z][a-z]{4,}|[A-Z]{5,})$/;
+// shortcut: a joined group stops at this length, so a token straddling the cut in a longer pasted blob can leak a fragment; raise it if blobs matter.
+const MAX_JOIN = 4096;
+
+type Span = readonly [start: number, end: number];
+
+/** Where the run-level rules would redact `s`, measured on `s` itself rather than after earlier replacements. */
+function runSpans(s: string): Span[] {
+	const spans: Span[] = [];
+	for (const re of TOKENS) for (const m of s.matchAll(re)) spans.push([m.index, m.index + m[0].length]);
+	for (const m of s.matchAll(OPAQUE_RUN)) spans.push([m.index, m.index + m[0].length]);
+	for (const m of s.matchAll(SPLIT_RUN)) if (redactSplitRun(m[0]) !== m[0]) spans.push([m.index, m.index + m[0].length]);
+	return spans;
+}
+
+const crosses = (spans: readonly Span[], cut: number) => spans.some(([start, end]) => start < cut && cut < end);
+
+function joinable(left: string, right: string): boolean {
+	// one cwd slug per line is a list, not a wrapped token
+	if (left.startsWith("-") && right.startsWith("-")) return false;
+	if (!PLAIN_WORD.test(left) && !PLAIN_WORD.test(right)) return true;
+	// next to a plain word, only a named token rule running across the break joins
+	const joined = left + right;
+	return TOKENS.some((re) => crosses([...joined.matchAll(re)].map((m) => [m.index, m.index + m[0].length] as const), left.length));
+}
+
+/** `group` alternates fragment, separator, fragment. Redacts the joined view only when a rule runs across a break. */
+function redactGroup(group: readonly string[]): string {
+	if (group.length === 1) return group[0]!;
+	const frags = group.filter((_, i) => i % 2 === 0);
+	const joined = frags.join("");
+	const cuts: number[] = [];
+	for (let k = 0, at = 0; k < frags.length - 1; k++) cuts.push((at += frags[k]!.length));
+	const spans = runSpans(joined);
+	if (!cuts.some((cut) => crosses(spans, cut))) return group.join("");
+	const covered = new Uint8Array(joined.length);
+	for (const [start, end] of spans) covered.fill(1, start, end);
+	for (let k = 0, at = 0; k < frags.length; at += frags[k]!.length, k++) {
+		for (const [start, end] of runSpans(frags[k]!)) covered.fill(1, at + start, at + end);
+	}
+	let out = "";
+	for (let k = 0, at = 0; k < frags.length; k++) {
+		// a break inside a redaction goes with it; any other break stays where it was
+		if (k > 0 && !(covered[at - 1] && covered[at])) out += group[2 * k - 1];
+		for (const ch of frags[k]!) {
+			if (!covered[at]) out += ch;
+			else if (at === 0 || !covered[at - 1]) out += "[redacted:secret]";
+			at++;
+		}
+	}
+	return out;
+}
+
+function redactWrapped(chain: string): string {
+	const parts = chain.split(WRAP_SPLIT);
+	let out = "";
+	let group = [parts[0]!];
+	let length = parts[0]!.length;
+	for (let i = 1; i < parts.length; i += 2) {
+		const sep = parts[i]!;
+		const next = parts[i + 1]!;
+		if (joinable(group[group.length - 1]!, next) && length + next.length <= MAX_JOIN) {
+			group.push(sep, next);
+			length += next.length;
+		} else {
+			out += redactGroup(group) + sep;
+			group = [next];
+			length = next.length;
+		}
+	}
+	return out + redactGroup(group);
+}
+
 /** Pure and idempotent: placeholders never match any rule. Always on; there is no switch. */
 export function redact(text: string): string {
 	let out = text.replace(PEM, "[redacted:key]");
+	out = out.replace(WRAP_CHAIN, redactWrapped);
 	for (const re of TOKENS) out = out.replace(re, "[redacted:secret]");
 	out = out.replace(BEARER, "Bearer [redacted:token]");
 	out = out.replace(HEADER, "$1[redacted:header]");

@@ -201,3 +201,113 @@ describe("redact properties", () => {
 		);
 	});
 });
+
+// ---- tokens wrapped across a line (lh-tw1.1) ----
+// Seeded measurement, 20,000 per row. Rates go out as test diagnostics; the bars are the bead's fixed numbers.
+
+/** mulberry32: a fixed seed gives the same samples on every run. */
+function prng(seed: number): () => number {
+	let a = seed >>> 0;
+	return () => {
+		a = (a + 0x6d2b79f5) >>> 0;
+		let x = a;
+		x = Math.imul(x ^ (x >>> 15), x | 1);
+		x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+		return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+	};
+}
+const N = 20_000;
+const B64URL = `${A62}-_`;
+const UPPER36 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const DIGIT10 = "0123456789";
+// LF, CRLF, then indentation, a quote prefix or a box prefix
+const WRAPS = ["\n", "\r\n", "\n  ", "\r\n\t", "\n> ", "\r\n> ", "\n│ ", "\n    │ "];
+const pick = (r: () => number, set: string, n: number) => Array.from({ length: n }, () => set[Math.floor(r() * set.length)]).join("");
+const wrapOnce = (r: () => number, token: string) => {
+	const at = 1 + Math.floor(r() * (token.length - 1));
+	return t(token.slice(0, at), WRAPS[Math.floor(r() * WRAPS.length)]!, token.slice(at));
+};
+/** A body fragment leaks when any 4 consecutive body characters survive outside a placeholder. */
+function leaks(text: string, body: string): boolean {
+	const out = redact(text).replace(/\[redacted:[a-z]+\]/g, " ");
+	for (let i = 0; i + 4 <= body.length; i++) if (out.includes(body.slice(i, i + 4))) return true;
+	return false;
+}
+const pct = (n: number) => `${(n * 100).toFixed(2)}%`;
+
+describe("wrapped tokens (lh-tw1.1)", () => {
+	for (const [len, seed] of [[40, 4001], [48, 4801], [64, 6401]] as const) {
+		it(`random ${len}-char tokens: the wrapped leak rate is within 1 point of the unbroken rate`, (ctx) => {
+			const r = prng(seed);
+			let unbroken = 0;
+			let wrapped = 0;
+			for (let i = 0; i < N; i++) {
+				const token = pick(r, B64URL, len);
+				if (leaks(t("see ", token, " done"), token)) unbroken++;
+				if (leaks(t("see ", wrapOnce(r, token), " done"), token)) wrapped++;
+			}
+			ctx.diagnostic(`len ${len}: unbroken leak ${pct(unbroken / N)}, wrapped leak ${pct(wrapped / N)}`);
+			assert.ok((wrapped - unbroken) / N <= 0.01, `wrapped ${pct(wrapped / N)} vs unbroken ${pct(unbroken / N)}`);
+		});
+	}
+
+	const PREFIXED: ReadonlyArray<readonly [string, number, (r: () => number) => [prefix: string, body: string]]> = [
+		["sk-", 501, (r) => ["sk-", pick(r, A62, 48)]],
+		["ghp_", 502, (r) => ["ghp_", pick(r, A62, 36)]],
+		["pplx-", 503, (r) => ["pplx-", pick(r, A62, 48)]],
+		["xoxb-", 504, (r) => ["xoxb-", t(pick(r, DIGIT10, 12), "-", pick(r, DIGIT10, 12), "-", pick(r, A62, 24))]],
+		["AKIA", 505, (r) => ["AKIA", pick(r, UPPER36, 16)]],
+	];
+	for (const [name, seed, make] of PREFIXED) {
+		it(`wrapped ${name} tokens never leak a body fragment`, (ctx) => {
+			const r = prng(seed);
+			let wrapped = 0;
+			for (let i = 0; i < N; i++) {
+				const [prefix, body] = make(r);
+				if (leaks(t("see ", wrapOnce(r, t(prefix, body)), " done"), body)) wrapped++;
+			}
+			ctx.diagnostic(`${name}: wrapped leak ${pct(wrapped / N)}`);
+			assert.equal(wrapped, 0);
+		});
+	}
+
+	// directory names as they appear in cwd slugs; the mixed case comes from the names themselves
+	const DIRS = ["Documents", "dev", "work", "personal", "productivity", "learn", "harness", "fork", "feature", "projects", "Mobile", "Data", "payments", "frontend", "infra", "Initech", "acme", "client", "api", "web", "app", "core", "Shared", "notes", "src", "code", "repos", "Desktop", "sandbox", "experiments", "2025", "v2", "EK", "RK"];
+	const slug = (r: () => number) => `-Users-alice-${Array.from({ length: 3 + Math.floor(r() * 9) }, () => DIRS[Math.floor(r() * DIRS.length)]).join("-")}`;
+	it("mixed-case slugs: at most 0.2% false positives alone, and a one-per-line list redacts exactly as its lines do", (ctx) => {
+		const r = prng(777);
+		let single = 0;
+		let listed = 0;
+		for (let i = 0; i < N; i++) {
+			const a = slug(r);
+			const b = slug(r);
+			if (redact(a).includes("[redacted:")) single++;
+			const list = redact(t(a, "\n", b));
+			if (list.includes("[redacted:")) listed++;
+			assert.equal(list, t(redact(a), "\n", redact(b)));
+		}
+		ctx.diagnostic(`slugs: alone ${pct(single / N)}, in a two-line list ${pct(listed / N)}`);
+		assert.ok(single / N <= 0.002);
+	});
+
+	it("ordinary wrapped prose and one-path-per-line lists are left unchanged", () => {
+		const prose = [
+			"The quick brown fox jumps over the lazy dog and keeps\nrunning until the end of the road, where it finally\nstops.",
+			"> a quoted reply that wraps across\n> two lines of ordinary text",
+			"│ box drawn output with words that\n│ continue on the next line",
+			"version 2.4.1 shipped on 2025-03-01 and\nfixes 12 issues in the parser",
+			"internationalization\nlocalization2024",
+			"line one\r\nline two\r\n  indented three",
+			"why does quicksort degrade to O(n^2) on sorted\ninput when the pivot is the first element?",
+		];
+		const lists = [
+			"src/seed/redact.ts\nsrc/seed/egress.ts\nscripts/seed.ts",
+			"/opt/work/client-x/app\n/opt/work/client-y/app\n/var/log/system.log",
+			"./build/output-2025-03-01.tar.gz\n./build/output-2025-03-02.tar.gz",
+			"C:\\work\\app\\main.ts\nC:\\work\\app\\util2.ts",
+			"-opt-work-client-x-2025\n-opt-work-client-y-2026\n-opt-learn-notes-v2",
+			"node_modules/.pnpm/fast-check@4.1.1/node_modules/fast-check\nnode_modules/.pnpm/typebox@1.0.0/node_modules/typebox",
+		];
+		for (const text of [...prose, ...lists]) assert.equal(redact(text), text);
+	});
+});
