@@ -57,9 +57,11 @@ const HOME_PATHS: readonly RegExp[] = [
 
 // ---- tokens wrapped across a line ----
 // Each line fragment of a wrapped token is too short for any rule, so a run that ends a line is joined to the run that
-// starts the next (after indentation or a "> " or "│ " prefix) and the joined view is scanned with the same rules.
+// starts the next and the joined view is scanned with the same rules.
 const RUN = "[A-Za-z0-9_.-]";
-const WRAP_SEP = "\\r?\\n[ \\t]*(?:[>│][ \\t]*)*";
+// Before the break: trailing blanks or a right border (" │"). The break: CRLF, LF or CR, exactly one, so a blank line,
+// form feed, U+2028, U+2029 or NEL never joins. After it: indentation (NBSP too) and quote, box, table, comment or diff prefixes.
+const WRAP_SEP = "[ \\t\\u00a0]*(?:[│┃║|][ \\t\\u00a0]*)?(?:\\r\\n?|\\n)[ \\t\\u00a0]*(?:(?:[>│┃║|#+*]|//)[ \\t\\u00a0]*)*";
 const WRAP_CHAIN = new RegExp(`(?<!${RUN})${RUN}+(?:${WRAP_SEP}${RUN}+)+`, "g");
 const WRAP_SPLIT = new RegExp(`(${WRAP_SEP})`);
 // A plain word of 5 or more letters is prose, not a token fragment.
@@ -150,8 +152,9 @@ export function redact(text: string): string {
 	out = out.replace(INLINE_ENV, "$1[redacted:env]");
 	out = out.replace(FLAG, "$1[redacted:secret]");
 	out = out.replace(KEY_VALUE, "$1[redacted:secret]");
-	out = out.replace(OPAQUE_RUN, "[redacted:secret]");
+	// SPLIT_RUN first: OPAQUE_RUN would replace an alnum stretch inside a dashed token and leave pieces too short for SPLIT_RUN.
 	out = out.replace(SPLIT_RUN, redactSplitRun);
+	out = out.replace(OPAQUE_RUN, "[redacted:secret]");
 	out = out.replace(EMAIL, "[redacted:email]");
 	for (const re of HOME_PATHS) out = out.replace(re, "~");
 	return out;

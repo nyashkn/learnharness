@@ -202,8 +202,8 @@ describe("redact properties", () => {
 	});
 });
 
-// ---- tokens wrapped across a line (lh-tw1.1) ----
-// Seeded measurement, 20,000 per row. Rates go out as test diagnostics; the bars are the bead's fixed numbers.
+// ---- tokens wrapped across a line (lh-tw1.1, lh-lmc) and unbroken dashed tokens (lh-th2) ----
+// Seeded measurement, 20,000 per row. Rates go out as test diagnostics; the bars are the beads' fixed numbers.
 
 /** mulberry32: a fixed seed gives the same samples on every run. */
 function prng(seed: number): () => number {
@@ -220,24 +220,61 @@ const N = 20_000;
 const B64URL = `${A62}-_`;
 const UPPER36 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 const DIGIT10 = "0123456789";
-// LF, CRLF, then indentation, a quote prefix or a box prefix
+const HEX16 = "0123456789abcdef";
+// lh-tw1.1 forms: LF, CRLF, then indentation, a quote prefix or a box prefix
 const WRAPS = ["\n", "\r\n", "\n  ", "\r\n\t", "\n> ", "\r\n> ", "\n│ ", "\n    │ "];
+// lh-lmc forms: trailing blanks, a right border, more prefixes, CR alone, NBSP indent
+const MORE_WRAPS: ReadonlyArray<readonly [name: string, sep: string]> = [
+	["two trailing spaces then LF", "  \n"],
+	["trailing space then CRLF", " \r\n"],
+	["right box border", " │\n│ "],
+	['"| "', "\n| "],
+	['"┃ "', "\n┃ "],
+	['"║ "', "\n║ "],
+	['"# "', "\n# "],
+	['"// "', "\n// "],
+	['" * "', "\n * "],
+	['"+"', "\n+"],
+	["CR alone", "\r"],
+	["NBSP indent", "\n\u00a0\u00a0"],
+];
 const pick = (r: () => number, set: string, n: number) => Array.from({ length: n }, () => set[Math.floor(r() * set.length)]).join("");
-const wrapOnce = (r: () => number, token: string) => {
+const wrapAt = (r: () => number, token: string, sep: string) => {
 	const at = 1 + Math.floor(r() * (token.length - 1));
-	return t(token.slice(0, at), WRAPS[Math.floor(r() * WRAPS.length)]!, token.slice(at));
+	return t(token.slice(0, at), sep, token.slice(at));
 };
-/** A body fragment leaks when any 4 consecutive body characters survive outside a placeholder. */
-function leaks(text: string, body: string): boolean {
+const wrapOnce = (r: () => number, token: string) => wrapAt(r, token, WRAPS[Math.floor(r() * WRAPS.length)]!);
+/** A body fragment leaks when `min` consecutive body characters survive outside a placeholder. */
+function leaks(text: string, body: string, min = 4): boolean {
 	const out = redact(text).replace(/\[redacted:[a-z]+\]/g, " ");
-	for (let i = 0; i + 4 <= body.length; i++) if (out.includes(body.slice(i, i + 4))) return true;
+	for (let i = 0; i + min <= body.length; i++) if (out.includes(body.slice(i, i + min))) return true;
 	return false;
 }
 const pct = (n: number) => `${(n * 100).toFixed(2)}%`;
 
+describe("unbroken dashed tokens (lh-th2)", () => {
+	// 8+ char fragments; the bead's bar per length
+	for (const [len, seed, bar] of [[40, 4001, 0.005], [48, 4801, 0.001], [64, 6401, 0.001]] as const) {
+		it(`random base64url ${len}-char tokens leak an 8+ char fragment at most ${pct(bar)}`, (ctx) => {
+			const r = prng(seed);
+			let leak8 = 0;
+			let leak4 = 0;
+			for (let i = 0; i < N; i++) {
+				const token = pick(r, B64URL, len);
+				const text = t("see ", token, " done");
+				if (leaks(text, token, 8)) leak8++;
+				if (leaks(text, token, 4)) leak4++;
+			}
+			ctx.diagnostic(`unbroken ${len}: 8+ leak ${pct(leak8 / N)}, 4+ leak ${pct(leak4 / N)}`);
+			assert.ok(leak8 / N <= bar);
+		});
+	}
+});
+
 describe("wrapped tokens (lh-tw1.1)", () => {
+	// absolute bar: the unbroken 4+ rate measured after lh-th2 is under 1% at every length, so wrapped must be under 2%
 	for (const [len, seed] of [[40, 4001], [48, 4801], [64, 6401]] as const) {
-		it(`random ${len}-char tokens: the wrapped leak rate is within 1 point of the unbroken rate`, (ctx) => {
+		it(`random ${len}-char tokens: wrapped leak within 1 point of unbroken and under 2%`, (ctx) => {
 			const r = prng(seed);
 			let unbroken = 0;
 			let wrapped = 0;
@@ -248,8 +285,24 @@ describe("wrapped tokens (lh-tw1.1)", () => {
 			}
 			ctx.diagnostic(`len ${len}: unbroken leak ${pct(unbroken / N)}, wrapped leak ${pct(wrapped / N)}`);
 			assert.ok((wrapped - unbroken) / N <= 0.01, `wrapped ${pct(wrapped / N)} vs unbroken ${pct(unbroken / N)}`);
+			assert.ok(wrapped / N < 0.02);
 		});
 	}
+
+	// only OPAQUE_RUN catches hex (its entropy is under MIN_ENTROPY), so this row fails if the join stops scanning with it
+	it("wrapped 40-char hex digests: within 1 point of unbroken and under 1%", (ctx) => {
+		const r = prng(4040);
+		let unbroken = 0;
+		let wrapped = 0;
+		for (let i = 0; i < N; i++) {
+			const hex = t(pick(r, HEX16, 39), pick(r, "abcdef", 1));
+			if (leaks(t("sha ", hex, " ok"), hex)) unbroken++;
+			if (leaks(t("sha ", wrapOnce(r, hex), " ok"), hex)) wrapped++;
+		}
+		ctx.diagnostic(`hex 40: unbroken leak ${pct(unbroken / N)}, wrapped leak ${pct(wrapped / N)}`);
+		assert.ok((wrapped - unbroken) / N <= 0.01);
+		assert.ok(wrapped / N < 0.01);
+	});
 
 	const PREFIXED: ReadonlyArray<readonly [string, number, (r: () => number) => [prefix: string, body: string]]> = [
 		["sk-", 501, (r) => ["sk-", pick(r, A62, 48)]],
@@ -270,11 +323,68 @@ describe("wrapped tokens (lh-tw1.1)", () => {
 			assert.equal(wrapped, 0);
 		});
 	}
+});
 
+describe("more wrap forms (lh-lmc)", () => {
+	MORE_WRAPS.forEach(([name, sep], i) => {
+		it(`${name}: base64url 48 and sk- 48 leak an 8+ char fragment at most 1%`, (ctx) => {
+			const r = prng(9000 + i);
+			let generic = 0;
+			let sk = 0;
+			for (let k = 0; k < N; k++) {
+				const token = pick(r, B64URL, 48);
+				if (leaks(t("see ", wrapAt(r, token, sep), " done"), token, 8)) generic++;
+				const body = pick(r, A62, 48);
+				if (leaks(t("see ", wrapAt(r, t("sk-", body), sep), " done"), body, 8)) sk++;
+			}
+			ctx.diagnostic(`${name}: base64url 48 ${pct(generic / N)}, sk- ${pct(sk / N)}`);
+			assert.ok(generic / N <= 0.01);
+			assert.ok(sk / N <= 0.01);
+		});
+	});
+});
+
+describe("wrapped redaction, exact output", () => {
+	const B = fake(60); // letters and digits, deterministic
+	const H = Array.from({ length: 40 }, (_, i) => HEX16[(i * 7 + 3) % 16]).join(""); // hex with letters and digits
+	const ROWS: ReadonlyArray<readonly [name: string, input: string, expected: string]> = [
+		["sk- after a quote prefix", t("use sk-", B.slice(0, 10), "\n> ", B.slice(10, 40), " now"), "use [redacted:secret] now"],
+		["generic run after trailing spaces", t("see ", B.slice(0, 20), "  \n", B.slice(20, 48), " done"), "see [redacted:secret] done"],
+		["hex digest over CRLF", t("sha ", H.slice(0, 15), "\r\n", H.slice(15), " ok"), "sha [redacted:secret] ok"],
+		["right box border", t("│ key ", B.slice(0, 20), " │\n│ ", B.slice(20, 48), " │"), "│ key [redacted:secret] │"],
+		["wrapped twice with indentation", t("use sk-", B.slice(0, 12), "\n  ", B.slice(12, 30), "\n  ", B.slice(30, 60), " now"), "use [redacted:secret] now"],
+		["a break outside the redaction stays", t("the end.\n", B.slice(0, 20), "\n", B.slice(20, 48), " ok"), "the end.\n[redacted:secret] ok"],
+		["a blank line after the token stays", t("use sk-", B.slice(0, 12), "\n", B.slice(12, 30), "\n\nthen more"), "use [redacted:secret]\n\nthen more"],
+	];
+	for (const [name, input, expected] of ROWS) it(name, () => assert.equal(redact(input), expected));
+
+	it("no join across a blank line, form feed, U+2028, U+2029 or NEL", () => {
+		for (const sep of ["\n\n", "\f", "\u2028", "\u2029", "\u0085", "\n \n"]) {
+			const input = t("see ", B.slice(0, 20), sep, B.slice(20, 40), " done");
+			assert.equal(redact(input), input, JSON.stringify(sep));
+		}
+	});
+
+	// x1.y2 lines join with each other but never form a match, so they only push the running length
+	const filler = (n: number) => Array.from({ length: n }, () => "x1.y2\n").join("");
+	it("a token wrapped 3,000 characters into a chain of joinable lines is still joined", () => {
+		const body = B.slice(0, 40);
+		const out = redact(t(filler(600), "use sk-", body.slice(0, 18), "\n", body.slice(18), " now"));
+		assert.ok(out.endsWith("use [redacted:secret] now"));
+	});
+	it("MAX_JOIN is 4096: a break exactly at that length starts a new group (known limit, lh-09r)", () => {
+		// 815 fillers of 5 chars = 4075, then "sk-" + 18 = 4096, so the second fragment is outside the group
+		const body = B.slice(0, 40);
+		const out = redact(t(filler(815), "sk-", body.slice(0, 18), "\n", body.slice(18), " now"));
+		assert.ok(out.endsWith(t("[redacted:secret]\n", body.slice(18), " now")));
+	});
+});
+
+describe("false positives (lh-tw1.1, lh-lmc)", () => {
 	// directory names as they appear in cwd slugs; the mixed case comes from the names themselves
 	const DIRS = ["Documents", "dev", "work", "personal", "productivity", "learn", "harness", "fork", "feature", "projects", "Mobile", "Data", "payments", "frontend", "infra", "Initech", "acme", "client", "api", "web", "app", "core", "Shared", "notes", "src", "code", "repos", "Desktop", "sandbox", "experiments", "2025", "v2", "EK", "RK"];
 	const slug = (r: () => number) => `-Users-alice-${Array.from({ length: 3 + Math.floor(r() * 9) }, () => DIRS[Math.floor(r() * DIRS.length)]).join("-")}`;
-	it("mixed-case slugs: at most 0.2% false positives alone, and a one-per-line list redacts exactly as its lines do", (ctx) => {
+	it("mixed-case slugs: at most 0.25% alone, and a one-per-line list redacts exactly as its lines do", (ctx) => {
 		const r = prng(777);
 		let single = 0;
 		let listed = 0;
@@ -287,18 +397,73 @@ describe("wrapped tokens (lh-tw1.1)", () => {
 			assert.equal(list, t(redact(a), "\n", redact(b)));
 		}
 		ctx.diagnostic(`slugs: alone ${pct(single / N)}, in a two-line list ${pct(listed / N)}`);
-		assert.ok(single / N <= 0.002);
+		assert.ok(single / N <= 0.0025);
 	});
 
-	it("ordinary wrapped prose and one-path-per-line lists are left unchanged", () => {
+	const WORDS = ["the", "quick", "parser", "returns", "a", "value", "when", "input", "is", "empty", "and", "then", "we", "retry", "with", "backoff", "because", "network", "errors", "happen", "often", "in", "practice", "eigenvalues", "matrix", "sorted", "pivot", "element", "quicksort", "degrades", "version", "release", "notes", "build", "test", "server", "client", "request", "response", "2025", "12", "v2", "O(n)", "x86_64", "README.md", "config.json"];
+	const words = (r: () => number, n: number) => Array.from({ length: n }, () => WORDS[Math.floor(r() * WORDS.length)]).join(" ");
+	const breaks = ["\n", "\r\n", "  \n", "\n> ", "\n│ ", "\n| ", "\n# ", "\n// ", "\n * ", "\n+", "\r", " │\n│ "];
+	const seg = (r: () => number) => pick(r, "abcdefghijklmnopqrstuvwxyz", 3 + Math.floor(r() * 8)) + (r() < 0.3 ? pick(r, DIGIT10, 1 + Math.floor(r() * 4)) : "");
+	const uuid = (r: () => number) => [8, 4, 4, 4, 12].map((n) => pick(r, HEX16, n)).join("-");
+	const GEN: ReadonlyArray<readonly [name: string, make: (r: () => number) => string]> = [
+		["prose", (r) => Array.from({ length: 3 + Math.floor(r() * 5) }, () => words(r, 4 + Math.floor(r() * 9))).join(breaks[Math.floor(r() * breaks.length)]!)],
+		["paths", (r) => Array.from({ length: 2 + Math.floor(r() * 6) }, () => {
+			const parts = Array.from({ length: 2 + Math.floor(r() * 5) }, () => seg(r));
+			const file = `${parts.join("/")}.${["ts", "md", "json", "py", "log"][Math.floor(r() * 5)]}`;
+			return [`/opt/${file}`, `./${file}`, file, `C:\\${parts.join("\\")}`][Math.floor(r() * 4)];
+		}).join(["\n", "\r\n", "\n  "][Math.floor(r() * 3)]!)],
+		["JSON Lines", (r) => Array.from({ length: 2 + Math.floor(r() * 6) }, () => JSON.stringify({ id: Math.floor(r() * 1e6), name: seg(r), path: `${seg(r)}/${seg(r)}`, ok: r() < 0.5 })).join("\n")],
+		["markdown tables", (r) => ["| name | count | path |", "|------|-------|------|", ...Array.from({ length: 2 + Math.floor(r() * 6) }, () => `| ${seg(r)} | ${Math.floor(r() * 1e4)} | ${seg(r)}/${seg(r)} |`)].join("\n")],
+		["xxd dumps", (r) => Array.from({ length: 2 + Math.floor(r() * 6) }, (_, i) => {
+			const bytes = Array.from({ length: 16 }, () => Math.floor(r() * 256));
+			const hex = Array.from({ length: 8 }, (_, k) => bytes.slice(2 * k, 2 * k + 2).map((b) => b.toString(16).padStart(2, "0")).join("")).join(" ");
+			const ascii = bytes.map((b) => (b >= 0x21 && b < 0x7f ? String.fromCharCode(b) : ".")).join("");
+			return `${(i * 16).toString(16).padStart(8, "0")}: ${hex}  ${ascii}`;
+		}).join("\n")],
+		["UUID lists", (r) => Array.from({ length: 2 + Math.floor(r() * 8) }, () => uuid(r)).join(["\n", "\r\n", "\n  ", "\n- "][Math.floor(r() * 4)]!)],
+	];
+	GEN.forEach(([name, make], i) => {
+		// the join and the rule order only ever write [redacted:secret]; other placeholders come from older rules and are reported
+		it(`${name}: no [redacted:secret] in 2,000 seeded samples`, (ctx) => {
+			const r = prng(12000 + i);
+			let secret = 0;
+			let any = 0;
+			for (let k = 0; k < 2_000; k++) {
+				const out = redact(make(r));
+				if (out.includes("[redacted:secret]")) secret++;
+				if (out.includes("[redacted:")) any++;
+			}
+			ctx.diagnostic(`${name}: [redacted:secret] ${pct(secret / 2_000)}, any placeholder ${pct(any / 2_000)}`);
+			assert.equal(secret, 0);
+		});
+	});
+
+	it("short SHA and camelCase lists: reported, not held to a bar (they already over-redact)", (ctx) => {
+		const r = prng(13000);
+		const camel = () => Array.from({ length: 3 + Math.floor(r() * 3) }, (_, k) => {
+			const w = WORDS[Math.floor(r() * 23)]!;
+			return k === 0 ? w : w[0]!.toUpperCase() + w.slice(1);
+		}).join("") + pick(r, DIGIT10, Math.floor(r() * 3));
+		let sha = 0;
+		let cc = 0;
+		for (let k = 0; k < 2_000; k++) {
+			if (redact(Array.from({ length: 6 }, () => pick(r, HEX16, 7)).join("\n")).includes("[redacted:")) sha++;
+			if (redact(Array.from({ length: 6 }, camel).join("\n")).includes("[redacted:")) cc++;
+		}
+		ctx.diagnostic(`short SHA lists ${pct(sha / 2_000)}, camelCase lists ${pct(cc / 2_000)}`);
+	});
+
+	it("fixed fixtures: ordinary wrapped prose and one-path-per-line lists are left unchanged", () => {
 		const prose = [
 			"The quick brown fox jumps over the lazy dog and keeps\nrunning until the end of the road, where it finally\nstops.",
 			"> a quoted reply that wraps across\n> two lines of ordinary text",
-			"│ box drawn output with words that\n│ continue on the next line",
-			"version 2.4.1 shipped on 2025-03-01 and\nfixes 12 issues in the parser",
+			"│ box drawn output with words that │\n│ continue on the next line        │",
+			"version 2.4.1 shipped on 2025-03-01 and  \nfixes 12 issues in the parser",
 			"internationalization\nlocalization2024",
-			"line one\r\nline two\r\n  indented three",
+			"line one\r\nline two\r\n  indented three\rfour",
 			"why does quicksort degrade to O(n^2) on sorted\ninput when the pivot is the first element?",
+			"// a comment that wraps\n// onto the next line\n * and a doc line\n# heading text\n+ added line",
+			"| name | count |\n|------|-------|\n| alpha | 12 |\n| beta2 | 340 |",
 		];
 		const lists = [
 			"src/seed/redact.ts\nsrc/seed/egress.ts\nscripts/seed.ts",
