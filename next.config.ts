@@ -57,6 +57,10 @@ const nextConfig: NextConfig = {
 			"github-copilot-credentials.json*",
 			"xai-credentials.json*",
 			".env*",
+			// DoltLite (D3): the driver is now traced, which drags in every platform's
+			// prebuild and the CLI. Excludes apply during traversal, includes after,
+			// so the one-addon include below still ships this platform's .node.
+			"**/@dolthub/doltlite/prebuilds/**/*",
 		],
 	},
 	// Empirically verified gaps (2026-09-17 standalone smoke): the tracer
@@ -92,8 +96,8 @@ const nextConfig: NextConfig = {
 			// per-platform-binary story as the canvas above (one per build).
 			"node_modules/@resvg/resvg-js-*/**/*",
 			// DoltLite (bead D2): index.js loads prebuilds/<platform>-<arch>/doltlite.node
-			// through a computed path the tracer cannot see, and nothing imports the
-			// driver until D3, so these includes are what put it in the payload.
+			// through a computed path the tracer cannot see, so these includes are what
+			// put it in the payload.
 			// NEVER a whole-package glob: prebuilds/ holds ~45 MB for five platforms
 			// plus a `doltlite` CLI. Per-OS builds, so exactly one addon ships;
 			// scripts/build-server.mjs refuses a CLI or another platform's prebuild.

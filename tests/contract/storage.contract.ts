@@ -29,6 +29,12 @@ const KNOWN_GAPS: Record<string, Record<string, string>> = {
 	"sqlite-app": {
 		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
 	},
+	doltlite: {
+		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+	},
+	"doltlite-app": {
+		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+	},
 };
 
 
@@ -79,8 +85,9 @@ export function registerContract(f: AdapterFactory): void {
 	const P = <T>(id: string, title: string, arb: fc.Arbitrary<T>, fn: (b: StoreBundle, v: T) => void | Promise<void>, opts: { skip?: string; todo?: string } = {}) => {
 		const name = `${id} ${title}`;
 		const bead = opts.todo ?? gaps[id];
-		const o = { timeout: A.PROPERTY_TIMEOUT_MS, ...(opts.skip ? { skip: opts.skip } : bead ? { todo: bead } : {}) };
-		it(name, o, () => fc.assert(fc.asyncProperty(arb, async (v) => { const b = await fresh(); try { await fn(b, v); } finally { b.dispose(); } }), A.cfg));
+		const limit = f.propertyTimeoutMs ?? A.PROPERTY_TIMEOUT_MS; // shortcut: one limit per adapter, not per test; split it if a second slow test appears
+		const o = { timeout: limit, ...(opts.skip ? { skip: opts.skip } : bead ? { todo: bead } : {}) };
+		it(name, o, () => fc.assert(fc.asyncProperty(arb, async (v) => { const b = await fresh(); try { await fn(b, v); } finally { b.dispose(); } }), { ...A.cfg, interruptAfterTimeLimit: limit - 20_000 }));
 	};
 	const T = (id: string, title: string, fn: (b: StoreBundle) => void) => P(id, title, fc.constant(0), (b) => fn(b));
 
@@ -270,7 +277,40 @@ export function registerContract(f: AdapterFactory): void {
 			// no fault: the merge must commit. shortcut: no comparison with a plain run, because mergeFindings itself is not deterministic across runs (minted ids change which chain simplify keeps; lh-okr).
 			assert.ok(!threw, "transact threw without a fault");
 		});
-		P("D4", "one durable commit per transact (engine fact for versioned back-ends)", fc.constant(0), () => { throw new Error("pending: dolt_log commit count"); }, { todo: "lh-btn" });
+		// D4: expected commits come from the operation spec, never from the store.
+		type D4Op =
+			| { k: "tx"; label: string; n: number }
+			| { k: "noop"; label: string }
+			| { k: "nested"; outer: string; inner: string }
+			| { k: "throw"; label: string }
+			| { k: "bare"; m: "appendNode" | "upsertSource" };
+		const d4Label = fc.stringMatching(/^[a-z][a-z0-9 :_-]{0,15}$/);
+		const d4Op: fc.Arbitrary<D4Op> = fc.oneof(
+			fc.record({ k: fc.constant("tx" as const), label: d4Label, n: fc.integer({ min: 1, max: 3 }) }),
+			fc.record({ k: fc.constant("noop" as const), label: d4Label }),
+			fc.record({ k: fc.constant("nested" as const), outer: d4Label, inner: d4Label }),
+			fc.record({ k: fc.constant("throw" as const), label: d4Label }),
+			fc.record({ k: fc.constant("bare" as const), m: fc.constantFrom("appendNode" as const, "upsertSource" as const) }),
+		);
+		P("D4", "one durable commit per transact: the label is the message, nested counts once under the OUTER label, a no-op or a throw adds none, a bare write is auto:<method>", fc.array(d4Op, { minLength: 1, maxLength: 12 }), (b, ops) => {
+			const messages = b.hooks.commitMessages!.bind(b.hooks); // present whenever capabilities.commits (checked against the bundle above)
+			let id = 0;
+			const node = () => ({ id: `d4n${id++}`, name: "n", statement: "s", aliases: [], createdAt: "t", provenance: [] }) as GraphNode;
+			b.graph.appendNode(node()); // the store exists from here (the first write also creates and migrates it)
+			for (const op of ops) {
+				const before = messages();
+				let expected: string[];
+				if (op.k === "tx") { b.graph.transact(op.label, () => { for (let i = 0; i < op.n; i++) b.graph.appendNode(node()); }); expected = [op.label]; }
+				else if (op.k === "noop") { b.graph.transact(op.label, () => { b.graph.readNodes(); }); expected = []; }
+				else if (op.k === "nested") { b.graph.transact(op.outer, () => { b.graph.appendNode(node()); b.graph.transact(op.inner, () => { b.graph.appendNode(node()); }); }); expected = [op.outer]; }
+				else if (op.k === "throw") { assert.throws(() => b.graph.transact(op.label, () => { b.graph.appendNode(node()); throw new Error("boom"); }), /boom/); expected = []; }
+				else if (op.m === "appendNode") { b.graph.appendNode(node()); expected = ["auto:appendNode"]; }
+				else { b.graph.upsertSource({ id: `d4s${id++}`, filePath: "/x", importedAt: "t" }); expected = ["auto:upsertSource"]; }
+				const after = messages();
+				eq(after.slice(0, expected.length), expected);
+				eq(after.slice(expected.length), before);
+			}
+		}, f.capabilities.commits ? {} : { skip: "not a versioned back-end" });
 	});
 
 	describe(`${f.name}: E coverage ledger`, () => {
@@ -482,6 +522,7 @@ export function registerContract(f: AdapterFactory): void {
 				if (o.t === "up") { const prev = m.get(o.id); const rec: any = { id: o.id, filePath: o.path, importedAt: "t" }; if (prev?.extractions) rec.extractions = prev.extractions; m.set(o.id, rec); b.graph.upsertSource({ id: o.id, filePath: o.path, importedAt: "t" }); }
 				else if (o.t === "use") { const r = m.get(o.id); if (r && !(r.extractions ?? []).some((x: any) => x.startedAt === o.at)) r.extractions = [...(r.extractions ?? []), { startedAt: o.at }]; b.graph.appendSourceUsage(o.id, { startedAt: o.at } as never); }
 				else { const ids = new Set(o.ids); const removed = [...ids].filter((i) => m.delete(i)).length; eq(b.graph.deleteSources(ids), removed); }
+				// readSources order is unspecified (DoltLite does not return insertion order): sort both sides before comparing
 				const sort = (a: any[]) => [...a].sort((x, y) => x.id.localeCompare(y.id));
 				eq(sort(b.graph.readSources()), sort([...m.values()]));
 			}
@@ -569,6 +610,7 @@ export function registerContract(f: AdapterFactory): void {
 				assert.equal(typeof b.graph.transact, "function", "GraphStore.transact is part of the port");
 				assert.equal(revisionOf(b) !== undefined, f.capabilities.revision, "capabilities.revision");
 				assert.equal(corruptOf(b) !== undefined, f.capabilities.corruptLines, "capabilities.corruptLines");
+				assert.equal(b.hooks.commitMessages !== undefined, f.capabilities.commits, "capabilities.commits");
 			} finally { b.dispose(); }
 			const d = await fresh();
 			try {

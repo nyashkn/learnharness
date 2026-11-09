@@ -2,12 +2,17 @@
  * The sqlite backend for ONE data folder: `<dataDir>/graph.sqlite`, opened lazily (architecture 3, 7).
  *
  * OPEN NEVER WRITES (marker.ts header, golden fixtures), so nothing here creates the file on a read:
- *  - No `graph.sqlite` yet: reads are served by an in-memory store (`:memory:`, same driver, same rungs, same code).
+ *  - No `graph.sqlite` yet: reads are served by an in-memory store (`:memory:`, same rungs, same code). On doltlite too: an empty read gains nothing from loading the native addon.
  *  - The file exists: it is opened EAGERLY when the stores are built, so a newer store is refused at open (ADR 0009),
  *    and every later call uses the real store. An existing file below the top rung is an upgrade, which writes:
  *    `beforeWrite` (the store lock) first, and a `graph.bak-v<from>-<ts>.sqlite` copy (R5). A plain open at the top rung takes no lock.
  *  - Every outermost write calls `beforeWrite(dataDir)` first (lock, then create+migrate for a first sqlite write, then the marker).
  *    A write nested inside a transact does not: the transact itself was the write.
+ * DoltLite (`graph.doltlite`, the same shape with the differences below):
+ *  - A plain open is a READ-ONLY handle (a writable open appends bytes even with no commit). A short-lived read-only probe runs `assertStoreNotNewer`
+ *    and `needsMigration` first; an upgrade takes `beforeWrite` and opens writable. A dirty working set is not recovered at open: reads see it.
+ *  - The first outermost write promotes the handle: after `beforeWrite` returns the store lock, a read-only probe refuses a newer store, then the
+ *    handle is reopened writable with that lock and `openGraphStore` recovers the dirty set (commit `recovered at open`) before the write's own commit.
  * Handles live on globalThis, keyed by absolute file path, because Next dev loads several module instances in one process.
  */
 import fs from "node:fs";
@@ -16,8 +21,10 @@ import pkg from "../../../package.json" with { type: "json" };
 import type { Position } from "../../core/contracts.ts";
 import type { GraphStore, SourceOrganizationStore } from "../../core/ports.ts";
 import type { SqlDriver } from "./driver";
+import { openDoltlite } from "./drivers/doltlite";
 import { openNodeSqlite } from "./drivers/node-sqlite";
-import { openGraphStore, type OpenedGraph } from "./graph-store";
+import { assertStoreNotNewer, openGraphStore, type OpenedGraph } from "./graph-store";
+import type { StoreLock } from "./lock";
 import { migrate, needsMigration } from "./migrate";
 import { graphMigration, graphRungs } from "./migrations/graph/index";
 import { createSourceOrganizationStore } from "./source-organization-store";
@@ -50,11 +57,41 @@ export function ensureGraphDb(dataDir: string, migration = graphMigration): void
 	db.close();
 }
 
+/**
+ * Create `graph.doltlite` and bring it to the top rung, holding `lock` (the store file's own lock). Idempotent. A failure removes what this call created.
+ * An existing file is probed read-only first: a newer store is refused before any writable open.
+ */
+export function ensureDoltliteDb(dataDir: string, lock: StoreLock, migration = graphMigration): void { // `migration` is for tests (a failing rung); the app never passes it
+	const file = doltliteDbFile(dataDir);
+	const existed = fs.existsSync(file);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	if (existed) {
+		const probe = openDoltlite(file, { readOnly: true });
+		try {
+			assertStoreNotNewer(probe, file);
+		} finally {
+			probe.close();
+		}
+	}
+	const db = openDoltlite(file, { lock });
+	try {
+		db.recover(); // a leftover working set is committed on its own, not folded into a rung's seal
+		migrate(db, { ...migration, lhVersion: pkg.version, backupPath: backupPathIn(dataDir) });
+	} catch (error) {
+		db.close();
+		if (!existed) fs.rmSync(file, { recursive: true, force: true });
+		throw error;
+	}
+	db.close();
+}
+
 // ─── open handles: one per file per process, shared by every module instance ─────
 
 interface Handle {
 	db: SqlDriver;
 	opened: OpenedGraph;
+	/** Set = opened writable with this store lock (DoltLite only). */
+	lock?: StoreLock;
 }
 const HANDLES_KEY = "__lhSqlGraphHandles";
 function handles(): Map<string, Handle> {
@@ -64,9 +101,10 @@ function handles(): Map<string, Handle> {
 
 /** Close this process's handle on a folder's graph.sqlite (tests, scripts). A later call reopens it. */
 export function releaseGraphDb(dataDir: string): void {
-	const file = graphDbFile(dataDir);
-	handles().get(file)?.db.close();
-	handles().delete(file);
+	for (const file of [graphDbFile(dataDir), doltliteDbFile(dataDir)]) {
+		handles().get(file)?.db.close();
+		handles().delete(file);
+	}
 }
 
 export interface SqlGraphStores {
@@ -83,13 +121,57 @@ export function createSqlGraphStores(
 	dataDir: string,
 	positions: Pick<GraphStore, "readPositions" | "writePositions">,
 	emit: (event: "sources-changed", payload: Record<string, never>) => void,
-	beforeWrite: (dataDir: string) => void,
+	beforeWrite: (dataDir: string) => StoreLock | undefined | void,
+	backend: "sqlite" | "doltlite" = "sqlite",
 ): SqlGraphStores {
 	const abs = path.resolve(dataDir);
-	const file = graphDbFile(abs);
+	const dolt = backend === "doltlite";
+	const file = dolt ? doltliteDbFile(abs) : graphDbFile(abs);
 	const delegate = { read: (): Record<string, Position> => positions.readPositions(), write: (p: Record<string, Position>): void => positions.writePositions(p) };
 
+	/** A short-lived read-only handle: refuse a newer store, and say whether opening it would write (an upgrade). */
+	function probeDoltlite(): { upgrade: boolean } {
+		const probe = openDoltlite(file, { readOnly: true });
+		try {
+			assertStoreNotNewer(probe, file);
+			return { upgrade: needsMigration(probe, graphRungs) };
+		} finally {
+			probe.close();
+		}
+	}
+	function openWith(db: SqlDriver, lock?: StoreLock): OpenedGraph {
+		try {
+			const opened = openGraphStore({ db, file, lhVersion: pkg.version, positions: delegate, backupPath: backupPathIn(abs) });
+			handles().set(file, { db, opened, lock });
+			return opened;
+		} catch (error) {
+			db.close();
+			throw error;
+		}
+	}
+	function openRealDoltlite(): OpenedGraph {
+		const known = handles().get(file);
+		if (known) return known.opened;
+		if (probeDoltlite().upgrade) {
+			const lock = beforeWrite(abs) || undefined; // an upgrade writes: lock first
+			if (!lock) throw new Error(`${file} needs an upgrade but beforeWrite returned no store lock`);
+			return openWith(openDoltlite(file, { lock }), lock);
+		}
+		return openWith(openDoltlite(file, { readOnly: true })); // top rung: migrate only reads, recover() is a no-op here
+	}
+	/** First write on a read-only (or no) handle: refuse a newer store while still read-only, then reopen writable. openGraphStore recovers a dirty set. */
+	function promote(lock: StoreLock | undefined | void): void {
+		if (!lock) throw new Error(`${file}: beforeWrite returned no store lock for a doltlite write`);
+		const known = handles().get(file);
+		if (known?.lock?.held()) return;
+		probeDoltlite();
+		known?.db.close();
+		handles().delete(file);
+		openWith(openDoltlite(file, { lock }), lock);
+	}
+
 	function openReal(): OpenedGraph {
+		if (dolt) return openRealDoltlite();
 		const known = handles().get(file);
 		if (known) return known.opened;
 		const db = openNodeSqlite(file);
@@ -118,7 +200,10 @@ export function createSqlGraphStores(
 	// A write nested inside an outer one (a transact body) is not a new write: the outer call already took beforeWrite.
 	let depth = 0;
 	function write<T>(fn: (o: OpenedGraph) => T): T {
-		if (depth === 0) beforeWrite(abs);
+		if (depth === 0) {
+			const lock = beforeWrite(abs);
+			if (dolt) promote(lock);
+		}
 		const o = real();
 		if (!o) throw new Error(`${file} is missing after the first write took the lock: the marker names ${path.basename(file)} but it was not created`);
 		depth++;

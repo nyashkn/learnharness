@@ -15,16 +15,17 @@
  *    lock of the store file (`graph.doltlite.lock`), because the driver only lets a
  *    lock of its own file recover. Marker lock first, store lock second, released in reverse.
  *
- * This build wires the file and sqlite backends. `adapterFor` is the ONE place a
- * doltlite adapter is added (D3). A first write that picks sqlite takes the lock, creates and
- * migrates `graph.sqlite`, and only then writes the marker, so the marker never names a missing store.
+ * This build wires file, sqlite and doltlite. `adapterFor` is the ONE place an adapter is registered;
+ * doltlite ships on macOS arm64 only (Windows and Linux wait for D5) and is refused elsewhere with NoAdapterError.
+ * A first write that picks sqlite or doltlite takes the locks, creates and migrates the store
+ * (`graph.sqlite`, `graph.doltlite`), and only then writes the marker, so the marker never names a missing store.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { acquireStoreLock, type LockEnv, type StoreLock } from "./sql/lock.ts";
 import { writeFileAtomicSync } from "./atomic-write.ts";
 import { assertGraphFormat, StorageVersionError } from "./graph-format.ts";
-import { doltliteDbFile, ensureGraphDb, graphDbFile } from "./sql/open.ts";
+import { doltliteDbFile, ensureDoltliteDb, ensureGraphDb, graphDbFile } from "./sql/open.ts";
 
 export const CURRENT_LAYOUT = 1;
 export const BACKENDS = ["file", "sqlite", "doltlite"] as const;
@@ -53,9 +54,10 @@ const isBackend = (v: unknown): v is Backend => typeof v === "string" && (BACKEN
 /** The backends this build can run. */
 export type RunnableBackend = "file" | "sqlite" | "doltlite";
 
-/** The one place adapters are registered. `file` and `sqlite` exist in this build; doltlite is refused until D3. */
-function adapterFor(backend: Backend, file: string): RunnableBackend {
+/** The one place adapters are registered. doltlite only on macOS arm64 (a prebuild per platform arrives with D5). `host` is for tests. */
+export function adapterFor(backend: Backend, file: string, host: { platform: string; arch: string } = { platform: process.platform, arch: process.arch }): RunnableBackend {
 	if (backend === "file" || backend === "sqlite") return backend;
+	if (host.platform === "darwin" && host.arch === "arm64") return backend;
 	throw new NoAdapterError(backend, file);
 }
 
@@ -107,10 +109,11 @@ export function resolveBackend(dataDir: string, env: Record<string, string | und
 /** The graph-family format stamp lives beside the graph ledgers. */
 export const graphFormatFileIn = (dataDir: string): string => path.join(dataDir, "graph", "format.json");
 
-/** Agreement (architecture 3): a marker that names sqlite needs the store it names. Without a marker, LH_STORAGE=sqlite is only an intent: the store is made on the first write. */
+/** Agreement (architecture 3): a marker that names sqlite or doltlite needs the store it names. Without a marker, LH_STORAGE is only an intent: the store is made on the first write. */
 function assertAgreement(file: string, marker: { backend: Backend } | undefined, dataDir: string): void {
-	if (marker?.backend === "sqlite" && !fs.existsSync(graphDbFile(dataDir))) {
-		throw new StorageMarkerError(file, `the marker names sqlite but ${graphDbFile(dataDir)} is missing; restore it, or remove ${MARKER_NAME} only if you mean to start a new folder`);
+	const store = marker?.backend === "sqlite" ? graphDbFile(dataDir) : marker?.backend === "doltlite" ? doltliteDbFile(dataDir) : undefined;
+	if (marker && store && !fs.existsSync(store)) {
+		throw new StorageMarkerError(file, `the marker names ${marker.backend} but ${store} is missing; restore it, or remove ${MARKER_NAME} only if you mean to start a new folder`);
 	}
 }
 
@@ -242,6 +245,7 @@ export function beforeWrite(dataDir: string, lockEnv?: LockEnv): StoreLock | und
 	assertMarkerMatches(file, locked, backend);
 	if (locked) return store;
 	if (backend === "sqlite") ensureGraphDb(abs); // lock, then the store, then the marker: a marker never names a store that is missing
+	if (backend === "doltlite") ensureDoltliteDb(abs, store!); // takeFolderLocks took the store lock for doltlite
 	writeFileAtomicSync(file, `${JSON.stringify({ backend, layout: CURRENT_LAYOUT }, null, "\t")}\n`, { allowInPlaceFallback: true });
 	return store;
 }

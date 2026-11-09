@@ -1,5 +1,5 @@
 /**
- * Migration runner + graph ladder (architecture 5.4 tests 1-5; test 6 parity lands with D3).
+ * Migration runner + graph ladder (architecture 5.4 tests 1-6; test 6, engine parity, runs tests 1-3 on both drivers).
  * MECE by failpoint: ladder shape, partial failure, reopen, every refusal, backup, snapshot, shapes,
  * array-vs-files, released-rung guard. Fake ladders run through fast-check; the real ladder is checked against files.
  */
@@ -13,6 +13,7 @@ import { after, before, describe, test } from "node:test";
 import fc from "fast-check";
 import { CURRENT_GRAPH_FORMAT_VERSION } from "../../src/core/contracts/graph";
 import type { SqlDriver } from "../../src/store/sql/driver";
+import { openDoltlite } from "../../src/store/sql/drivers/doltlite";
 import { openNodeSqlite } from "../../src/store/sql/drivers/node-sqlite";
 import { MigrationRefusedError, type MigrateOptions, migrate, schemaDump, schemaHash } from "../../src/store/sql/migrate";
 import { graphMigration, graphRungs } from "../../src/store/sql/migrations/graph/index";
@@ -31,6 +32,13 @@ before(() => {
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const fresh = () => path.join(dir, `m${n++}.sqlite`);
 const open = (file = ":memory:") => openNodeSqlite(file, { busyTimeoutMs: 0 });
+/** Test 6: tests 1-3 (the behaviour ones) run once per engine. DoltLite has no ":memory:", so it gets a fresh file. */
+/** FACT: after COMMIT DoltLite shows a regenerated CREATE text in sqlite_schema ("t( a INT)" for "t ( a INT )"), so schemaDump differs in spacing between engines (the schema_hash the runner stores, taken inside the rung's transaction, is the same on both). Parity compares with the spacing around parentheses removed. */
+const tight = (dump: string) => dump.replace(/\s*([()])\s*/g, "$1");
+const engines: [string, (file?: string) => SqlDriver][] = [
+	["sqlite", open],
+	["doltlite", (file = fresh()) => openDoltlite(file, { busyTimeoutMs: 0 })],
+];
 
 // ---- fake ladders ------------------------------------------------------------------------------
 
@@ -240,7 +248,7 @@ describe("model: opens with different builds, some crashing", () => {
 	});
 });
 
-describe("test 3: newer or malformed is refused before any write", () => {
+for (const [engine, open] of engines) describe(`test 3 (${engine}): newer or malformed is refused before any write`, () => {
 	/** Store at `low`, then an attempt to upgrade it to `low + 1` after `tamper`. Nothing may change and no backup may be taken. */
 	function refused(tamper: (db: SqlDriver) => void, reason: string, low = 1) {
 		const file = fresh();
@@ -441,12 +449,12 @@ describe("R5: backup before upgrade", () => {
 
 const graphOpts = (count = graphRungs.length, extra: Partial<MigrateOptions> = {}): MigrateOptions => ({ ...graphMigration, rungs: graphRungs.slice(0, count), lhVersion: "test", backupPath: backupIn, ...extra });
 
-describe("test 1: fresh equals snapshot.sql", () => {
+for (const [engine, open] of engines) describe(`test 1 (${engine}): fresh equals snapshot.sql`, () => {
 	const snapshot = fs.readFileSync(path.join(GRAPH_DIR, "snapshot.sql"), "utf8");
 	test("all graph rungs on an empty DB dump to the checked-in snapshot", () => {
 		const db = open();
 		migrate(db, graphOpts());
-		assert.equal(schemaDump(db), snapshot);
+		assert.equal(tight(schemaDump(db)), tight(snapshot));
 		assert.equal(meta(db).schema_hash, sha(snapshot));
 		assert.equal(meta(db).line_format, String(CURRENT_GRAPH_FORMAT_VERSION));
 		assert.equal(meta(db).store_kind, "graph");
@@ -485,14 +493,14 @@ describe("test 2: every recorded shape migrates and keeps its rows", () => {
 			Array.from({ length: top }, (_, i) => `v${i + 1}.sql`).sort(),
 		);
 	});
-	test("each recorded shape is what the rungs up to it really produce", () => {
+	for (const [engine, open] of engines) test(`each recorded shape is what the rungs up to it really produce (${engine})`, () => {
 		for (let v = 1; v <= top; v++) {
 			const db = open();
 			migrate(db, graphOpts(v));
-			assert.equal(fs.readFileSync(path.join(GRAPH_DIR, "shapes", `v${v}.sql`), "utf8"), schemaDump(db), `v${v}.sql`);
+			assert.equal(tight(fs.readFileSync(path.join(GRAPH_DIR, "shapes", `v${v}.sql`), "utf8")), tight(schemaDump(db)), `v${v}.sql`);
 		}
 	});
-	test("graph: each shape, one row per table, migrates to the top with rows intact", () => {
+	for (const [engine, open] of engines) test(`graph: each shape, one row per table, migrates to the top with rows intact (${engine})`, () => {
 		for (let v = 1; v <= top; v++) {
 			const db = open();
 			db.exec(fs.readFileSync(path.join(GRAPH_DIR, "shapes", `v${v}.sql`), "utf8"));
@@ -504,7 +512,7 @@ describe("test 2: every recorded shape migrates and keeps its rows", () => {
 			assert.equal(meta(db).store_id, "fixed-id");
 			assert.equal(meta(db).custom, "keep");
 			assert.equal(meta(db).revision, "7");
-			assert.equal(schemaDump(db), fs.readFileSync(path.join(GRAPH_DIR, "snapshot.sql"), "utf8"));
+			assert.equal(tight(schemaDump(db)), tight(fs.readFileSync(path.join(GRAPH_DIR, "snapshot.sql"), "utf8")));
 		}
 	});
 	test("fake ladders: shape recorded at any v migrates to any higher top", () => {
@@ -678,5 +686,26 @@ describe("test 4: released rungs are unchanged", () => {
 		fs.writeFileSync(path.join(clone, LOCK), `${JSON.stringify(rungHashes(clone), null, "\t")}\n`);
 		assert.deepEqual(releasedViolations(clone), ["graph/0001_init.ts: released rung edited"]);
 		assert.ok(git(clone, "rev-parse", ORIGIN_MAIN).trim(), "ref was fetched into the clone");
+	});
+});
+
+describe("test 6: engine parity", () => {
+	test("the real ladder yields the same dump (up to spacing) and meta (but engine, version, id, hash) on sqlite and DoltLite, at every rung", () => {
+		for (let v = 1; v <= graphRungs.length; v++) {
+			const [a, b] = [open(), openDoltlite(fresh(), { busyTimeoutMs: 0 })];
+			migrate(a, graphOpts(v));
+			migrate(b, graphOpts(v));
+			assert.equal(tight(schemaDump(b)), tight(schemaDump(a)), `v${v}`);
+			const strip = (db: SqlDriver) => Object.fromEntries(Object.entries(meta(db)).filter(([k]) => !["engine", "engine_version", "store_id", "schema_hash"].includes(k)));
+			assert.deepEqual(strip(b), strip(a), `v${v}`);
+			assert.equal(meta(a).engine, "sqlite");
+			assert.equal(meta(b).engine, "doltlite");
+		}
+	});
+	test("DoltLite seals one commit per rung, labelled as the runner says", () => {
+		const db = openDoltlite(fresh(), { busyTimeoutMs: 0 });
+		migrate(db, graphOpts());
+		const log = db.all<{ message: string }>("SELECT message FROM dolt_log").map((r) => r.message);
+		for (const rung of graphRungs) assert.ok(log.includes(`migrate graph v${rung.version}: ${rung.name}`), `v${rung.version}`);
 	});
 });

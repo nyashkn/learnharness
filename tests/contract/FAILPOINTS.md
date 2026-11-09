@@ -8,7 +8,7 @@ A test id lives in `tests/contract/**` or `tests/sql/**`; an id that exists in b
 
 Scope: `all` = every adapter (file now, sqlite, doltlite via the glob); `sql` = SQL driver level, run over the real
 node:sqlite driver wrapped by `src/store/sql/drivers/faulty.ts` (test-only). Crash atomicity across files does not
-exist for the file adapter, so crash rows are SQL-only. Adapter-level SQL rows point at the real tests in `tests/sql/graph-store.test.ts` (S = seal, C = crash); the DoltLite row is `todo` until D3.
+exist for the file adapter, so crash rows are SQL-only. Adapter-level SQL rows point at the real tests in `tests/sql/graph-store.test.ts` (S = seal, C = crash); the DoltLite row is FP-DOLT-CRASH in `tests/contract/model-based.contract.ts`.
 
 | category | failpoint | scope | test id | status |
 |---|---|---|---|---|
@@ -30,4 +30,4 @@ exist for the file adapter, so crash rows are SQL-only. Adapter-level SQL rows p
 | corrupt-line | corrupt line skipped and counted | all | N2 | test |
 | rewrite-modified-copies | rewrite with modified copies of kept lines | all | MB3 | test |
 | sql-adapter-crash | crash atomicity through the sqlite GraphStore | sql | tests/sql/graph-store.test.ts#C1 | test |
-| doltlite-crash | crash atomicity through the doltlite GraphStore | sql | FP-DOLT-CRASH | todo:lh-bkg |
+| doltlite-crash | crash atomicity through the doltlite GraphStore | sql | FP-DOLT-CRASH | test |

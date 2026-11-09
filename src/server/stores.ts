@@ -25,8 +25,8 @@ import type { Stores } from "../core/ports.ts";
 // reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
 const backend = openDataFolder(PATHS.data);
 export const storageBackend: Backend = backend;
-// sqlite: the ledgers and sources live in graph.sqlite (opened here, eagerly, when it exists); the file graphStore only serves positions.
-const graph = backend === "sqlite" ? createSqlGraphStores(PATHS.data, graphStore, emit, beforeWrite) : { graphStore, sourceOrganizationStore };
+// sqlite, doltlite: the ledgers and sources live in graph.sqlite (opened here, eagerly, when the store file exists); the file graphStore only serves positions.
+const graph = backend !== "file" ? createSqlGraphStores(PATHS.data, graphStore, emit, beforeWrite, backend) : { graphStore, sourceOrganizationStore };
 purgeLegacyLedgers(PATHS.graph); // after every refusal, the sqlite one included: a refused folder keeps its legacy files
 
 /** The wired adapters, typed against the ports. Satisfies core/graph.ts's GraphDeps structurally. */
