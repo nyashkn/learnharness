@@ -34,12 +34,17 @@ const SeedConfig = Type.Object(
 		goalWeight: Type.Number(),
 		minMentions: Type.Number({ minimum: 0 }),
 		learnableTau: Type.Number({ minimum: 0, maximum: 1 }),
+		// A seeding run can name its own extractor model, so the app's settings.json is never edited for it.
+		extractor: Type.Optional(Type.Object({ provider: Type.String({ minLength: 1 }), id: Type.String({ minLength: 1 }) }, { additionalProperties: false })),
 	},
 	{ additionalProperties: false },
 );
 
+export type ModelRef = { provider: string; id: string };
+export type SeedRunConfig = SeedPolicy & { extractor?: ModelRef };
+
 /** Trust boundary (ADR 0008). No fallback numbers: a missing or malformed file aborts. */
-export function loadSeedConfig(file: string, read: (file: string) => string = (f) => readFileSync(f, "utf8")): SeedPolicy {
+export function loadSeedConfig(file: string, read: (file: string) => string = (f) => readFileSync(f, "utf8")): SeedRunConfig {
 	let json: unknown;
 	try {
 		json = JSON.parse(read(file));
@@ -88,7 +93,8 @@ export interface Factories {
 	openStore: (file: string) => SqlDriver;
 	configFile: string;
 	buildSources: (opts: { minMentions: number; out: (line: string) => void }) => { sources: SessionSource[]; close: () => void };
-	buildLlm: () => Promise<LlmPort>;
+	/** `extractor` from seed-config.json; absent means the app's extractor role from settings. */
+	buildLlm: (extractor: ModelRef | undefined) => Promise<LlmPort>;
 	readOptOut: (file: string) => Promise<string[]>;
 	env: (name: string) => string | undefined;
 	fetch: typeof fetch;
@@ -130,7 +136,7 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 		return 2;
 	}
 
-	let policy: SeedPolicy;
+	let policy: SeedRunConfig;
 	try {
 		policy = loadSeedConfig(f.configFile);
 	} catch (error) {
@@ -149,6 +155,9 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 		// data/ is per-worktree, so a list kept elsewhere reads as "allow all": say which file was used before anything leaves.
 		const file = path.resolve(f.dataDir, "seed-optout.txt");
 		f.out(optOut.length === 0 && !existsSync(file) ? `opt-out: 0 entries, file not found at ${file}` : `opt-out: ${optOut.length} entries from ${file}`);
+	}
+	if (parsed.kind === "scan") {
+		f.out(policy.extractor ? `extractor: ${policy.extractor.provider}/${policy.extractor.id} from seed-config.json` : "extractor: the app's extractor role from settings");
 	}
 	const allowEgress = composeAllowEgress(optOut);
 
@@ -170,7 +179,7 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 		let llmPromise: Promise<LlmPort> | undefined;
 		const llm: LlmPort = {
 			complete: async (prompt, schema) => {
-				llmPromise ??= f.buildLlm();
+				llmPromise ??= f.buildLlm(policy.extractor);
 				try {
 					return await (await llmPromise).complete(prompt, schema);
 				} catch (error) {
@@ -280,14 +289,12 @@ function realSources({ minMentions, out }: { minMentions: number; out: (line: st
 	return { sources, close: () => closers.forEach((close) => close()) };
 }
 
-/** Existing structured-output path: the app's own submit-agent (one TypeBox tool call), on the extractor role's configured model. */
-async function realLlm(): Promise<LlmPort> {
-	const { stores } = await import("../src/server/stores.ts");
-	const { resolveRoleSpec } = await import("../src/core/settings-resolution.ts");
+/** Existing structured-output path: the app's own submit-agent (one TypeBox tool call), on seed-config.json's extractor or else the extractor role's configured model. */
+async function realLlm(extractor: ModelRef | undefined): Promise<LlmPort> {
 	const { piEngineForSpec } = await import("../src/agent/models.ts");
 	const { runSubmitAgent } = await import("../src/agent/subagents/submit-agent.ts");
-	const spec = resolveRoleSpec("extractor", stores.settingsStore.readSettings());
-	if (!spec) throw new LlmUnavailableError("no model is configured for the extractor role: set a model slot in Settings, then rerun");
+	const spec = extractor ?? (await settingsExtractor());
+	if (!spec) throw new LlmUnavailableError("no model is configured for the extractor role: set a model slot in Settings or an extractor in scripts/seed-config.json, then rerun");
 	const engine = piEngineForSpec(spec);
 	return {
 		complete: <S extends TSchema>(prompt: string, schema: S) =>
@@ -305,6 +312,12 @@ async function realLlm(): Promise<LlmPort> {
 				neverSubmitted: "the model never submitted an answer",
 			}),
 	};
+}
+
+async function settingsExtractor() {
+	const { stores } = await import("../src/server/stores.ts");
+	const { resolveRoleSpec } = await import("../src/core/settings-resolution.ts");
+	return resolveRoleSpec("extractor", stores.settingsStore.readSettings());
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import fc from "fast-check";
-import { calibration, breakCycles, runCli, topoOrder, type CliDeps, type Edge, type LabelledRow } from "../../src/seed/cli";
+import { calibration, breakCycles, parseCommand, runCli, topoOrder, type CliDeps, type Edge, type LabelledRow } from "../../src/seed/cli";
+import { piModels } from "../../src/agent/models";
 import { createJevApiJudge } from "../../src/seed/judge/jev-api";
 import { createSeedStore, type Verdict } from "../../src/seed/store";
 import type { HarvestItem, LlmPort, RawItem, SessionSource } from "../../src/seed/types";
@@ -810,6 +811,95 @@ describe("scripts/seed main", () => {
 	it("scripts/seed.ts hard-codes no token", () => {
 		const text = readFileSync(new URL("../../scripts/seed.ts", import.meta.url), "utf8");
 		assert.equal(/sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{10,}|Bearer\s+[A-Za-z0-9]{8,}|(?:TOKEN|API_KEY|SECRET)\w*\s*[:=]\s*["'][^"']{6,}["']/.test(text), false);
+	});
+});
+
+describe("scan --since (lh-tw1.2)", () => {
+	const OLD = "2026-08-01T00:00:00.000Z";
+	const old = raw("old1", "why does ZQXOLDMARK alpha fail", { at: OLD });
+	const badTime = raw("bad1", "why does ZQXBADTIME alpha fail", { at: "not a time" });
+	const reached = (r: ReturnType<typeof rig>, marker: string) => r.wire.some((w) => w.includes(marker)) || r.prompts.some((p) => p.includes(marker));
+
+	it("parses a UTC calendar date with or without --goals, in either order", () => {
+		assert.deepEqual(parseCommand(["scan", "--since", "2026-09-10"]), { kind: "scan", goals: null, since: "2026-09-10T00:00:00.000Z" });
+		assert.deepEqual(parseCommand(["scan", "--goals", "learn rust", "--since", "2026-09-10"]), { kind: "scan", goals: "learn rust", since: "2026-09-10T00:00:00.000Z" });
+		assert.deepEqual(parseCommand(["scan", "--since", "2026-09-10", "--goals", "learn rust"]), { kind: "scan", goals: "learn rust", since: "2026-09-10T00:00:00.000Z" });
+		assert.deepEqual(parseCommand(["scan"]), { kind: "scan", goals: null, since: null });
+	});
+	it("refuses a date that is not a real YYYY-MM-DD, a missing value and a repeated flag", () => {
+		for (const argv of [["--since", "2026-02-30"], ["--since", "60"], ["--since", "2026-9-1"], ["--since"], ["--since", "2026-09-10", "--since", "2026-09-11"], ["--goals", "  "]]) {
+			assert.equal(parseCommand(["scan", ...argv]).kind, "error", argv.join(" "));
+		}
+	});
+	it("an older item and one with an unreadable time are neither stored nor sent; newer items still go out", async () => {
+		const r = rig({ items: [old, badTime, ...ALPHA] });
+		assert.equal(await r.run("scan", "--since", "2026-10-01"), 0);
+		for (const marker of ["ZQXOLDMARK", "ZQXBADTIME"]) {
+			assert.equal(reached(r, marker), false, marker);
+			assert.equal(dump(r.db).includes(marker), false, marker);
+		}
+		assert.ok(r.wire.some((w) => w.includes("alpha borrowing")), "items inside the limit still reach the judge");
+		assert.ok(r.lines.includes("since 2026-10-01: 2 older items not read in"));
+	});
+	it("an older item stored by an earlier run without a limit is not used by a run with one", async () => {
+		const r = rig({ items: [old, ...ALPHA] });
+		await r.run("scan");
+		assert.equal(reached(r, "ZQXOLDMARK"), true, "no limit behaves as before: the older item goes out");
+		r.wire.length = 0;
+		r.prompts.length = 0;
+		r.db.exec("DELETE FROM judgment_cache"); // a cache hit would hide what the second run sends
+		await r.run("scan", "--since", "2026-10-01");
+		assert.equal(reached(r, "ZQXOLDMARK"), false);
+		assert.ok(r.wire.some((w) => w.includes("alpha borrowing")));
+	});
+});
+
+describe("seeding extractor (lh-tw1.2)", () => {
+	const CONFIG = new URL("../../scripts/seed-config.json", import.meta.url).pathname;
+	it("seed-config.json names DeepSeek on Workers AI, and the app's catalog has that model", () => {
+		const { extractor } = loadSeedConfig(CONFIG);
+		assert.deepEqual(extractor, { provider: "cloudflare-workers-ai", id: "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
+		assert.ok(piModels().getModel(extractor.provider, extractor.id), "model missing from the pi-ai catalog");
+	});
+	it("a malformed extractor refuses", () => {
+		const base = { calibrated: false, recencyHalfLifeDays: 60, goalWeight: 1, minMentions: 50, learnableTau: 0.5 };
+		for (const extractor of [{ provider: "x", id: "" }, { id: "m" }, { provider: "x", id: "m", extra: 1 }, "x/m"]) {
+			assert.throws(() => loadSeedConfig("/c.json", () => JSON.stringify({ ...base, extractor })), /invalid/, JSON.stringify(extractor));
+		}
+	});
+	async function scanWith(config: Record<string, unknown>) {
+		const dir = mkdtempSync(join(tmpdir(), "seed-extractor-"));
+		try {
+			writeFileSync(join(dir, "seed-config.json"), JSON.stringify(config));
+			const lines: string[] = [];
+			const got: unknown[] = [];
+			const src: SessionSource = { name: "fake", stats: { skipped: 0 }, async *items() { yield raw("a1", "why does alpha borrowing fail"); } };
+			await main(["scan", "--judge", "configured-llm"], {
+				dataDir: dir,
+				configFile: join(dir, "seed-config.json"),
+				lhVersion: () => "t",
+				openStore: () => openNodeSqlite(":memory:"),
+				buildSources: () => ({ sources: [src], close() {} }),
+				buildLlm: async (extractor) => (got.push(extractor), { complete: async () => Promise.reject(new Error("no model")) }),
+				env: () => undefined,
+				fetch: (async () => Promise.reject(new Error("no network"))) as unknown as typeof fetch,
+				out: (l) => lines.push(l),
+			}).catch(() => -1);
+			return { lines, got };
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
+	const base = { calibrated: true, recencyHalfLifeDays: 60, goalWeight: 1, minMentions: 50, learnableTau: 0.5 };
+	it("the configured extractor reaches the LLM factory and is named before anything leaves", async () => {
+		const { lines, got } = await scanWith({ ...base, extractor: { provider: "cloudflare-workers-ai", id: "m-1" } });
+		assert.deepEqual(got, [{ provider: "cloudflare-workers-ai", id: "m-1" }]);
+		assert.ok(lines.includes("extractor: cloudflare-workers-ai/m-1 from seed-config.json"));
+	});
+	it("without one, the factory gets nothing and falls back to the app's extractor role", async () => {
+		const { lines, got } = await scanWith(base);
+		assert.deepEqual(got, [undefined]);
+		assert.ok(lines.includes("extractor: the app's extractor role from settings"));
 	});
 });
 
