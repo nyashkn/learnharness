@@ -279,8 +279,15 @@ describe("8 and 10: generated adapter and contract typecheck", { timeout: 300_00
 	let contractFile: string;
 
 	before(() => {
-		dir = fixture(["src", "tests/contract", "config.ts"]);
+		dir = fixture(["src", "tests/contract"]);
 		fs.symlinkSync(path.join(REPO, "node_modules"), path.join(dir, "node_modules"), "dir");
+		// Every tracked root entry, so an import out of src resolves as the tree grows. Files are copied to keep their relative imports in this tree.
+		for (const e of git(REPO, "ls-tree", "--name-only", "HEAD").trim().split("\n")) {
+			const [from, to] = [path.join(REPO, e), path.join(dir, e)];
+			if (fs.existsSync(to)) continue;
+			if (fs.statSync(from).isDirectory()) fs.symlinkSync(from, to, "dir");
+			else fs.cpSync(from, to);
+		}
 		const r1 = cli(dir, "adapter", "acme", "AuthStore");
 		assert.equal(r1.code, 0, r1.err);
 		assert.equal(cli(dir, "contract", "acme").code, 0);
