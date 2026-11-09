@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PATHS } from "../config.ts";
-import { markerFile, readMarker } from "../src/store/marker.ts";
+import { BACKENDS, markerFile, readMarker, type Backend } from "../src/store/marker.ts";
+import { exportStore, MIGRATE_TEXT, migrateBackend } from "../src/store/migrate-backend.ts";
 import { assertStoreNotNewer } from "../src/store/sql/graph-store.ts";
 import { openDoltlite } from "../src/store/sql/drivers/doltlite.ts";
 import { acquireStoreLock, StoreLockedError, type StoreLock } from "../src/store/sql/lock.ts";
@@ -73,6 +74,51 @@ function purge(args: string[], io: Io): number {
 	}
 }
 
+function migrate(args: string[], io: Io): number {
+	let dataDir: string = PATHS.data;
+	let to: string | undefined;
+	let allowEmptySource = false;
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
+		if (a === "--to" && args[i + 1] !== undefined) to = args[++i];
+		else if (a === "--allow-empty-source") allowEmptySource = true;
+		else if (a === "--data-dir" && args[i + 1] !== undefined) dataDir = path.resolve(args[++i] as string);
+		else {
+			io.err(MIGRATE_TEXT.usage);
+			return 1;
+		}
+	}
+	if (to === undefined || !(BACKENDS as readonly string[]).includes(to)) {
+		io.err(MIGRATE_TEXT.usage);
+		return 1;
+	}
+	const r = migrateBackend(dataDir, to as Backend, { allowEmptySource });
+	io.out(MIGRATE_TEXT.migrated(r.from, r.to, r.resumed));
+	io.out(MIGRATE_TEXT.counts(r.counts));
+	io.out(MIGRATE_TEXT.dropped(r.dropped));
+	io.out(MIGRATE_TEXT.backup(r.backupDir));
+	return 0;
+}
+
+function exportCmd(args: string[], io: Io): number {
+	let dataDir: string = PATHS.data;
+	let out: string | undefined;
+	for (let i = 0; i < args.length; i++) {
+		const a = args[i];
+		if (a === "--out" && args[i + 1] !== undefined) out = path.resolve(args[++i] as string);
+		else if (a === "--data-dir" && args[i + 1] !== undefined) dataDir = path.resolve(args[++i] as string);
+		else {
+			io.err(MIGRATE_TEXT.exportUsage);
+			return 1;
+		}
+	}
+	const r = exportStore(dataDir, out);
+	io.out(MIGRATE_TEXT.exported(r.out));
+	io.out(MIGRATE_TEXT.counts(r.counts));
+	io.out(MIGRATE_TEXT.dropped(r.dropped));
+	return 0;
+}
+
 export function runCli(argv: string[], io: Io): number {
 	const args = argv[0] === "--" ? argv.slice(1) : argv; // pnpm forwards a leading --
 	const [command, ...rest] = args;
@@ -84,8 +130,19 @@ export function runCli(argv: string[], io: Io): number {
 			return 1;
 		}
 	}
-	io.err(command === undefined ? PURGE_TEXT.usage : PURGE_TEXT.unknownCommand(command));
-	if (command !== undefined) io.err(PURGE_TEXT.usage);
+	for (const [name, run] of [["migrate", migrate], ["export", exportCmd]] as const) {
+		if (command !== name) continue;
+		try {
+			return run(rest, io);
+		} catch (error) {
+			io.err(`lh ${name}: ${(error as Error).message}`);
+			return 1;
+		}
+	}
+	if (command !== undefined) io.err(PURGE_TEXT.unknownCommand(command));
+	io.err(PURGE_TEXT.usage);
+	io.err(MIGRATE_TEXT.usage);
+	io.err(MIGRATE_TEXT.exportUsage);
 	return 1;
 }
 
