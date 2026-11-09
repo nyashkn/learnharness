@@ -7,7 +7,7 @@
  */
 
 import { chatStore } from "../store/chats.ts";
-import { graphStore } from "../store/graph.ts";
+import { graphStore, purgeLegacyLedgers } from "../store/graph.ts";
 import { sourceOrganizationStore } from "../store/source-organization.ts";
 import { jobStore } from "../store/jobs.ts";
 import { settingsStore } from "../store/settings.ts";
@@ -15,9 +15,17 @@ import { authStore } from "../store/auth.ts";
 import { promptOverrides } from "../store/prompt-overrides.ts";
 import { renderSettingsStore } from "../store/render-settings.ts";
 import { resolveSettings, type EffectiveSettings } from "../core/settings-resolution.ts";
-import { syncCustomProvider } from "./custom-provider.ts";
-/** The wired adapters. Satisfies core/graph.ts's GraphDeps structurally. */
-export const stores = {
+import { PATHS } from "../../config.ts";
+import { openDataFolder } from "../store/marker.ts";
+import type { Stores } from "../core/ports.ts";
+// OPEN: the marker and format check, once, at module load. A folder this build must not touch
+// (newer layout, corrupt marker, a backend with no adapter, a newer graph format) fails here, for
+// reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
+openDataFolder(PATHS.data);
+purgeLegacyLedgers(PATHS.graph); // after open: a refused folder keeps its legacy files
+
+/** The wired adapters, typed against the ports. Satisfies core/graph.ts's GraphDeps structurally. */
+export const stores: Stores = {
 	chatStore,
 	graphStore,
 	sourceOrganizationStore,
@@ -33,7 +41,7 @@ export { settingsStore, authStore, promptOverrides, renderSettingsStore };
 export { readRenderSettings, writeRenderSettings } from "../store/render-settings.ts";
 export { readSettings as readSettingsRecord, writeSettings as writeSettingsRecord } from "../store/settings.ts";
 
-export type Stores = typeof stores;
+export type { Stores };
 
 /**
  * The resolved view of the settings record (core/settings-resolution.ts):
@@ -46,7 +54,3 @@ export type Stores = typeof stores;
 export function effectiveSettings(): EffectiveSettings {
 	return resolveSettings(settingsStore.readSettings());
 }
-
-// Boot: register the custom endpoint (when configured) into piModels(); the
-// POST /api/custom-provider route re-syncs after every connect.
-syncCustomProvider();

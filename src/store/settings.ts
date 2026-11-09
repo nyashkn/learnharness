@@ -19,13 +19,14 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { SETTINGS_FILE } from "../../config.ts";
+import { PATHS } from "../../config.ts";
 import {
 	sanitizeUserSettings,
 	type UserSettings,
 } from "../core/settings.ts";
 import type { SettingsStore } from "../core/ports.ts";
 import { writeFileAtomicSync } from "./atomic-write.ts";
+import { beforeWrite } from "./marker.ts";
 import { parseFileAccessSettings, type FileAccessSettingsResult } from "../core/file-access.ts";
 
 const FILE_ACCESS_ERROR = "File-access configuration cannot be read reliably. Learner-file access is blocked. Repair File access in Settings → Agent → Tools.";
@@ -47,86 +48,96 @@ function fileAccessFromRecord(raw: unknown): FileAccessSettingsResult {
 	return parsed;
 }
 
-/** ENOENT from a dangling settings/ancestor symlink is NOT first boot.
- * Find the nearest existing entry and verify its directory is usable. */
-function settingsAreAbsent(): boolean {
-	let candidate = SETTINGS_FILE;
-	for (;;) {
-		try { fs.lstatSync(/* turbopackIgnore: true */ candidate); }
-		catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
-			const parent = path.dirname(candidate);
-			if (parent === candidate) return false;
-			candidate = parent;
-			continue;
+/** The port plus what the routes need from the adapter: writeSettings sanitizes raw input and returns what it wrote. */
+export type FileSettingsStore = SettingsStore & { writeSettings(raw: unknown): UserSettings };
+
+/** A file SettingsStore over the data folder `dataDir` (settings.json lives in it; the marker and lock too). */
+export function createSettingsStore(dataDir: string): FileSettingsStore {
+	const file = path.join(dataDir, "settings.json");
+	/** ENOENT from a dangling settings/ancestor symlink is NOT first boot.
+	 * Find the nearest existing entry and verify its directory is usable. */
+	function settingsAreAbsent(): boolean {
+		let candidate = file;
+		for (;;) {
+			try { fs.lstatSync(/* turbopackIgnore: true */ candidate); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+				const parent = path.dirname(candidate);
+				if (parent === candidate) return false;
+				candidate = parent;
+				continue;
+			}
+			if (candidate === file) return false;
+			try {
+				if (!fs.statSync(/* turbopackIgnore: true */ candidate).isDirectory()) return false;
+				fs.accessSync(/* turbopackIgnore: true */ candidate, fs.constants.R_OK | fs.constants.X_OK);
+				return true;
+			} catch { return false; }
 		}
-		if (candidate === SETTINGS_FILE) return false;
+	}
+
+	function readFileAccessSettings(): FileAccessSettingsResult {
+		let raw: string;
+		try { raw = fs.readFileSync(file, "utf-8"); }
+		catch (error) {
+			return (error as NodeJS.ErrnoException).code === "ENOENT" && settingsAreAbsent()
+				? { ok: true, settings: { restricted: false, folders: [] } }
+				: { ok: false, error: FILE_ACCESS_ERROR };
+		}
+		try { return fileAccessFromRecord(JSON.parse(raw)); }
+		catch { return { ok: false, error: FILE_ACCESS_ERROR }; }
+	}
+
+	/** The persisted record, or null when none exists (first boot). Runs the
+	 *  migration chain on every read — cheap: a no-op file check when current. */
+	function readSettings(): UserSettings | null {
+		let raw: string;
 		try {
-			if (!fs.statSync(/* turbopackIgnore: true */ candidate).isDirectory()) return false;
-			fs.accessSync(/* turbopackIgnore: true */ candidate, fs.constants.R_OK | fs.constants.X_OK);
-			return true;
-		} catch { return false; }
+			raw = fs.readFileSync(file, "utf-8");
+		} catch {
+			return null; // no settings.json yet — first boot, all factory defaults
+		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(raw);
+		} catch {
+			return null; // corrupt → first-boot semantics (all factory defaults)
+		}
+		const record = sanitizeUserSettings(parsed);
+		if (!record) return null;
+		if (!fileAccessFromRecord(parsed).ok) {
+			// Unrelated section writes carry this safe placeholder, not a dropped
+			// malformed policy that would silently restore unrestricted reads.
+			record.agent = { ...record.agent, fileAccess: { restricted: true, folders: [] } };
+		}
+		// Version chain (empty today): a future v2 migration slots in here —
+		// `if (record.version > CURRENT_SETTINGS_VERSION) …`. Unknown NEWER
+		// versions pass through untouched (the sanitizer preserved unknowns).
+		return record;
 	}
+
+	/** Persist the record (sanitized). Returns what was written. */
+	function writeSettings(raw: unknown): UserSettings {
+		const settings = sanitizeUserSettings(raw);
+		if (!settings) throw new Error("settings record must be a JSON object");
+		if (!readFileAccessSettings().ok && settings.agent?.fileAccess === undefined) {
+			// A whole-file corruption cannot be carried by readSettings (null).
+			// Saving another preference repairs it into a BLOCKED policy unless
+			// the write explicitly supplies a valid file-access preference.
+			settings.agent = { ...settings.agent, fileAccess: { restricted: true, folders: [] } };
+		}
+		beforeWrite(dataDir); // marker + store lock on the first write
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		writeFileAtomicSync(file, JSON.stringify(settings, null, "\t"), { allowInPlaceFallback: true });
+		return settings;
+	}
+
+	return { readSettings, writeSettings, readFileAccessSettings };
 }
 
-export function readFileAccessSettings(): FileAccessSettingsResult {
-	let raw: string;
-	try { raw = fs.readFileSync(SETTINGS_FILE, "utf-8"); }
-	catch (error) {
-		return (error as NodeJS.ErrnoException).code === "ENOENT" && settingsAreAbsent()
-			? { ok: true, settings: { restricted: false, folders: [] } }
-			: { ok: false, error: FILE_ACCESS_ERROR };
-	}
-	try { return fileAccessFromRecord(JSON.parse(raw)); }
-	catch { return { ok: false, error: FILE_ACCESS_ERROR }; }
-}
-
-/** The persisted record, or null when none exists (first boot). Runs the
- *  migration chain on every read — cheap: a no-op file check when current. */
-export function readSettings(): UserSettings | null {
-	let raw: string;
-	try {
-		raw = fs.readFileSync(SETTINGS_FILE, "utf-8");
-	} catch {
-		return null; // no settings.json yet — first boot, all factory defaults
-	}
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		return null; // corrupt → first-boot semantics (all factory defaults)
-	}
-	const record = sanitizeUserSettings(parsed);
-	if (!record) return null;
-	if (!fileAccessFromRecord(parsed).ok) {
-		// Unrelated section writes carry this safe placeholder, not a dropped
-		// malformed policy that would silently restore unrestricted reads.
-		record.agent = { ...record.agent, fileAccess: { restricted: true, folders: [] } };
-	}
-	// Version chain (empty today): a future v2 migration slots in here —
-	// `if (record.version > CURRENT_SETTINGS_VERSION) …`. Unknown NEWER
-	// versions pass through untouched (the sanitizer preserved unknowns).
-	return record;
-}
-
-/** Persist the record (sanitized). Returns what was written. */
-export function writeSettings(raw: unknown): UserSettings {
-	const settings = sanitizeUserSettings(raw);
-	if (!settings) throw new Error("settings record must be a JSON object");
-	if (!readFileAccessSettings().ok && settings.agent?.fileAccess === undefined) {
-		// A whole-file corruption cannot be carried by readSettings (null).
-		// Saving another preference repairs it into a BLOCKED policy unless
-		// the write explicitly supplies a valid file-access preference.
-		settings.agent = { ...settings.agent, fileAccess: { restricted: true, folders: [] } };
-	}
-	fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
-	writeFileAtomicSync(SETTINGS_FILE, JSON.stringify(settings, null, "\t"), { allowInPlaceFallback: true });
-	return settings;
-}
-
-/** The typed adapter (core/ports.ts SettingsStore), for the composition root. */
-export const settingsStore: SettingsStore = {
-	readSettings,
-	writeSettings,
-	readFileAccessSettings,
-};
+/** The app's instance, built from config paths; the raw functions below are its methods. */
+const fileSettings = createSettingsStore(PATHS.data);
+export const settingsStore: SettingsStore = fileSettings;
+export const readSettings = (): UserSettings | null => fileSettings.readSettings();
+export const writeSettings = (raw: unknown): UserSettings => fileSettings.writeSettings(raw);
+export const readFileAccessSettings = (): FileAccessSettingsResult => fileSettings.readFileAccessSettings();

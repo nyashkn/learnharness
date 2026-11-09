@@ -3,12 +3,14 @@
  *
  * `<store>.lock` holds {pid, host, startedAt}. It is published with link(2) from a
  * complete temp file, so a reader never sees a half-written lock and creation is
- * exclusive. A lock is stale only when its pid is dead on this host; a lock from
- * another host, or one we cannot parse, is never reclaimed.
+ * exclusive. A lock is stale only when its pid is dead on this machine, or alive but
+ * started after the lock was written (a recycled pid); a lock from another machine
+ * (`host` is a stable per-user id, see machine-id.ts), or one we cannot parse, is never reclaimed.
  */
 import fs from "node:fs";
-import os from "node:os";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { machineId } from "./machine-id.ts";
 
 export interface LockInfo {
 	pid: number;
@@ -40,6 +42,25 @@ export interface LockEnv {
 	pid?: number;
 	host?: string;
 	isAlive?: (pid: number) => boolean;
+	/** When the pid's process started; undefined = unknown (treated as alive). Defaults to none when `isAlive` is injected. */
+	processStart?: (pid: number) => Date | undefined;
+}
+
+/** `ps -o lstart=` start time. Any failure (no ps, timeout, empty, unparsable) is undefined. Contention path only. */
+export function psProcessStart(pid: number): Date | undefined {
+	try {
+		const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+			encoding: "utf8",
+			timeout: 1000,
+			stdio: ["ignore", "pipe", "ignore"],
+			// ps prints lstart in its TZ with no zone; pin both sides to UTC so the caller's TZ (and DST) cannot shift it (lh-db2).
+			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } as unknown as NodeJS.ProcessEnv,
+		}).trim();
+		const t = Date.parse(`${out} UTC`);
+		return out === "" || Number.isNaN(t) ? undefined : new Date(t);
+	} catch {
+		return undefined;
+	}
 }
 
 /** EPERM means the process exists but belongs to someone else: alive. */
@@ -78,8 +99,9 @@ function parseLock(text: string): LockInfo | null {
 export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLock {
 	const lockFile = lockFileFor(storeFile);
 	const pid = env.pid ?? process.pid;
-	const host = env.host ?? os.hostname();
+	const host = env.host ?? machineId();
 	const isAlive = env.isAlive ?? pidIsAlive;
+	const processStart = env.processStart ?? (env.isAlive ? () => undefined : psProcessStart);
 	const info: LockInfo = { pid, host, startedAt: new Date().toISOString() };
 	const text = JSON.stringify(info);
 
@@ -101,7 +123,12 @@ export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLoc
 			const seen = readText(lockFile);
 			if (seen === undefined) continue; // released between link and read: retry
 			const holder = parseLock(seen);
-			if (holder === null || holder.host !== host || isAlive(holder.pid)) throw new StoreLockedError(storeFile, holder);
+			if (holder === null || holder.host !== host) throw new StoreLockedError(storeFile, holder);
+			if (isAlive(holder.pid)) {
+				// A live pid that started after the lock was written is a recycled pid, not the holder.
+				const started = processStart(holder.pid);
+				if (started === undefined || !(started.getTime() > Date.parse(holder.startedAt))) throw new StoreLockedError(storeFile, holder);
+			}
 			// Stale. Move it aside (atomic: one reclaimer wins) and confirm we moved the lock we judged, not a fresh one.
 			const tomb = `${lockFile}.${randomUUID()}.tomb`;
 			try {

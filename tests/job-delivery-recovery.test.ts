@@ -286,6 +286,8 @@ test("fresh process restores a pending delivery on registration without a jobs p
 		noteSteersDurable(record.id, handed); unregisterLiveAgent(record.id); endTurn(record.id);
 		console.log(JSON.stringify(handed.map(marker => marker.id)));
 	`;
+	// A restart means the old writer is gone; this process is still alive, so drop its store lock.
+	fs.rmSync(path.join(process.env.LH_DATA_DIR!, "storage.json.lock"), { force: true });
 	const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
 		cwd: process.cwd(), encoding: "utf8", timeout: 15000,
 		env: { PATH: process.env.PATH, HOME: path.join(directory, "home"), NODE_ENV: "test", LH_DATA_DIR: process.env.LH_DATA_DIR, LH_AUTH_FILE: process.env.LH_AUTH_FILE },

@@ -16,9 +16,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createExtractionPipeline } from "../src/agent/subagents/extraction.ts";
 import { getGraph } from "../src/core/graph.ts";
-import { effectiveSettings, stores } from "../src/server/stores.ts";
+import { AUTH_FILE, PATHS } from "../config.ts";
+import { resolveSettings } from "../src/core/settings-resolution.ts";
+import { runStoreScript } from "../src/store/file-stores.ts";
+import type { Stores } from "../src/core/ports.ts";
 
-async function main() {
+async function main(stores: Stores) {
 	const dir = process.argv[2] ?? "real-data-extraction/learn-sessions";
 	const limit = Number(process.argv[3] ?? 4);
 	const files = fs
@@ -30,7 +33,7 @@ async function main() {
 	const pipeline = createExtractionPipeline({
 		...stores,
 		// Live budget: the graph section's setting, same as the app's trigger
-		getChunkTokens: () => effectiveSettings().graph.extractionChunkTokens,
+		getChunkTokens: () => resolveSettings(stores.settingsStore.readSettings()).graph.extractionChunkTokens,
 	});
 	const queue = [...files];
 	const totals = { nodes: 0, chains: 0, failed: 0 };
@@ -62,4 +65,5 @@ async function main() {
 	);
 }
 
-main();
+// Factories over the data folder, under the store lock (a running server holds it: this exits naming the holder).
+await runStoreScript(PATHS.data, AUTH_FILE, main);

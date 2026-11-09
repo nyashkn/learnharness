@@ -125,7 +125,7 @@ describe("Windows sharing violations: per-writer compatibility policy (modeled)"
 		{ name: "source deletion", fallback: false, prepare: () => ({ file: config.SOURCES_FILE, save: () => graphStore.deleteSources(new Set(["src_policy"])) }) },
 		{ name: "ledger rewrite", fallback: false, prepare: () => ({ file: config.LEDGER_FILES.chains, save: () => graphStore.rewriteLedgers({ chains: [{ id: "ch_a", premises: ["a"], conclusion: "b", provenance: [], createdAt: "t" }] }) }) },
 		{ name: "positions", fallback: false, prepare: () => ({ file: config.POSITIONS_FILE, save: () => graphStore.writePositions({ policy: { x: 3, y: 4 } }) }) },
-		{ name: "source organization", fallback: false, prepare: () => ({ file: config.SOURCE_ORGANIZATION_FILE, save: () => sourceOrganizationStore.write({ version: 1, folders: [], placements: {} }) }) },
+		{ name: "source organization", fallback: false, prepare: () => ({ file: config.SOURCE_ORGANIZATION_FILE, save: () => sourceOrganizationStore.write({ version: 1, folders: [{ id: "fld_policy", name: "policy", parentId: null, createdAt: "2026-11-01T00:00:00.000Z" }], placements: {} }) }) }, // differs from disk: an identical write is a no-op (lh-7km item 4)
 	];
 	for (const { name, fallback, prepare } of cases) {
 		it(`${name}: ${fallback ? "retains" : "does not acquire"} in-place fallback`, (t) => {

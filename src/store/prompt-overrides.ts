@@ -30,60 +30,70 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { PROMPTS_OVERRIDE_DIR } from "../../config.ts";
+import { PATHS, PROMPTS_OVERRIDE_DIR } from "../../config.ts";
 import { isValidSegmentPath } from "../core/prompt-segments.ts";
 import type { PromptOverrideStore } from "../core/ports.ts";
 import { removeLeftoverTemps, writeFileAtomicSync } from "./atomic-write.ts";
+import { beforeWrite } from "./marker.ts";
 
-/** Absolute path for an override file (unchecked — validate first). */
-function overrideFileFor(segmentPath: string): string {
-	return path.join(PROMPTS_OVERRIDE_DIR, ...segmentPath.split("/"));
+/** A file PromptOverrideStore over `promptsDir`. `dataDir` (default: the parent) holds the marker and lock. */
+export function createPromptOverrides(promptsDir: string, opts: { dataDir?: string } = {}): PromptOverrideStore {
+	const dataDir = opts.dataDir ?? path.dirname(path.resolve(promptsDir));
+	/** Absolute path for an override file (unchecked — validate first). */
+	function overrideFileFor(segmentPath: string): string {
+		return path.join(promptsDir, ...segmentPath.split("/"));
+	}
+
+	/** The store adapter (core/ports.ts). */
+	return {
+		listOverrides(): string[] {
+			const out: string[] = [];
+			const walk = (dir: string, prefix: string) => {
+				let entries: fs.Dirent[];
+				try {
+					entries = fs.readdirSync(dir, { withFileTypes: true });
+				} catch {
+					return; // no dir yet = no overrides
+				}
+				for (const entry of entries) {
+					const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+					if (entry.isDirectory()) walk(path.join(dir, entry.name), rel);
+					else if (entry.isFile() && entry.name.endsWith(".md") && isValidSegmentPath(rel)) out.push(rel);
+				}
+			};
+			walk(promptsDir, "");
+			return out.sort();
+		},
+
+		readOverride(segmentPath: string): string | null {
+			if (!isValidSegmentPath(segmentPath)) return null;
+			try {
+				return fs.readFileSync(overrideFileFor(segmentPath), "utf-8");
+			} catch {
+				return null;
+			}
+		},
+
+		writeOverride(segmentPath: string, text: string): void {
+			if (!isValidSegmentPath(segmentPath)) return;
+			const file = overrideFileFor(segmentPath);
+			beforeWrite(dataDir); // marker + store lock on the first write
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			writeFileAtomicSync(file, text, { allowInPlaceFallback: true });
+		},
+
+		deleteOverride(segmentPath: string): void {
+			if (!isValidSegmentPath(segmentPath)) return;
+			if (fs.existsSync(overrideFileFor(segmentPath))) beforeWrite(dataDir); // a real removal is a write
+			try {
+				fs.unlinkSync(overrideFileFor(segmentPath));
+			} catch {
+				// absent already = done
+			}
+			removeLeftoverTemps(overrideFileFor(segmentPath));
+		},
+	};
 }
 
-/** The store adapter (core/ports.ts). */
-export const promptOverrides: PromptOverrideStore = {
-	listOverrides(): string[] {
-		const out: string[] = [];
-		const walk = (dir: string, prefix: string) => {
-			let entries: fs.Dirent[];
-			try {
-				entries = fs.readdirSync(dir, { withFileTypes: true });
-			} catch {
-				return; // no dir yet = no overrides
-			}
-			for (const entry of entries) {
-				const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-				if (entry.isDirectory()) walk(path.join(dir, entry.name), rel);
-				else if (entry.isFile() && entry.name.endsWith(".md") && isValidSegmentPath(rel)) out.push(rel);
-			}
-		};
-		walk(PROMPTS_OVERRIDE_DIR, "");
-		return out.sort();
-	},
-
-	readOverride(segmentPath: string): string | null {
-		if (!isValidSegmentPath(segmentPath)) return null;
-		try {
-			return fs.readFileSync(overrideFileFor(segmentPath), "utf-8");
-		} catch {
-			return null;
-		}
-	},
-
-	writeOverride(segmentPath: string, text: string): void {
-		if (!isValidSegmentPath(segmentPath)) return;
-		const file = overrideFileFor(segmentPath);
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		writeFileAtomicSync(file, text, { allowInPlaceFallback: true });
-	},
-
-	deleteOverride(segmentPath: string): void {
-		if (!isValidSegmentPath(segmentPath)) return;
-		try {
-			fs.unlinkSync(overrideFileFor(segmentPath));
-		} catch {
-			// absent already = done
-		}
-		removeLeftoverTemps(overrideFileFor(segmentPath));
-	},
-};
+/** The app's instance, built from config paths. */
+export const promptOverrides: PromptOverrideStore = createPromptOverrides(PROMPTS_OVERRIDE_DIR, { dataDir: PATHS.data });
