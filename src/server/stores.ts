@@ -7,7 +7,7 @@
  */
 
 import { chatStore } from "../store/chats.ts";
-import { graphStore } from "../store/graph.ts";
+import { graphStore, purgeLegacyLedgers } from "../store/graph.ts";
 import { sourceOrganizationStore } from "../store/source-organization.ts";
 import { jobStore } from "../store/jobs.ts";
 import { settingsStore } from "../store/settings.ts";
@@ -22,6 +22,7 @@ import type { Stores } from "../core/ports.ts";
 // (newer layout, corrupt marker, a backend with no adapter, a newer graph format) fails here, for
 // reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
 openDataFolder(PATHS.data);
+purgeLegacyLedgers(PATHS.graph); // after open: a refused folder keeps its legacy files
 
 /** The wired adapters, typed against the ports. Satisfies core/graph.ts's GraphDeps structurally. */
 export const stores: Stores = {

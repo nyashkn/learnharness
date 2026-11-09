@@ -5,7 +5,7 @@ import { emptySourceOrganization, parseSourceOrganization } from "../core/source
 import type { GraphStore, SourceOrganizationStore } from "../core/ports.ts";
 import { emit } from "../core/events.ts";
 import { assertGraphFormat, ensureGraphFormat } from "./graph-format.ts";
-import { graphStore, txnHooksOf } from "./graph.ts";
+import { graphStore, sameOnDisk, txnHooksOf } from "./graph.ts";
 import { beforeWrite } from "./marker.ts";
 import { removeLeftoverTemps, writeFileAtomicSync } from "./atomic-write.ts";
 
@@ -40,7 +40,11 @@ export function createSourceOrganizationStore(graphDir: string, graph: GraphStor
 				beforeWrite(dataDir);
 				fs.mkdirSync(path.dirname(file), { recursive: true });
 				ensureGraphFormat(formatFile);
-				writeFileAtomicSync(file, JSON.stringify(valid, null, "\t") + "\n");
+				const body = JSON.stringify(valid, null, "\t") + "\n";
+				if (!sameOnDisk(file, body)) { // an identical write must not move revision()
+					const write = () => writeFileAtomicSync(file, body);
+					if (txn) txn.stamped(file, write); else write();
+				}
 				removeLeftoverTemps(file); // crash leftovers could still place deleted sources
 			};
 			const announce = () => emit("sources-changed", {});

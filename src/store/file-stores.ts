@@ -7,7 +7,7 @@ import path from "node:path";
 import type { Stores } from "../core/ports.ts";
 import { createAuthStore } from "./auth.ts";
 import { createChatStore } from "./chats.ts";
-import { createGraphStore } from "./graph.ts";
+import { createGraphStore, purgeLegacyLedgers } from "./graph.ts";
 import { createJobStore } from "./jobs.ts";
 import { lockDataFolder, openDataFolder } from "./marker.ts";
 import { createPromptOverrides } from "./prompt-overrides.ts";
@@ -21,6 +21,7 @@ export function createFileStores(dataDir: string, authFile: string): Stores {
 	openDataFolder(dataDir);
 	const graphDir = path.join(dataDir, "graph");
 	const graphStore = createGraphStore(graphDir, { dataDir });
+	purgeLegacyLedgers(graphDir); // only after open succeeded: a refused folder keeps its files
 	return {
 		chatStore: createChatStore(path.join(dataDir, "chats"), { dataDir }),
 		graphStore,

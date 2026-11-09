@@ -630,7 +630,7 @@ export function registerContract(f: AdapterFactory): void {
 			eq(b.graph.readNodes(), pending);
 		});
 
-		P("N7", "revision (item 9): unchanged by reads, no-op rewrites and no-op bare writes; changed by every committed write; not changed by a rolled-back transact", count, (b, n) => {
+		P("N7", "revision (item 9): unchanged by reads, no-op rewrites and no-op bare writes; changed by every committed write (source organization included); not changed by a rolled-back transact", count, (b, n) => {
 			const rev = need(revisionOf(b), "GraphStore.revision");
 			const r0 = rev(); b.graph.readNodes(); b.graph.readChains(); assert.equal(rev(), r0, "a read moved the revision");
 			b.graph.appendNode(nodeAt(n)); const r1 = rev(); assert.notEqual(r1, r0, "an append did not move the revision");
@@ -639,8 +639,13 @@ export function registerContract(f: AdapterFactory): void {
 			b.graph.upsertSource(src("src_1")); const r2 = rev(); assert.notEqual(r2, r1);
 			b.graph.appendSourceUsage("src_1", usage(1)); const r3 = rev(); assert.notEqual(r3, r2);
 			b.graph.appendSourceUsage("src_1", usage(1)); assert.equal(rev(), r3, "a duplicate appendSourceUsage (idempotent per startedAt) moved the revision");
-			assert.throws(() => b.graph.transact("rb", () => { b.graph.appendNode(nodeAt(n + 1)); throw new Error("boom"); }), /boom/);
-			assert.equal(rev(), r3, "a rolled-back transact moved the revision");
+			const orgA = { version: 1, folders: [{ id: "f1", name: "A", parentId: null, createdAt: "t" }], placements: {} } as never;
+			const orgB = { version: 1, folders: [{ id: "f1", name: "B", parentId: null, createdAt: "t" }], placements: {} } as never;
+			b.sourceOrg.write(orgA); const r4 = rev(); assert.notEqual(r4, r3, "a source-organization write did not move the revision");
+			b.sourceOrg.write(orgA); assert.equal(rev(), r4, "an identical source-organization write moved the revision");
+			b.sourceOrg.write(orgB); const r5 = rev(); assert.notEqual(r5, r4, "a changed source-organization write (same tick as the last) did not move the revision");
+			assert.throws(() => b.graph.transact("rb", () => { b.graph.appendNode(nodeAt(n + 1)); b.sourceOrg.write(orgA); throw new Error("boom"); }), /boom/);
+			assert.equal(rev(), r5, "a rolled-back transact moved the revision");
 		}, f.capabilities.revision ? {} : { todo: "lh-hbv" });
 
 		P("N8", "rollback (items 4, 17): a throw leaves no lines, no rewrite and no events; a CAUGHT inner throw still rolls the outer transact back", count, (b, n) => {

@@ -73,6 +73,7 @@ export function graphPaths(graphDir: string) {
 		sessions: path.join(graphDir, "sessions.jsonl"),
 		coverage: path.join(graphDir, "coverage.jsonl"),
 		sources: path.join(graphDir, "sources.json"),
+		sourceOrganization: path.join(graphDir, "source-organization.json"),
 		positions: path.join(graphDir, "positions.json"),
 		format: path.join(graphDir, "format.json"),
 	} as const;
@@ -187,12 +188,12 @@ function appendLine<T>(c: Ctx, file: string, record: T): void {
 
 // ─── revision: the fs IS the counter ────────────────────────────────────────
 
-/** The newest mtime across the four ledgers and sources.json (0 if none exist).
+/** The newest mtime across the four ledgers, sources.json and source-organization.json (0 if none exist).
  *  positions.json and render settings are deliberately outside it: contract N7
  *  keeps a rolled-back transact from moving it, and SQL revisions cannot see them. */
 function revisionNow(c: Ctx): number {
 	let revision = 0;
-	for (const file of [c.files.nodes, c.files.chains, c.files.sessions, c.files.coverage, c.files.sources]) {
+	for (const file of [c.files.nodes, c.files.chains, c.files.sessions, c.files.coverage, c.files.sources, c.files.sourceOrganization]) {
 		try {
 			revision = Math.max(revision, fs.statSync(file).mtimeMs);
 		} catch {
@@ -214,7 +215,7 @@ function stamped(c: Ctx, file: string, write: () => void): void {
 }
 
 /** Content-identical to what is on disk (an absent file is never identical). */
-function sameOnDisk(file: string, body: string): boolean {
+export function sameOnDisk(file: string, body: string): boolean {
 	try {
 		return fs.readFileSync(file, "utf-8") === body;
 	} catch {
@@ -507,10 +508,10 @@ function writeSourceMap(c: Ctx, map: Record<string, NotesSource>, deleting = fal
 	stamped(c, c.files.sources, () => writeFileAtomicSync(c.files.sources, body, { allowInPlaceFallback: true }));
 }
 
-// ─── one-way purges when an instance is made: dead ledgers are exactly the confusion
+// ─── one-way purges, run by the caller AFTER the data folder opened (a refused folder keeps its files): dead ledgers are exactly the confusion
 // the cleanup removes (owner doctrine — nothing reads them, nothing writes
 // them, a stale file lying around is a lie). ────────────────────────────────
-function purgeLegacyLedgers(graphDir: string): void {
+export function purgeLegacyLedgers(graphDir: string): void {
 	for (const legacy of ["edges.jsonl", "events.jsonl"]) {
 		const file = path.join(graphDir, legacy);
 		try {
@@ -531,6 +532,8 @@ const isNotesSource = (v: unknown): v is NotesSource =>
 export interface GraphTxnHooks {
 	deferWrite(key: string, value: unknown, flush: () => void, after?: () => void): boolean;
 	pendingWrite(key: string): unknown;
+	/** Run a write to `file` so its mtime is strictly above the revision from before (the `stamped` helper). */
+	stamped(file: string, write: () => void): void;
 }
 const hooks = new WeakMap<GraphStore, GraphTxnHooks>();
 /** The transact hooks of a store made by createGraphStore; undefined for any other GraphStore. */
@@ -539,13 +542,12 @@ export const txnHooksOf = (store: GraphStore): GraphTxnHooks | undefined => hook
 /**
  * A file GraphStore over `graphDir`. Paths and transact state are per instance.
  * `dataDir` (default: the parent of graphDir) is where the marker and lock go.
- * Creating one does not touch disk except the one-way legacy-ledger purge.
+ * Creating one does not touch disk; the legacy-ledger purge is the caller's, after open (purgeLegacyLedgers).
  */
 export function createGraphStore(graphDir: string, opts: { dataDir?: string } = {}): GraphStore {
 	const c: Ctx = { txn: null, dataDir: opts.dataDir ?? path.dirname(path.resolve(graphDir)), files: graphPaths(graphDir) };
-	purgeLegacyLedgers(graphDir);
 	const store = build(c);
-	hooks.set(store, { deferWrite: (k, v, f, a) => deferWrite(c, k, v, f, a), pendingWrite: (k) => pendingWrite(c, k) });
+	hooks.set(store, { deferWrite: (k, v, f, a) => deferWrite(c, k, v, f, a), pendingWrite: (k) => pendingWrite(c, k), stamped: (f, w) => stamped(c, f, w) });
 	return store;
 }
 
