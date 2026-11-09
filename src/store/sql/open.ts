@@ -24,6 +24,8 @@ import { createSourceOrganizationStore } from "./source-organization-store";
 
 export const GRAPH_DB_NAME = "graph.sqlite";
 export const graphDbFile = (dataDir: string): string => path.join(path.resolve(dataDir), GRAPH_DB_NAME);
+export const DOLTLITE_DB_NAME = "graph.doltlite";
+export const doltliteDbFile = (dataDir: string): string => path.join(path.resolve(dataDir), DOLTLITE_DB_NAME);
 
 /** R5: `graph.bak-v<from>-<ts>.sqlite` beside the store. */
 const backupPathIn = (dataDir: string) => (from: number): string =>

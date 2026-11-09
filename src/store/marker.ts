@@ -9,8 +9,11 @@
  *    store: valid means not stamped newer (graph-format.ts).
  *  - A layout above CURRENT_LAYOUT raises StorageVersionError at open (R3);
  *    a corrupt marker or an unknown backend refuses too, never reads as missing.
- *  - OPEN NEVER WRITES. The marker and the store lock are written on the first
+ *  - OPEN NEVER WRITES. The marker and the locks are written on the first
  *    write through any data-folder store (`beforeWrite`), never on a read.
+ *  - Two locks: the folder lock (`storage.json.lock`) always, and on doltlite also the
+ *    lock of the store file (`graph.doltlite.lock`), because the driver only lets a
+ *    lock of its own file recover. Marker lock first, store lock second, released in reverse.
  *
  * This build wires the file and sqlite backends. `adapterFor` is the ONE place a
  * doltlite adapter is added (D3). A first write that picks sqlite takes the lock, creates and
@@ -21,7 +24,7 @@ import path from "node:path";
 import { acquireStoreLock, type LockEnv, type StoreLock } from "./sql/lock.ts";
 import { writeFileAtomicSync } from "./atomic-write.ts";
 import { assertGraphFormat, StorageVersionError } from "./graph-format.ts";
-import { ensureGraphDb, graphDbFile } from "./sql/open.ts";
+import { doltliteDbFile, ensureGraphDb, graphDbFile } from "./sql/open.ts";
 
 export const CURRENT_LAYOUT = 1;
 export const BACKENDS = ["file", "sqlite", "doltlite"] as const;
@@ -48,9 +51,9 @@ export const markerFile = (dataDir: string): string => path.join(dataDir, MARKER
 const isBackend = (v: unknown): v is Backend => typeof v === "string" && (BACKENDS as readonly string[]).includes(v);
 
 /** The backends this build can run. */
-export type RunnableBackend = "file" | "sqlite";
+export type RunnableBackend = "file" | "sqlite" | "doltlite";
 
-/** The one place adapters are registered. `file` and `sqlite` exist in this build. */
+/** The one place adapters are registered. `file` and `sqlite` exist in this build; doltlite is refused until D3. */
 function adapterFor(backend: Backend, file: string): RunnableBackend {
 	if (backend === "file" || backend === "sqlite") return backend;
 	throw new NoAdapterError(backend, file);
@@ -137,8 +140,10 @@ export function openDataFolder(dataDir: string, env: Record<string, string | und
 
 // ─── first write: marker + lock ──────────────────────────────────────────────
 
-interface Held {
+/** `lock` is the folder (marker) lock; `store` is the store file's lock, taken on doltlite only. */
+export interface Held {
 	lock: StoreLock;
+	store?: StoreLock;
 }
 /** Next dev loads several module instances in one process and lock.ts refuses a live pid, its own included,
  *  so the handles live on globalThis keyed by absolute path (the __lhAuditLock pattern). */
@@ -150,10 +155,16 @@ function registry(): Map<string, Held> {
 	return map;
 }
 
+/** Reverse of acquisition. Release is idempotent and removes only a lock that is still ours. */
+function releaseHeld(held: Held): void {
+	held.store?.release();
+	held.lock.release();
+}
+
 /** Release every lock this process holds. Idempotent; reads the global registry, so any module copy may run it. */
 function releaseAll(): void {
 	const g = globalThis as unknown as Record<string, Map<string, Held> | undefined>;
-	for (const held of g[REGISTRY_KEY]?.values() ?? []) held.lock.release();
+	for (const held of g[REGISTRY_KEY]?.values() ?? []) releaseHeld(held);
 	g[REGISTRY_KEY]?.clear();
 }
 
@@ -178,23 +189,38 @@ function installExitHooks(): void {
 /** Release this process's lock on a folder (tests, scripts). A later write re-acquires. */
 export function releaseStoreLock(dataDir: string): void {
 	const abs = path.resolve(dataDir);
-	registry().get(abs)?.lock.release();
+	const held = registry().get(abs);
+	if (held) releaseHeld(held);
 	registry().delete(abs);
 }
 
-/** Held = we registered it AND its lock file is still there (a test may have removed the folder). */
+/** Held = we registered it AND every lock file it names is still there (a test may have removed the folder). */
 export function holdsStoreLock(dataDir: string): boolean {
 	const held = registry().get(path.resolve(dataDir));
-	return held !== undefined && fs.existsSync(held.lock.lockFile);
+	return held !== undefined && fs.existsSync(held.lock.lockFile) && (held.store === undefined || fs.existsSync(held.store.lockFile));
+}
+
+/** The marker lock, then (doltlite only) the store file's lock, so the driver can be handed a real held lock. A refusal on the second leaves the first released. */
+export function takeFolderLocks(dataDir: string, backend: RunnableBackend, lockEnv?: LockEnv): Held {
+	const abs = path.resolve(dataDir);
+	const lock = acquireStoreLock(markerFile(abs), lockEnv);
+	if (backend !== "doltlite") return { lock };
+	try {
+		return { lock, store: acquireStoreLock(doltliteDbFile(abs), lockEnv) };
+	} catch (error) {
+		lock.release();
+		throw error;
+	}
 }
 
 /**
  * Call before the first physical write through any data-folder store.
- * Refuses (layout, format), takes the store lock for the life of the process
+ * Refuses (layout, format), takes the locks for the life of the process
  * (a StoreLockedError names the holder), then writes the marker atomically if absent.
+ * Returns the store file's lock when the backend has one (doltlite), else undefined.
  * `lockEnv` is for tests (fake pid/host); the app never passes it.
  */
-export function beforeWrite(dataDir: string, lockEnv?: LockEnv): void {
+export function beforeWrite(dataDir: string, lockEnv?: LockEnv): StoreLock | undefined {
 	const abs = path.resolve(dataDir);
 	const file = markerFile(abs);
 	const existing = readMarker(file); // a newer or corrupt marker refuses the write too
@@ -204,15 +230,20 @@ export function beforeWrite(dataDir: string, lockEnv?: LockEnv): void {
 	const backend = decisions().get(abs) ?? resolveBackend(abs);
 	assertMarkerMatches(file, existing, backend);
 	if (!holdsStoreLock(abs)) {
+		// Half a pair may survive (one lock file lost): release it before re-taking, or it would be left behind.
+		const stale = registry().get(abs);
+		if (stale) releaseHeld(stale);
 		registry().delete(abs);
 		fs.mkdirSync(abs, { recursive: true });
-		registry().set(abs, { lock: acquireStoreLock(file, lockEnv) });
+		registry().set(abs, takeFolderLocks(abs, backend, lockEnv));
 	}
+	const store = registry().get(abs)?.store;
 	const locked = readMarker(file); // another process may have made the first write while this one waited to lock
 	assertMarkerMatches(file, locked, backend);
-	if (locked) return;
+	if (locked) return store;
 	if (backend === "sqlite") ensureGraphDb(abs); // lock, then the store, then the marker: a marker never names a store that is missing
 	writeFileAtomicSync(file, `${JSON.stringify({ backend, layout: CURRENT_LAYOUT }, null, "\t")}\n`, { allowInPlaceFallback: true });
+	return store;
 }
 
 /** Scripts: take the lock at start (after checking the folder opens), release in finally. */
@@ -220,5 +251,5 @@ export function lockDataFolder(dataDir: string, lockEnv?: LockEnv): StoreLock {
 	openDataFolder(dataDir);
 	beforeWrite(dataDir, lockEnv);
 	const held = registry().get(path.resolve(dataDir))!;
-	return { lockFile: held.lock.lockFile, held: () => held.lock.held(), release: () => releaseStoreLock(dataDir) };
+	return { lockFile: held.lock.lockFile, held: () => held.lock.held() && (held.store?.held() ?? true), release: () => releaseStoreLock(dataDir) };
 }
