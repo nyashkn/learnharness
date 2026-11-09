@@ -153,9 +153,8 @@ export function createSqlGraphStores(
 		const known = handles().get(file);
 		if (known) return known.opened;
 		if (probeDoltlite().upgrade) {
-			const lock = beforeWrite(abs) || undefined; // an upgrade writes: lock first
-			if (!lock) throw new Error(`${file} needs an upgrade but beforeWrite returned no store lock`);
-			return openWith(openDoltlite(file, { lock }), lock);
+			promote(beforeWrite(abs)); // an upgrade writes: lock first, then promote re-checks for a newer store under the lock
+			return handles().get(file)!.opened;
 		}
 		return openWith(openDoltlite(file, { readOnly: true })); // top rung: migrate only reads, recover() is a no-op here
 	}

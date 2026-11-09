@@ -245,6 +245,50 @@ describe("doltlite backend", { skip: !MAC_ARM }, () => {
 		}
 	});
 
+	describe("a DoltLite store below the top rung is upgraded at open, under both locks", () => {
+		/** A marked DoltLite folder whose graph.doltlite has a head but no lh_meta table (schema version 0). */
+		function oldStore(): string {
+			const dir = fresh();
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, "storage.json"), '{"backend":"doltlite","layout":1}\n');
+			const file = doltliteDbFile(dir);
+			const lock = acquireStoreLock(file);
+			const db = openDoltlite(file, { lock });
+			try { db.run("CREATE TABLE unrelated (x INTEGER)"); db.seal("old store"); } finally { db.close(); lock.release(); }
+			return dir;
+		}
+		const positions = { readPositions: () => ({}), writePositions: () => {} };
+
+		it("createFileStores on it upgrades at the first read: lh_meta exists and the log shows the migrate commit, both locks held", () => {
+			const dir = oldStore();
+			const s = createFileStores(dir, auth(dir));
+			assert.deepEqual(s.graphStore.readNodes(), []);
+			const ro = openDoltlite(doltliteDbFile(dir), { readOnly: true });
+			try { assert.equal(ro.all<{ value: string }>("SELECT value FROM lh_meta WHERE key = 'schema_version'").length, 1); } finally { ro.close(); }
+			assert.ok(disk(dir).log.length >= 2 && disk(dir).log[0] !== "old store", `log: ${disk(dir).log.join(" | ")}`);
+			assert.equal(marker.holdsStoreLock(dir), true);
+			letGo(dir);
+		});
+
+		it("another process stamps it newer after the lock is taken: StorageVersionError, and no writable open after the stamp", async () => {
+			const { createSqlGraphStores: create } = await import("../src/store/sql/open.ts");
+			const dir = oldStore();
+			let mark = -1;
+			const racing = (d: string) => {
+				const lock = marker.beforeWrite(d);
+				const file = doltliteDbFile(d);
+				const db = openDoltlite(file, { lock });
+				try { db.run("CREATE TABLE lh_meta (key TEXT PRIMARY KEY, value TEXT)"); db.run("INSERT INTO lh_meta VALUES ('schema_version', '999')"); db.seal("stamp"); } finally { db.close(); }
+				mark = opens.length;
+				return lock;
+			};
+			assert.throws(() => create(dir, positions, () => {}, racing, "doltlite"), StorageVersionError);
+			assert.ok(mark >= 0, "the race ran");
+			assert.equal(writableSince(mark), 0, "refused before any writable open under the lock");
+			letGo(dir);
+		});
+	});
+
 	it("a store lock held by another process: the write is refused with StoreLockedError naming the holder, and no store byte changes", async () => {
 		for (const which of ["graph.doltlite", "storage.json"] as const) {
 			const dir = cleanStore();
