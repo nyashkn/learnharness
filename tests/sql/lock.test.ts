@@ -198,6 +198,32 @@ describe("store lock (CB6)", () => {
 			const t = psProcessStart(process.pid);
 			assert.ok(t && t.getTime() <= Date.now() && t.getTime() > Date.now() - 24 * 3600 * 1000, String(t));
 		});
+		// lh-db2: the real ps, no stub, in a child whose TZ differs from the system zone (UTC-11, and UTC itself).
+		for (const tz of ["Pacific/Pago_Pago", "Etc/UTC"]) {
+			test(`TZ=${tz}: the real ps start time is this process's, and a live holder is refused`, () => {
+				const f = store();
+				const held = acquireStoreLock(f); // this test process: live, real pid, real host
+				try {
+					const lockTs = path.resolve(import.meta.dirname, "../../src/store/sql/lock.ts");
+					const code = `const { acquireStoreLock, psProcessStart } = await import(${JSON.stringify(lockTs)});
+						const expected = Date.now() - process.uptime() * 1000;
+						const start = psProcessStart(process.pid)?.getTime() ?? null;
+						let refused = null;
+						try { acquireStoreLock(${JSON.stringify(f)}).release(); refused = false; } catch (e) { refused = e.name; }
+						console.log(JSON.stringify({ expected, start, refused }));`;
+					const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
+						cwd: path.resolve(import.meta.dirname, "../.."), encoding: "utf8", timeout: 30000,
+						env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test", TZ: tz },
+					});
+					assert.equal(r.status, 0, r.stderr);
+					const { expected, start, refused } = JSON.parse(r.stdout.trim().split("\n").at(-1)!) as { expected: number; start: number | null; refused: string | false | null };
+					assert.ok(start !== null && Math.abs(start - expected) <= 5000, `ps start ${start} vs process start ${expected} (off by ${start === null ? "?" : start - expected} ms)`);
+					assert.equal(refused, "StoreLockedError", "a live holder was evicted");
+				} finally {
+					held.release();
+				}
+			});
+		}
 		test("a parseable date is returned", () => withPath(fakePs("echo 'Sat Nov  8 12:34:56 2026'"), () => assert.equal(psProcessStart(1)?.getFullYear(), 2026)));
 	});
 

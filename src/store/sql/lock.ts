@@ -53,9 +53,10 @@ export function psProcessStart(pid: number): Date | undefined {
 			encoding: "utf8",
 			timeout: 1000,
 			stdio: ["ignore", "pipe", "ignore"],
-			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C" } as unknown as NodeJS.ProcessEnv,
+			// ps prints lstart in its TZ with no zone; pin both sides to UTC so the caller's TZ (and DST) cannot shift it (lh-db2).
+			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } as unknown as NodeJS.ProcessEnv,
 		}).trim();
-		const t = Date.parse(out);
+		const t = Date.parse(`${out} UTC`);
 		return out === "" || Number.isNaN(t) ? undefined : new Date(t);
 	} catch {
 		return undefined;
