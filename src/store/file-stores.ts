@@ -23,7 +23,7 @@ export function createFileStores(dataDir: string, authFile: string): Stores {
 	const backend = openDataFolder(dataDir);
 	const graphDir = path.join(dataDir, "graph");
 	const fileGraph = createGraphStore(graphDir, { dataDir });
-	// On sqlite and doltlite the ledgers and sources live in graph.sqlite; the file graph store only serves positions (a script must never write JSONL beside the database).
+	// On sqlite and doltlite the ledgers and sources live in the store file (graph.sqlite or graph.doltlite); the file graph store only serves positions (a script must never write JSONL beside the database).
 	const graph = backend !== "file"
 		? createSqlGraphStores(dataDir, fileGraph, emit, beforeWrite, backend)
 		: { graphStore: fileGraph, sourceOrganizationStore: createSourceOrganizationStore(graphDir, fileGraph, { dataDir }) };
