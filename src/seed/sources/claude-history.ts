@@ -44,6 +44,7 @@ export function claudeHistorySource(io: { files: ReadOnlyFiles; path: string }):
 					project: row.project,
 					sessionId: row.sessionId,
 					at,
+					sessionAt: at,
 					text: row.display,
 				};
 			}

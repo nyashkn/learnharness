@@ -4,7 +4,7 @@ import type { HarvestItem, SessionSource } from "../types";
 import { sha256 } from "./shared";
 
 /** The only path from RawItem to HarvestItem: redaction cannot be bypassed by a source. */
-export async function* harvest(sources: readonly SessionSource[]): AsyncIterable<HarvestItem> {
+export async function* harvest(sources: readonly SessionSource[]): AsyncIterable<HarvestItem & { sessionAt: string | null }> {
 	for (const source of sources) {
 		for await (const raw of source.items()) {
 			const textRedacted = redact(raw.text);
@@ -14,6 +14,7 @@ export async function* harvest(sources: readonly SessionSource[]): AsyncIterable
 				project: raw.project === null ? null : redact(raw.project),
 				sessionId: raw.sessionId === null ? null : redact(raw.sessionId),
 				at: raw.at,
+				sessionAt: raw.sessionAt,
 				signal: tagSignal(textRedacted),
 				textRedacted,
 			};

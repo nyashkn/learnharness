@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { clipSnippet } from "./egress";
+import { redact } from "./redact";
 import type { AllowEgress, HarvestItem, LlmPort } from "./types";
 
 export const DraftSchema = Type.Object({
@@ -49,5 +50,6 @@ export async function extractDraft(
 	const sentIds = new Set(sent.map((item) => item.id));
 	const evidenceIds = [...new Set(out.evidenceIds.filter((id) => sentIds.has(id)))];
 	if (evidenceIds.length === 0) return { kind: "skipped", reason: "invalid-output" };
-	return { kind: "draft", draft: { title: out.title, why: out.why, kind: out.kind, evidenceIds } };
+	// title and why go back to the judge in later steps, so model text gets the same redact and clip as harvested text
+	return { kind: "draft", draft: { title: clipSnippet(redact(out.title).trim()), why: clipSnippet(redact(out.why).trim()), kind: out.kind, evidenceIds } };
 }
