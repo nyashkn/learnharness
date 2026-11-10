@@ -10,8 +10,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { after, describe, it, mock } from "node:test";
 
-/** doltlite has an adapter on macOS arm64 only (marker.adapterFor). */
-const MAC_ARM = process.platform === "darwin" && process.arch === "arm64";
+/** doltlite has an adapter on darwin-arm64, linux-x64 and win32-x64 only (marker.adapterFor); a hardcoded literal, not derived from src. */
+const DOLTLITE_HOST = ["darwin-arm64", "linux-x64", "win32-x64"].includes(`${process.platform}-${process.arch}`);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-marker-"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 // The singletons (config-built) live in their own throwaway folder, never the repo's data/.
@@ -75,7 +75,7 @@ const BAD_MARKERS: { text: string; outcome: Outcome }[] = [
 	{ text: '{"backend":"mysql","layout":2}', outcome: "version" }, // a newer build may know the backend: version wins
 	{ text: '{"backend":"file","layout":1}', outcome: "file" },
 	{ text: '{"backend":"sqlite","layout":1}', outcome: "corrupt" }, // agreement: the marker names graph.sqlite, which the table never builds
-	{ text: '{"backend":"doltlite","layout":1}', outcome: MAC_ARM ? "corrupt" : "no-adapter" }, // macOS arm64: an adapter exists, so the missing graph.doltlite is the agreement refusal
+	{ text: '{"backend":"doltlite","layout":1}', outcome: DOLTLITE_HOST ? "corrupt" : "no-adapter" }, // a DoltLite host: an adapter exists, so the missing graph.doltlite is the agreement refusal
 ];
 const ENVS = [undefined, "", "file", "sqlite", "doltlite", "bogus"] as const;
 
@@ -86,7 +86,7 @@ function oracle(m: MarkerState, folder: Folder, env: string | undefined): Outcom
 	if (!empty || env === undefined || env === "") return "file"; // missing marker = file; LH_STORAGE ignored on a non-empty folder
 	if (env === "file") return "file";
 	if (env === "sqlite") return "sqlite"; // an intent only: the store is made on the first write
-	if (env === "doltlite") return MAC_ARM ? "doltlite" : "no-adapter"; // an intent only, like sqlite
+	if (env === "doltlite") return DOLTLITE_HOST ? "doltlite" : "no-adapter"; // an intent only, like sqlite
 	return "corrupt"; // an unknown LH_STORAGE on an empty folder
 }
 
@@ -131,7 +131,7 @@ describe("marker resolution (open)", () => {
 				[{ kind: "absent" }, "leftover-jsonl", "sqlite"], // LH_STORAGE on a non-empty folder: ignored, not a conflict
 				[{ kind: "absent" }, "chat-file", "bogus"], // even a bogus value is ignored there
 				[{ kind: "absent" }, "empty", "sqlite"], // honoured on an empty folder -> the sqlite backend (nothing written at open)
-				[{ kind: "absent" }, "empty", "doltlite"], // honoured on an empty folder -> doltlite on macOS arm64, no adapter elsewhere
+				[{ kind: "absent" }, "empty", "doltlite"], // honoured on an empty folder -> doltlite on a DoltLite host, no adapter elsewhere
 				[{ kind: "absent" }, "no-folder", "file"],
 				[{ kind: "text", text: '{"backend":"file","layout":2}' }, "leftover-jsonl", undefined],
 				[{ kind: "text", text: "{not json" }, "leftover-jsonl", undefined], // a corrupt marker is never "missing"
@@ -253,7 +253,7 @@ describe("marker and lock are written on the first write, not before", () => {
 	});
 
 	it("LH_STORAGE is honoured at the first write: a refused choice leaves no marker and no lock (lh-uwy)", () => {
-		const cases: [string, "no-adapter" | "corrupt"][] = [...(MAC_ARM ? [] : [["doltlite", "no-adapter"] as [string, "no-adapter"]]), ["bogus", "corrupt"]]; // doltlite has an adapter on macOS arm64 (tests/doltlite-backend.test.ts)
+		const cases: [string, "no-adapter" | "corrupt"][] = [...(DOLTLITE_HOST ? [] : [["doltlite", "no-adapter"] as [string, "no-adapter"]]), ["bogus", "corrupt"]]; // doltlite has an adapter on a DoltLite host (tests/doltlite-backend.test.ts)
 		for (const [value, outcome] of cases) {
 			const dir = fresh();
 			fs.mkdirSync(dir);

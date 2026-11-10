@@ -3,7 +3,7 @@
  * Open never writes (a writable DoltLite open appends bytes even with no commit); a newer store is refused before ANY writable open;
  * the first write promotes the read-only handle, recovers a dirty working set as its own commit, and seals one commit per transact.
  * Expectations come from the folder bytes, `dolt_log` read through a separate read-only connection, and values written here.
- * Everything except the `adapterFor` host table is macOS arm64 only (the only host that has an adapter).
+ * Everything except the `adapterFor` host table runs on the three hosts that have an adapter (darwin-arm64, linux-x64, win32-x64).
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -30,7 +30,9 @@ const { StorageVersionError } = await import("../src/store/graph-format.ts");
 
 /** Every native open this process makes, recorded before the driver first loads the addon (the byte growth of a stray writable open is not reliable evidence, so the open mode is). */
 const opens: { target: string; readOnly: boolean }[] = [];
-if (process.platform === "darwin" && process.arch === "arm64") {
+// A hardcoded literal on purpose: the expected hosts must not be derived from the code under test.
+const DOLTLITE_HOST = ["darwin-arm64", "linux-x64", "win32-x64"].includes(`${process.platform}-${process.arch}`);
+if (DOLTLITE_HOST) {
 	const mod = createRequire(import.meta.url)("@dolthub/doltlite") as { DatabaseSync: new (target: string, options?: { readOnly?: boolean }) => unknown };
 	const Original = mod.DatabaseSync;
 	mod.DatabaseSync = class extends (Original as never as new (t: string, o?: { readOnly?: boolean }) => object) {
@@ -39,15 +41,17 @@ if (process.platform === "darwin" && process.arch === "arm64") {
 }
 const writableSince = (mark: number): number => opens.slice(mark).filter((o) => !o.readOnly).length;
 
-const MAC_ARM = process.platform === "darwin" && process.arch === "arm64";
-
-describe("adapterFor: doltlite runs on macOS arm64 only", () => {
+describe("adapterFor: doltlite runs on darwin-arm64, linux-x64 and win32-x64 only", () => {
 	const file = "/x/storage.json";
-	it("linux/x64, win32/x64 and darwin/x64 are refused with NoAdapterError naming the backend; darwin/arm64 is allowed", () => {
-		for (const host of [{ platform: "linux", arch: "x64" }, { platform: "linux", arch: "arm64" }, { platform: "win32", arch: "x64" }, { platform: "darwin", arch: "x64" }]) {
+	it("linux/arm64, darwin/x64, win32/arm64 and other hosts are refused with NoAdapterError naming the backend", () => {
+		for (const host of [{ platform: "linux", arch: "arm64" }, { platform: "darwin", arch: "x64" }, { platform: "win32", arch: "arm64" }, { platform: "win32", arch: "ia32" }, { platform: "freebsd", arch: "x64" }]) {
 			assert.throws(() => marker.adapterFor("doltlite", file, host), (e: unknown) => e instanceof marker.NoAdapterError && e.backend === "doltlite" && e.file === file, `${host.platform}/${host.arch}`);
 		}
-		assert.equal(marker.adapterFor("doltlite", file, { platform: "darwin", arch: "arm64" }), "doltlite");
+	});
+	it("darwin/arm64, linux/x64 and win32/x64 are allowed", () => {
+		for (const host of [{ platform: "darwin", arch: "arm64" }, { platform: "linux", arch: "x64" }, { platform: "win32", arch: "x64" }]) {
+			assert.equal(marker.adapterFor("doltlite", file, host), "doltlite", `${host.platform}/${host.arch}`);
+		}
 	});
 	it("file and sqlite are allowed on every host", () => {
 		for (const host of [{ platform: "linux", arch: "x64" }, { platform: "win32", arch: "x64" }, { platform: "darwin", arch: "arm64" }]) {
@@ -101,7 +105,7 @@ function cleanStore(): string {
 const LEFTOVER = JSON.stringify(NODE("left"));
 const makeDirty = (dir: string) => viaConnection(dir, (db) => { db.run("INSERT INTO ledger_nodes (line_json) VALUES (?)", LEFTOVER); }, false);
 
-describe("doltlite backend", { skip: !MAC_ARM }, () => {
+describe("doltlite backend", { skip: !DOLTLITE_HOST }, () => {
 	it("a clean store and a dirty store: opening and reading write nothing (bytes, no lock files, no commit, still dirty)", () => {
 		for (const dirty of [false, true]) {
 			const dir = cleanStore();

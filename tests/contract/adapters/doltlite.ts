@@ -3,7 +3,7 @@
  *  - `doltlite`: src/store/sql/graph-store.ts directly over openDoltlite(<dir>/graph.doltlite, { lock }), like the sqlite adapter.
  *    Runs wherever the addon loads.
  *  - `doltlite-app`: createFileStores with LH_STORAGE=doltlite, so marker.ts and sql/open.ts are what runs (the open, the promotion,
- *    the first-write order). Included on macOS arm64 only, because adapterFor refuses doltlite elsewhere.
+ *    the first-write order). Included on darwin-arm64, linux-x64 and win32-x64 only, because adapterFor refuses doltlite elsewhere.
  * Hooks that write go through a second connection and leave a dirty working set; that is fine, the next seal commits it.
  */
 import { CURRENT_GRAPH_FORMAT_VERSION } from "../../../src/core/contracts/graph.ts";
@@ -152,4 +152,5 @@ const app: AdapterFactory = {
 	},
 };
 
-export default process.platform === "darwin" && process.arch === "arm64" ? [direct, app] : [direct];
+// A hardcoded literal, not derived from src.
+export default ["darwin-arm64", "linux-x64", "win32-x64"].includes(`${process.platform}-${process.arch}`) ? [direct, app] : [direct];
