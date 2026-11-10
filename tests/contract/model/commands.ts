@@ -9,12 +9,12 @@ import * as path from "node:path";
 import fc from "fast-check";
 import * as A from "../harness.ts";
 import type { AdapterFactory, StoreBundle } from "../harness.ts";
-import type { CoverageEntry, GraphChain, GraphNode, Position, SessionCheckpoint } from "../../../src/core/contracts.ts";
+import type { ReviewLine, CoverageEntry, GraphChain, GraphNode, Position, SessionCheckpoint } from "../../../src/core/contracts.ts";
 import type { GraphStore } from "../../../src/core/ports.ts";
-import { cloneLedgers, Model, resolveRewrite, type Ledgers, type Mask, type RewriteSpec } from "./reference.ts";
+import { cloneLedgers, Model, remapWouldCycle, resolvedReviews, resolveRewrite, type Ledgers, type Mask, type RewriteSpec } from "./reference.ts";
 
 export type Leaf =
-	| { t: "n"; v: GraphNode } | { t: "c"; v: GraphChain } | { t: "cov"; v: CoverageEntry } | { t: "cp"; v: SessionCheckpoint }
+	| { t: "n"; v: GraphNode } | { t: "c"; v: GraphChain } | { t: "cov"; v: CoverageEntry } | { t: "cp"; v: SessionCheckpoint } | { t: "rv"; v: ReviewLine } | { t: "rm"; from: string; to: string }
 	| { t: "rw"; spec: RewriteSpec };
 export type TxOp = Leaf | { t: "throw" } | { t: "nest"; how: "ok" | "caught" | "propagate"; ops: (Leaf | { t: "throw" })[] };
 export type Spec =
@@ -44,6 +44,8 @@ const leaf: fc.Arbitrary<Leaf> = fc.oneof(
 	{ weight: 2, arbitrary: A.chainLine.map((v) => ({ t: "c", v }) as Leaf) },
 	{ weight: 1, arbitrary: A.coverageLine.map((v) => ({ t: "cov", v }) as Leaf) },
 	{ weight: 1, arbitrary: A.checkpointLine.map((v) => ({ t: "cp", v }) as Leaf) },
+	{ weight: 2, arbitrary: A.verbatimReview.map((v) => ({ t: "rv", v }) as Leaf) },
+	{ weight: 2, arbitrary: fc.record({ from: A.nodeId, to: A.nodeId }).map((x) => ({ t: "rm", ...x }) as Leaf) },
 	{ weight: 2, arbitrary: rewriteSpec.map((spec) => ({ t: "rw", spec }) as Leaf) },
 );
 const innerOp = fc.oneof({ weight: 8, arbitrary: leaf }, { weight: 1, arbitrary: fc.constant({ t: "throw" } as const) });
@@ -63,12 +65,12 @@ export const spec: fc.Arbitrary<Spec> = fc.oneof(
 );
 
 // ── execution ──
-const KEY = { n: "nodes", c: "chains", cov: "coverage", cp: "checkpoints" } as const;
+const KEY = { n: "nodes", c: "chains", cov: "coverage", cp: "checkpoints", rv: "reviews" } as const;
 const APPEND: Record<string, (g: GraphStore, v: never) => void> = {
-	n: (g, v) => g.appendNode(v), c: (g, v) => g.appendChain(v), cov: (g, v) => g.appendCoverage(v), cp: (g, v) => g.appendCheckpoint(v),
+	n: (g, v) => g.appendNode(v), c: (g, v) => g.appendChain(v), cov: (g, v) => g.appendCoverage(v), cp: (g, v) => g.appendCheckpoint(v), rv: (g, v) => g.appendReview(v),
 };
-const same = (g: GraphStore) => JSON.stringify([g.readNodes(), g.readChains(), g.readCoverage(), g.readCheckpoints()]);
-const lines = (l: Ledgers) => JSON.stringify([l.nodes, l.chains, l.coverage, l.checkpoints]);
+const same = (g: GraphStore) => JSON.stringify([g.readNodes(), g.readChains(), g.readCoverage(), g.readCheckpoints(), g.readReviews()]);
+const lines = (l: Ledgers) => JSON.stringify([l.nodes, l.chains, l.coverage, l.checkpoints, resolvedReviews(l)]);
 
 interface Ctx { poisoned: boolean; threw: boolean }
 
@@ -91,6 +93,9 @@ function applyLeaf(g: GraphStore, work: Model, op: Leaf): void {
 		const next = resolveRewrite(work.led, op.spec);
 		g.rewriteLedgers(next);
 		work.rewrite(next);
+	} else if (op.t === "rm") {
+		if (remapWouldCycle(work.led.reviewRemaps, op.from, op.to)) assert.throws(() => g.remapReviewTargets(op.from, op.to), /cycle/); // refused, nothing written, the transaction is not poisoned
+		else { g.remapReviewTargets(op.from, op.to); work.led.reviewRemaps.push({ from: op.from, to: op.to }); }
 	} else {
 		APPEND[op.t]!(g, op.v as never);
 		work.append(KEY[op.t], op.v as never);
@@ -100,7 +105,7 @@ function applyLeaf(g: GraphStore, work: Model, op: Leaf): void {
 function observed(r: Real): string {
 	const g = r.b.graph;
 	const pos = Object.fromEntries(Object.entries(g.readPositions()).sort(([a], [b]) => a.localeCompare(b)));
-	return JSON.stringify([g.readNodes(), g.readChains(), g.readCoverage(), g.readCheckpoints(), pos, r.b.render.read()]);
+	return JSON.stringify([g.readNodes(), g.readChains(), g.readCoverage(), g.readCheckpoints(), g.readReviews(), pos, r.b.render.read()]);
 }
 
 export async function exec(s: Spec, m: Model, r: Real): Promise<void> {

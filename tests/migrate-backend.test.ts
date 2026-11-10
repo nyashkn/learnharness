@@ -102,18 +102,22 @@ interface Raw {
 	chains: string;
 	sessions: string;
 	coverage: string;
+	reviews?: string;
+	remaps?: string;
 	sources?: string;
 	org?: string;
 	format?: string;
 	positions?: string;
 }
-const GRAPH_FILES: Record<keyof Raw, string> = { nodes: "nodes.jsonl", chains: "chains.jsonl", sessions: "sessions.jsonl", coverage: "coverage.jsonl", sources: "sources.json", org: "source-organization.json", format: "format.json", positions: "positions.json" };
+const GRAPH_FILES: Record<keyof Raw, string> = { nodes: "nodes.jsonl", chains: "chains.jsonl", sessions: "sessions.jsonl", coverage: "coverage.jsonl", reviews: "review/reviews.jsonl", remaps: "review/remaps.jsonl", sources: "sources.json", org: "source-organization.json", format: "format.json", positions: "positions.json" };
 
 function writeFolder(dir: string, raw: Raw): void {
 	fs.mkdirSync(path.join(dir, "graph"), { recursive: true });
 	for (const k of Object.keys(GRAPH_FILES) as (keyof Raw)[]) {
 		const text = raw[k];
-		if (text !== undefined) fs.writeFileSync(path.join(dir, "graph", GRAPH_FILES[k]), text, "utf8");
+		if (text === undefined) continue;
+		fs.mkdirSync(path.dirname(path.join(dir, "graph", GRAPH_FILES[k])), { recursive: true });
+		fs.writeFileSync(path.join(dir, "graph", GRAPH_FILES[k]), text, "utf8");
 	}
 }
 
@@ -128,6 +132,8 @@ const DIRTY: Raw = {
 	chains: `{"c":1}\n{"c":2}\n{"c":`,
 	sessions: `{"s":1}\r\n`,
 	coverage: "",
+	reviews: `{"id":"c1:k1","targets":["n1"]}\r\n{"id":"c1:k2","targets":["n2","é"]}\n not json \n{"id":"c1:k3"} `,
+	remaps: `{"from":"n1","to":"n2"}\n{"from":"n2","to":"n3"}\n`,
 	sources: JSON.stringify({ b: { id: "b", filePath: "/b", importedAt: "t" }, a: { id: "a", filePath: "/a", importedAt: "t", extras: [1, { x: null }] }, odd: 5 }, null, 2),
 	org: JSON.stringify({ version: 1, folders: [] }),
 	format: JSON.stringify({ version: 1 }),
@@ -140,6 +146,8 @@ interface Rows {
 	chains: string[];
 	checkpoints: string[];
 	coverage: string[];
+	reviews?: string[];
+	reviewRemaps?: string[];
 	sources: [string, string][];
 	org?: string;
 }
@@ -148,11 +156,13 @@ const ROWS: Rows = {
 	chains: ['{"c":1}', '{"c":2}'],
 	checkpoints: ['{"s":1}'],
 	coverage: ['{"v":1}'],
+	reviews: ['{"id":"c1:k1","targets":["n1"]}', ' not json ', '{"id":"c1:k2"}'],
+	reviewRemaps: ['{"from":"n1","to":"n2"}', '{"from":"n2","to":"n3"}'],
 	sources: [["a", '{"id":"a","filePath":"/a","importedAt":"t"}'], ["b", '{"id":"b","filePath":"/b","importedAt":"t"}']],
 	org: '{"version":1,"folders":[]}',
 };
 const STALE: Rows = { nodes: ['{"id":"old"}'], chains: [], checkpoints: [], coverage: [], sources: [] };
-const TABLE = { nodes: "ledger_nodes", chains: "ledger_chains", checkpoints: "ledger_checkpoints", coverage: "ledger_coverage" } as const;
+const TABLE = { nodes: "ledger_nodes", chains: "ledger_chains", checkpoints: "ledger_checkpoints", coverage: "ledger_coverage", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" } as const;
 
 const writeMarker = (dir: string, backend: Backend): void => fs.writeFileSync(markerFile(dir), `${JSON.stringify({ backend, layout: 1 }, null, "\t")}\n`);
 
@@ -165,7 +175,7 @@ function seedSql(dir: string, b: "sqlite" | "doltlite", rows: Rows, marker: bool
 	try {
 		openGraphStore({ db, file, lhVersion: "test", positions: { read: () => ({}), write: () => {} }, log: () => {} });
 		db.transaction(() => {
-			for (const k of ["nodes", "chains", "checkpoints", "coverage"] as const) rows[k].forEach((l, i) => db.run(`INSERT INTO ${TABLE[k]} (seq, line_json) VALUES (?, ?)`, i + 1, l));
+			for (const k of ["nodes", "chains", "checkpoints", "coverage", "reviews", "reviewRemaps"] as const) (rows[k] ?? []).forEach((l, i) => db.run(`INSERT INTO ${TABLE[k]} (seq, line_json) VALUES (?, ?)`, i + 1, l));
 			for (const [id, json] of rows.sources) db.run("INSERT INTO sources (id, record_json) VALUES (?, ?)", id, json);
 			if (rows.org !== undefined) db.run("INSERT INTO documents (key, json) VALUES ('source-organization', ?)", rows.org);
 		});
@@ -190,7 +200,7 @@ const DIRS: [Backend, Backend][] = [["file", "sqlite"], ["file", "doltlite"], ["
 /** The files that make up a source, with content hash and mtime. */
 function sourceState(dir: string, from: Backend): Record<string, string> {
 	const out: Record<string, string> = {};
-	const files = from === "file" ? fs.readdirSync(path.join(dir, "graph")).map((n) => path.join(dir, "graph", n)) : [path.join(dir, storeName(from)), path.join(dir, `${storeName(from)}-wal`)];
+	const files = from === "file" ? (fs.readdirSync(path.join(dir, "graph"), { recursive: true, withFileTypes: true }) as fs.Dirent[]).filter((e) => e.isFile()).map((e) => path.join(e.parentPath, e.name)) : [path.join(dir, storeName(from)), path.join(dir, `${storeName(from)}-wal`)];
 	for (const f of files) {
 		const st = fs.statSync(f, { throwIfNoEntry: false });
 		if (st && !(f.endsWith("-wal") && st.size === 0)) out[path.relative(dir, f)] = `${sha(fs.readFileSync(f))}@${st.mtimeMs}`;
@@ -296,6 +306,8 @@ const rawArb: fc.Arbitrary<Raw> = fc.record(
 		chains: ledgerText,
 		sessions: ledgerText,
 		coverage: ledgerText,
+		reviews: ledgerText,
+		remaps: ledgerText,
 		sources: sourcesText,
 		org: fc.jsonValue().map((v) => JSON.stringify(v)),
 		format: fc.constant('{"version":1}'),
@@ -622,7 +634,7 @@ describe("M marker last and verify", () => {
 		test(`M5 verify on ${to}: an expected id that cannot be encoded unchanged never matches what the driver stored for it`, () => {
 			const dir = mk();
 			seedSql(dir, to, { nodes: [], chains: [], checkpoints: [], coverage: [], sources: [["a\ud800b", '{"id":"x"}']] }, false);
-			const snap: Snapshot = { lineFormat: 1, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [] }, sources: [["a\ud800b", { id: "x" }]], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
+			const snap: Snapshot = { lineFormat: 1, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [], reviews: [], reviewRemaps: [] }, sources: [["a\ud800b", { id: "x" }]], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
 			assert.equal(sqlDifference(path.join(dir, storeName(to)), to, snap), "sources");
 		});
 	}
@@ -693,7 +705,7 @@ describe("L line_format", () => {
 		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "graph", "format.json"), "utf8")), { version: 1 });
 	});
 	test("L2 renderExport copies whatever the snapshot says (a hard-coded constant fails here: the build's constant is 1, so 7 cannot be it)", () => {
-		const snap: Snapshot = { lineFormat: 7, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [] }, sources: [], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
+		const snap: Snapshot = { lineFormat: 7, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [], reviews: [], reviewRemaps: [] }, sources: [], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
 		assert.equal(renderExport(snap).get("graph/format.json"), '{\n\t"version": 7\n}\n');
 	});
 	test("L3 FACT: no valid stamp other than 1 can reach a build whose constant is 1, so a hard-coded value cannot be told apart end to end", () => {

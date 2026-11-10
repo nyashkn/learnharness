@@ -92,6 +92,9 @@ function memoryLedgers() {
 		readChains: () => chains.map((c) => ({ ...c, premises: [...c.premises], provenance: [...c.provenance] })),
 		appendCheckpoint: (c: SessionCheckpoint) => void checkpoints.push(c),
 		readCheckpoints: () => checkpoints.map((c) => ({ ...c })),
+		appendReview: () => {},
+		readReviews: () => [],
+		remapReviewTargets: () => {},
 		// Extraction coverage (vision-extraction-coverage.md) — append-only;
 		// the chat pipeline checkpoints one entry per covered message.
 		appendCoverage: (e) => void coverage.push({ ...e }),

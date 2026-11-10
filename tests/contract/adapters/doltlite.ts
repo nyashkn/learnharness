@@ -21,10 +21,10 @@ import { openGraphStore } from "../../../src/store/sql/graph-store.ts";
 import { acquireStoreLock, type StoreLock } from "../../../src/store/sql/lock.ts";
 import { doltliteDbFile, releaseGraphDb } from "../../../src/store/sql/open.ts";
 import { createSourceOrganizationStore } from "../../../src/store/sql/source-organization-store.ts";
-import type { AdapterFactory, Ledger, StoreBundle } from "../harness.ts";
+import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
 import fileFactory from "./file.ts";
 
-const TABLES: Record<Ledger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints" };
+const TABLES: Record<AnyLedger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" };
 
 /** One real store lock per folder: lock.ts refuses a live pid, our own included, so a reopen reuses the lock while it is held. */
 const locksByDir = new Map<string, StoreLock>();

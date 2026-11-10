@@ -535,7 +535,7 @@ describe("V revision bump and seal only when rows really changed", () => {
 
 describe("F refusal: at open and on every operation", () => {
 	it("F1 a newer line_format or schema_version is refused at open with a StorageVersionError naming file, found and supported", () => {
-		for (const [key, found, supported] of [["line_format", CURRENT_GRAPH_FORMAT_VERSION + 1, CURRENT_GRAPH_FORMAT_VERSION], ["schema_version", 99, 1]] as const) {
+		for (const [key, found, supported] of [["line_format", CURRENT_GRAPH_FORMAT_VERSION + 1, CURRENT_GRAPH_FORMAT_VERSION], ["schema_version", 99, 2 /* the top rung: bump with every new rung */]] as const) {
 			const r = rig(); r.raw.run("UPDATE lh_meta SET value = ? WHERE key = ?", String(found), key); r.close();
 			assert.throws(() => rig({ file: r.file }), (e: unknown) => {
 				assert.ok(e instanceof StorageVersionError); assert.equal(e.name, "StorageVersionError");
@@ -551,7 +551,8 @@ describe("F refusal: at open and on every operation", () => {
 		r.raw.run("UPDATE lh_meta SET value = ? WHERE key = 'line_format'", String(CURRENT_GRAPH_FORMAT_VERSION + 1));
 		r.log.length = 0;
 		const ops: [string, () => unknown][] = [
-			["readNodes", () => r.graph.readNodes()], ["readChains", () => r.graph.readChains()], ["readCheckpoints", () => r.graph.readCheckpoints()], ["readCoverage", () => r.graph.readCoverage()],
+			["readNodes", () => r.graph.readNodes()], ["readChains", () => r.graph.readChains()], ["readCheckpoints", () => r.graph.readCheckpoints()], ["readCoverage", () => r.graph.readCoverage()], ["readReviews", () => r.graph.readReviews()],
+			["appendReview", () => r.graph.appendReview({ id: "c:k", chatId: "c", problemCallId: "k", at: "t", targets: ["n1"], outcome: "solved", rung: null })],
 			["readSources", () => r.graph.readSources()], ["revision", () => r.graph.revision()], ["corruptLines", () => r.graph.corruptLines()], ["sourceOrg.read", () => r.sourceOrg.read()],
 			["appendNode", () => r.graph.appendNode(node("n2", "two"))], ["appendChain", () => r.graph.appendChain({ id: "a", premises: ["n1"], conclusion: "n2", createdAt: "t", provenance: [] })],
 			["appendCoverage", () => r.graph.appendCoverage({ chatId: "c", fp: "f", tokens: 1, foldedAt: "t" })], ["appendCheckpoint", () => r.graph.appendCheckpoint({ chatId: "c", foldedAt: "t" })],

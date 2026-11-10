@@ -79,7 +79,7 @@ describe("SQL adapters: crash atomicity through the GraphStore", () => {
 		const sourceOrg = createSourceOrganizationStore({ core: opened.core, emit: (e) => events.push(e) });
 		return { raw, fd: () => fd, opened, sourceOrg, events, close: () => raw.close() };
 	}
-	const state = (r: ReturnType<typeof open>) => JSON.stringify([r.opened.store.readNodes(), r.opened.store.readChains(), r.opened.store.readCoverage(), r.opened.store.readCheckpoints(), [...r.opened.store.readSources()].sort((a, b) => a.id.localeCompare(b.id)), r.sourceOrg.read(), r.opened.store.revision()]);
+	const state = (r: ReturnType<typeof open>) => JSON.stringify([r.opened.store.readNodes(), r.opened.store.readChains(), r.opened.store.readCoverage(), r.opened.store.readCheckpoints(), r.opened.store.readReviews(), [...r.opened.store.readSources()].sort((a, b) => a.id.localeCompare(b.id)), r.sourceOrg.read(), r.opened.store.revision()]);
 	/** What a separate read-only connection sees: the commit messages and whether the working set is dirty. */
 	function disk(file: string) {
 		const ro = openDoltlite(file, { readOnly: true });
@@ -88,6 +88,7 @@ describe("SQL adapters: crash atomicity through the GraphStore", () => {
 	const unit = (r: ReturnType<typeof open>) => r.opened.store.transact("unit", () => {
 		r.opened.store.appendNode(node("n3", "three"));
 		r.opened.store.appendCoverage({ chatId: "c1", fp: "f", tokens: 1, foldedAt: "t" });
+		r.opened.store.appendReview({ id: "c1:k1", chatId: "c1", problemCallId: "k1", at: "t", targets: ["n1"], outcome: "solved", rung: null });
 		r.opened.store.rewriteLedgers({ nodes: [node("n1", "edited"), node("n2", "two")], chains: [] });
 		r.opened.store.upsertSource({ id: "src_2", filePath: "/x/src_2", importedAt: "t" });
 		r.opened.store.appendSourceUsage("src_1", { startedAt: 1 } as never);

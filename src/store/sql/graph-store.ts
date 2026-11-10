@@ -9,12 +9,14 @@
  * Only the outermost transact bumps, seals and emits; a nested one joins it.
  */
 import { Type } from "typebox";
-import { Value } from "typebox/value";
-import type { CoverageEntry, GraphChain, GraphNode, NotesSource, Position, SessionCheckpoint, ExtractionRunUsage } from "../../core/contracts.ts";
+import { lineCheck } from "../line-check.ts";
+import type { ReviewLine, ReviewRemap, CoverageEntry, GraphChain, GraphNode, NotesSource, Position, SessionCheckpoint, ExtractionRunUsage } from "../../core/contracts.ts";
 import { CURRENT_GRAPH_FORMAT_VERSION } from "../../core/contracts/graph.ts";
 import { ChainLineSchema } from "../../core/contracts/schemas/chain-line.ts";
 import { CheckpointLineSchema } from "../../core/contracts/schemas/checkpoint-line.ts";
 import { CoverageLineSchema } from "../../core/contracts/schemas/coverage-line.ts";
+import { applyReviewRemaps, assertNoRemapCycle } from "../../core/review-remap.ts";
+import { ReviewLineSchema, ReviewRemapLineSchema } from "../../core/contracts/schemas/review-line.ts";
 import { NodeLineSchema } from "../../core/contracts/schemas/node-line.ts";
 import type { GraphStore } from "../../core/ports.ts";
 import { StorageVersionError } from "../../core/contracts/storage.ts";
@@ -90,9 +92,13 @@ const LEDGERS = {
 	chains: { table: "ledger_chains", schema: ChainLineSchema },
 	coverage: { table: "ledger_coverage", schema: CoverageLineSchema },
 	checkpoints: { table: "ledger_checkpoints", schema: CheckpointLineSchema },
+	reviews: { table: "ledger_reviews", schema: ReviewLineSchema },
+	reviewRemaps: { table: "ledger_review_remaps", schema: ReviewRemapLineSchema },
 } as const;
 type LedgerKey = keyof typeof LEDGERS;
 const LEDGER_KEYS = Object.keys(LEDGERS) as LedgerKey[];
+/** The ledgers rewriteLedgers may replace: reviews are not among them (a deleted session keeps its review history). */
+const REWRITABLE = LEDGER_KEYS.filter((k) => k !== "reviews" && k !== "reviewRemaps") as Exclude<LedgerKey, "reviews" | "reviewRemaps">[];
 
 const NotesSourceSchema = Type.Object({ id: Type.String(), filePath: Type.String(), importedAt: Type.String() }, { additionalProperties: true });
 
@@ -198,14 +204,14 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 
 	// ── reads and the identity memory behind rewriteLedgers ──
 	/** The seq of every object a read returned. Stale entries are allowed: rewrite verifies the seq still exists. */
-	const seqOf: Record<LedgerKey, WeakMap<object, number>> = { nodes: new WeakMap(), chains: new WeakMap(), coverage: new WeakMap(), checkpoints: new WeakMap() };
+	const seqOf: Record<LedgerKey, WeakMap<object, number>> = { nodes: new WeakMap(), chains: new WeakMap(), coverage: new WeakMap(), checkpoints: new WeakMap(), reviews: new WeakMap(), reviewRemaps: new WeakMap() };
 
 	function readLedger<T>(key: LedgerKey): T[] {
 		guard();
 		const out: T[] = [];
 		for (const row of db.all<Row>(`SELECT seq, line_json FROM ${LEDGERS[key].table} ORDER BY seq`)) {
 			const parsed = tryParse(row.line_json);
-			if (!parsed.ok || !Value.Check(LEDGERS[key].schema, parsed.value)) continue; // corrupt: skipped here, counted by corruptLines()
+			if (!parsed.ok || !lineCheck(LEDGERS[key].schema, parsed.value)) continue; // corrupt: skipped here, counted by corruptLines()
 			seqOf[key].set(parsed.value as object, row.seq);
 			out.push(parsed.value as T);
 		}
@@ -306,7 +312,7 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 	}
 	const parseSource = (json: string): NotesSource | undefined => {
 		const parsed = tryParse(json);
-		return parsed.ok && Value.Check(NotesSourceSchema, parsed.value) ? (parsed.value as NotesSource) : undefined;
+		return parsed.ok && lineCheck(NotesSourceSchema, parsed.value) ? (parsed.value as NotesSource) : undefined;
 	};
 	const putSource = (id: string, record: unknown, prevCanonical: string | null): void => {
 		const text = JSON.stringify(record);
@@ -323,6 +329,12 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 		readCheckpoints: () => readLedger<SessionCheckpoint>("checkpoints"),
 		appendCoverage: (entry: CoverageEntry) => append("coverage", "appendCoverage", entry),
 		readCoverage: () => readLedger<CoverageEntry>("coverage"),
+		appendReview: (line: ReviewLine) => append("reviews", "appendReview", line),
+		readReviews: () => applyReviewRemaps(readLedger<ReviewLine>("reviews"), readLedger<ReviewRemap>("reviewRemaps")),
+		remapReviewTargets: (from: string, to: string) => {
+			assertNoRemapCycle(readLedger<ReviewRemap>("reviewRemaps"), from, to); // before any write; readLedger guards; a refusal does not poison an enclosing transact
+			append("reviewRemaps", "remapReviewTargets", { from, to });
+		},
 
 		upsertSource(source: NotesSource): void {
 			guard();
@@ -364,7 +376,7 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 			guard();
 			core.bare("auto:rewriteLedgers", () => {
 				let changes = 0;
-				for (const key of LEDGER_KEYS) {
+				for (const key of REWRITABLE) {
 					const kept = next[key];
 					if (kept !== undefined) changes += rewrite(key, kept);
 				}
@@ -384,7 +396,7 @@ export function openGraphStore(opts: OpenGraphOptions): OpenedGraph {
 			for (const key of LEDGER_KEYS) {
 				for (const row of db.all<Row>(`SELECT seq, line_json FROM ${LEDGERS[key].table}`)) {
 					const parsed = tryParse(row.line_json);
-					if (!parsed.ok || !Value.Check(LEDGERS[key].schema, parsed.value)) bad++;
+					if (!parsed.ok || !lineCheck(LEDGERS[key].schema, parsed.value)) bad++;
 				}
 			}
 			return bad;

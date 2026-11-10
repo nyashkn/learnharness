@@ -23,6 +23,7 @@ import type {
 	PlanTree,
 	Position,
 	CoverageEntry,
+	ReviewLine,
 	SessionCheckpoint,
 	TurnUsage,
 	NotesSource,
@@ -98,6 +99,16 @@ export interface GraphStore {
 	 *  checkpoint — "uncovered" is derived from these, never tracked. */
 	appendCoverage(entry: CoverageEntry): void;
 	readCoverage(): CoverageEntry[];
+	/** The review ledger (R2): one line per concluded practice problem, append-only, joins `transact`.
+	 *  readReviews returns the valid lines in APPEND order, never sorted (replay folds in ledger order).
+	 *  Not part of rewriteLedgers: a deleted session keeps its review history. */
+	appendReview(line: ReviewLine): void;
+	readReviews(): ReviewLine[];
+	/** Append one remap record: reviews of `from` now count for `to` (a merged node follows it). Joins `transact` like
+	 *  appendReview. Stored review lines keep their original targets; readReviews resolves them through the remaps
+	 *  (chains followed, last remap of a `from` wins, targets deduped). Throws, writing nothing, when from -> to would
+	 *  make a cycle; readReviews throws too if a cycle is ever on disk. */
+	remapReviewTargets(from: string, to: string): void;
 
 	/** Append one cluster-naming run's usage (graph-global money channel) —
 	 *  idempotent per startedAt. */

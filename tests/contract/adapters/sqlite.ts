@@ -11,10 +11,10 @@ import { createSourceOrganizationStore } from "../../../src/store/sql/source-org
 import { openGraphStore } from "../../../src/store/sql/graph-store.ts";
 import type { SqlDriver } from "../../../src/store/sql/driver.ts";
 import { openNodeSqlite } from "../../../src/store/sql/drivers/node-sqlite.ts";
-import type { AdapterFactory, Ledger, StoreBundle } from "../harness.ts";
+import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
 import fileFactory from "./file.ts";
 
-const TABLES: Record<Ledger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints" };
+const TABLES: Record<AnyLedger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" };
 const driversByDir = new Map<string, SqlDriver[]>();
 
 const factory: AdapterFactory = {

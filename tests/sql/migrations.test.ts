@@ -455,14 +455,17 @@ for (const [engine, open] of engines) describe(`test 1 (${engine}): fresh equals
 		const db = open();
 		migrate(db, graphOpts());
 		assert.equal(tight(schemaDump(db)), tight(snapshot));
-		assert.equal(meta(db).schema_hash, sha(snapshot));
+		// DoltLite regenerates the CREATE text of tables committed by an earlier rung (see the FACT above), and the runner hashes inside the last rung's
+		// transaction: with two or more rungs its hash is not sha(snapshot). It is informational (written, never checked at open), so only its shape is asserted there.
+		if (engine === "sqlite") assert.equal(meta(db).schema_hash, sha(snapshot));
+		else assert.match(meta(db).schema_hash!, /^[0-9a-f]{64}$/);
 		assert.equal(meta(db).line_format, String(CURRENT_GRAPH_FORMAT_VERSION));
 		assert.equal(meta(db).store_kind, "graph");
 	});
-	test("rung 1 is the architecture DDL: the six graph tables plus lh_meta", () => {
+	test("the snapshot is the six rung-1 graph tables plus lh_meta, plus rung 2's ledger_reviews and ledger_review_remaps", () => {
 		assert.deepEqual(
 			snapshot.split("\n").filter(Boolean).map((l) => /CREATE TABLE (\w+)/.exec(l)?.[1]),
-			["documents", "ledger_chains", "ledger_checkpoints", "ledger_coverage", "ledger_nodes", "lh_meta", "sources"],
+			["documents", "ledger_chains", "ledger_checkpoints", "ledger_coverage", "ledger_nodes", "ledger_review_remaps", "ledger_reviews", "lh_meta", "sources"],
 		);
 	});
 });
@@ -514,6 +517,18 @@ describe("test 2: every recorded shape migrates and keeps its rows", () => {
 			assert.equal(meta(db).revision, "7");
 			assert.equal(tight(schemaDump(db)), tight(fs.readFileSync(path.join(GRAPH_DIR, "snapshot.sql"), "utf8")));
 		}
+	});
+	for (const [engine, open] of engines) test(`graph v1 -> v2 adds an empty ledger_reviews and keeps every v1 row (${engine})`, () => {
+		const db = open();
+		db.exec(fs.readFileSync(path.join(GRAPH_DIR, "shapes", "v1.sql"), "utf8"));
+		const tables = seedRows(db, "graph", 1, CURRENT_GRAPH_FORMAT_VERSION);
+		assert.ok(!tables.includes("ledger_reviews"), "v1 has no review ledger");
+		const before = Object.fromEntries(tables.map((t) => [t, rowsOf(db, t)]));
+		migrate(db, graphOpts(2));
+		assert.equal(versionOf(db), 2);
+		assert.deepEqual(db.all("SELECT * FROM ledger_reviews"), []);
+		assert.deepEqual(db.all<{ name: string }>("SELECT name FROM pragma_table_info('ledger_reviews') ORDER BY cid").map((c) => c.name), ["seq", "line_json"]);
+		for (const t of tables.filter((x) => x !== "lh_meta")) assert.deepEqual(rowsOf(db, t), before[t], t);
 	});
 	test("fake ladders: shape recorded at any v migrates to any higher top", () => {
 		fc.assert(

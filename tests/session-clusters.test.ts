@@ -54,6 +54,9 @@ function fakeStores(
 		readNodes: () => nodes,
 		readChains: () => chains,
 		readCheckpoints: () => [],
+		appendReview: () => {},
+		readReviews: () => [],
+		remapReviewTargets: () => {},
 		readCoverage: () => [],
 		readSources: () =>
 			(over.sources ?? []).map((s) => ({ ...s, extractions: [] }) as unknown as NotesSource),
