@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { GraphNode } from "../src/core/contracts.ts";
 import type { GraphStore } from "../src/core/ports.ts";
+import { FACTORY_SETTINGS } from "../src/core/settings.ts";
 import { reviewSummary } from "../src/server/review.ts";
 import { createGraphStore } from "../src/store/graph.ts";
 import { openNodeSqlite } from "../src/store/sql/drivers/node-sqlite.ts";
@@ -31,8 +32,8 @@ function fill(graph: GraphStore): void {
 function time(label: string, graph: GraphStore): void {
 	const now = new Date(Date.UTC(2026, 2, 1, 12));
 	const reads = [0, 0, 0].map(() => { const t = performance.now(); graph.readReviews(); return performance.now() - t; });
-	const runs = [0, 0, 0].map(() => { const t = performance.now(); reviewSummary(now, graph); return performance.now() - t; });
-	const s = reviewSummary(now, graph);
+	const runs = [0, 0, 0].map(() => { const t = performance.now(); reviewSummary(now, graph, FACTORY_SETTINGS.review); return performance.now() - t; });
+	const s = reviewSummary(now, graph, FACTORY_SETTINGS.review);
 	console.log(`${label}: readReviews ${Math.min(...reads).toFixed(1)} ms; due-queue read (readReviews + graph + queue fold) ${Math.min(...runs).toFixed(1)} ms best of 3 (due ${s.dueCount}, picks ${s.picks.length}, ${PROPOSITIONS * REVIEWS_EACH} lines)`);
 }
 

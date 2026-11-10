@@ -7,6 +7,9 @@ import { Button } from "@/components/ui/button";
 import { joinDictation, useDictationTarget } from "@/components/dictation";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { PathInput } from "@/components/path-input";
+import { ProblemTally } from "@/components/problem-tally";
+import { ConfidenceSlider } from "@/components/confidence-slider";
+import { CONFIDENCE_STOPS, DEFAULT_CONFIDENCE_INDEX, type PracticeTally } from "@/src/core";
 import { cn } from "@/lib/utils";
 
 /**
@@ -39,7 +42,7 @@ export interface PracticeDockProps {
 	expanded: boolean;
 	onExpand: () => void;
 	/** text — POST {type:"thinking"} (one lane; the register is read from the text). */
-	onSubmit: (text: string) => void;
+	onSubmit: (text: string, confidence: number) => void;
 	/** Escape in the thinking field stops dictation (threaded from the page). */
 	onEscape?: () => void;
 	/** Compaction is running for this chat (owner round 14): the thinking
@@ -47,14 +50,18 @@ export interface PracticeDockProps {
 	 *  and say so in the hint row. The server registry is the real gate;
 	 *  this is the affordance. */
 	compactionRunning?: boolean;
+	/** The session's problem counter (2026-11-03), shown in the Problem
+	 *  eyebrow of the expanded form. */
+	tally?: PracticeTally;
 }
 
-export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmit, onEscape, compactionRunning = false }: PracticeDockProps) {
+export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmit, onEscape, compactionRunning = false, tally }: PracticeDockProps) {
 	const [thinking, setThinking] = useState("");
 	// Ref MIRRORS the field ("nothing gets lost", the question-dock
 	// discipline): a submit resuming after `await finishDictation()` reads
 	// the tail, never a stale closure.
 	const thinkingRef = useRef("");
+	const [confIdx, setConfIdx] = useState<number>(DEFAULT_CONFIDENCE_INDEX);
 
 	useDictationTarget(
 		useCallback(
@@ -74,7 +81,7 @@ export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmi
 		if (text.length === 0) return;
 		thinkingRef.current = "";
 		setThinking("");
-		onSubmit(text);
+		onSubmit(text, CONFIDENCE_STOPS[confIdx]!);
 	};
 
 	/* ENTER SUBMITS FROM ANYWHERE (owner round 6, 2026-10-05): dictation
@@ -107,7 +114,10 @@ export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmi
 			    markdown + LaTeX rendered, capped by the measured column
 			    (--dock-max-h; the old fixed 40vh cut long problems short). */}
 			<div data-dock-scroll-area="" className="max-h-[var(--dock-max-h,40vh)] overflow-y-auto px-4 pt-3 pb-2">
-				<div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Problem</div>
+				<div className="mb-1 flex items-center justify-between gap-2">
+					<span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Problem</span>
+					{tally && <ProblemTally tally={tally} side="top" />}
+				</div>
 				<div className="lh-prose text-[15px]">
 					<ToolContentResponse>{input.statement}</ToolContentResponse>
 				</div>
@@ -149,6 +159,14 @@ export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmi
 						"field-sizing-content lh-input max-h-64 min-h-16 w-full resize-none bg-transparent px-2.5 pb-2 outline-none placeholder:text-muted-foreground",
 					)}
 				/>
+				<div className="px-2.5 pb-1">
+					<ConfidenceSlider
+						index={confIdx}
+						onIndexChange={setConfIdx}
+						ariaLabel="Confidence — the probability your thinking reaches the right answer"
+						title="How likely your thinking is right — 50% is a coin flip."
+					/>
+				</div>
 				{/* The submit row (owner round 4, 2026-10-05): IDENTICAL to the
 				    question dock's — hint left, the SAME Button (h-9, px-3.5),
 				    one p-1 row. Corner radii concentric: shell 16 − m-1.5 (6) =

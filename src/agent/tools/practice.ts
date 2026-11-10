@@ -24,6 +24,7 @@ import { grepTool } from "./grep.ts";
 import { jobTools, type JobToolContext } from "./jobs.ts";
 import { proberGraphTools, type GraphToolContext } from "./graph.ts";
 import { activeProblemOf } from "../../core/native-messages.ts";
+import { CONFIDENCE_STOPS } from "../../core/question-core.ts";
 import type { LhMessage } from "../../core/native-messages.ts";
 import { concludeResult, invalidInputResult, problemResult } from "../tool-execute.ts";
 import { healEncodedArguments, healToolRecord } from "./heal.ts";
@@ -77,6 +78,13 @@ export const problemInputObject = Type.Object({
 	}),
 	mode: Type.Union([Type.Literal("recall"), Type.Literal("discrimination"), Type.Literal("composition")], {
 		description: "REQUIRED — the demand mode: recall, discrimination, or composition (bare words, no quotes).",
+	}),
+	surface: Type.String({
+		maxLength: 200,
+		description:
+			"REQUIRED — one line naming the problem's situation class and its setup structure (e.g. \"projectile launched up an incline, find the range\" " +
+				"or \"struct held in a class field and an auto-property, writes through each\"): " +
+			"the kind of situation, never the target proposition. Recorded so later sessions pose fresh surfaces.",
 	}),
 	target: Type.Optional(
 		Type.Array(Type.String(), {
@@ -139,6 +147,14 @@ export function problemTool(
 					"a problem is already active — call conclude on it before posing the next one",
 				]);
 			}
+			// ONE-TARGET RECALL (owner, 2026-11-03): a recall problem exercises
+			// exactly one proposition — the doctrine's size caps; bundling lets
+			// one rating land on several targets.
+			if (input.mode === "recall" && new Set(input.target ?? []).size > 1) {
+				return invalidInputResult("problem", [
+					"a recall problem exercises exactly one target — tag one proposition, or pose discrimination or composition for several",
+				]);
+			}
 			// TARGET VALIDATION (owner round 9, round 12): against the WHOLE
 			// graph, and ONLY when targets are present — absent means an
 			// untagged problem (topic sessions, owner round 12), which poses
@@ -192,6 +208,12 @@ export const concludeInputObject = Type.Object({
 		{ description: "REQUIRED — the miss classification: cue, discrimination, execution, careless, or structural — or null = no miss (bare, no quotes)." },
 	),
 	retest: Type.Boolean({ description: "REQUIRED — true marks the problem for a fresh-surface retest before the session ends." }),
+	confidence: Type.Optional(
+		Type.Union(
+			CONFIDENCE_STOPS.map((stop) => Type.Literal(stop)),
+			{ description: "The learner's confidence from their latest thinking submission on this problem; omit if they gave none." },
+		),
+	),
 });
 
 export type ConcludeInput = Static<typeof concludeInputObject>;

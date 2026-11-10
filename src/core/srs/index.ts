@@ -5,3 +5,7 @@ export type { ReviewEvent, ReviewOutcome, ReviewRung, SchedulerSettings } from "
 export { practiceReviewsOf } from "./practice.ts";
 export { FACTORY_NEW_PER_DAY, REVIEW_DAY_START_HOUR, REVIEW_SESSION_SIZE, reviewDayStart, reviewQueue } from "./queue.ts";
 export type { ReviewQueue, ReviewQueueInput } from "./queue.ts";
+export { reviewDayKey, reviewSchedule } from "./schedule.ts";
+export type { ReviewCardFacts, ReviewFutureDay, ReviewPastDay, ReviewSchedule } from "./schedule.ts";
+export { REVIEW_BRIEF_SURFACES, formatReviewBrief, reviewBriefOf } from "./brief.ts";
+export type { ReviewBriefEntry, ReviewBriefStatus } from "./brief.ts";

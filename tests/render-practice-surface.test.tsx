@@ -18,6 +18,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
 
 import { PracticeDock } from "../components/practice-dock.tsx";
+import { ProblemTally } from "../components/problem-tally.tsx";
 import { ConcludeCard, ProblemCard, ThinkingCard } from "../components/practice-cards.tsx";
 import { GraphContextCard } from "../components/graph-context-card.tsx";
 import { newGraphContextMessage } from "../src/core/native-messages.ts";
@@ -57,6 +58,9 @@ describe("PracticeDock", () => {
 		assert.match(html, /--dock-max-h/);
 		assert.match(html, /YOUR THINKING/);
 		assert.match(html, /data-testid="practice-send"/);
+		// lh-g5b: the quiz's confidence slider, resting at the default 50.
+		assert.match(html, /data-testid="confidence-slider"/);
+		assert.match(html, /data-testid="confidence-value"[^>]*>50%</);
 		assert.ok(!html.includes("practice-nudge") && !html.includes("practice-commit"), "the two-lane buttons are gone");
 		// The buttons carry their lane in the disabled gate; both start
 		// disabled (empty field).
@@ -260,5 +264,31 @@ describe("GraphContextCard", () => {
 			[{ id: "n1", name: "A", statement: "S." }], [],
 		) as unknown as LhMessage]);
 		assert.equal((view[0]!.parts[0] as { type: string }).type, "data-graph-context");
+	});
+});
+
+// ── the problem counter ──────────────────────────────────────────────────────
+
+describe("ProblemTally", () => {
+	it("renders the muted total, then the three outcome counts in their colours", () => {
+		const html = renderToStaticMarkup(<ProblemTally tally={{ solved: 3, hinted: 1, unsolved: 2 }} />);
+		assert.match(html, /data-testid="problem-tally"/);
+		assert.match(html, /6 done ·/);
+		assert.match(html, /data-bucket="solved" class="text-green-500">3</);
+		assert.match(html, /data-bucket="hinted" class="text-amber-500">1</);
+		assert.match(html, /data-bucket="unsolved" class="text-red-500">2</);
+		assert.match(html, /aria-label="6 done: Solved 3 · With hints 1 · Not solved 2"/);
+	});
+
+	it("zeros show: a fresh session reads 0 done · 0 0 0", () => {
+		const html = renderToStaticMarkup(<ProblemTally tally={{ solved: 0, hinted: 0, unsolved: 0 }} />);
+		assert.match(html, /0 done ·/);
+		assert.equal((html.match(/data-bucket="\w+" class="[^"]+">0</g) ?? []).length, 3);
+	});
+
+	it("the dock's Problem eyebrow carries the counter when given one", () => {
+		const props = { problemCallId: "call_p1", input: { statement: "S" }, expanded: true, onExpand: () => {}, onSubmit: () => {} };
+		assert.match(renderToStaticMarkup(<PracticeDock {...props} tally={{ solved: 1, hinted: 0, unsolved: 0 }} />), /problem-tally/);
+		assert.ok(!renderToStaticMarkup(<PracticeDock {...props} />).includes("problem-tally"));
 	});
 });
