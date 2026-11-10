@@ -146,7 +146,7 @@ describe("chat store on the CAS", () => {
 		return file;
 	};
 	const raw = (file: string) => JSON.parse(fs.readFileSync(file, "utf8")) as { imageSnapshots: Record<string, Record<string, unknown>> };
-	const failing: BlobStore = { put: () => { throw new Error("disk full"); }, get: () => undefined };
+	const failing: BlobStore = { put: () => { throw new Error("disk full"); }, get: () => undefined, sweep: () => 0 };
 
 	test("bytes before reference: a failing put leaves the chat JSON byte-identical (new snapshot and legacy save)", () => {
 		const { chatsDir, store } = setup(failing);
@@ -272,5 +272,127 @@ describe("chat store on the CAS", () => {
 			),
 			{ numRuns: 15 },
 		);
+	});
+});
+
+describe("deleteChat sweeps unreferenced blobs (lh-kha)", () => {
+	const mk = () => {
+		const dataDir = freshDir();
+		const chatsDir = path.join(dataDir, "chats");
+		fs.mkdirSync(chatsDir);
+		const blobsFile = path.join(dataDir, "blobs.sqlite");
+		return { dataDir, chatsDir, blobsFile, store: createChatStore(chatsDir, { dataDir }), raw: createBlobStore(blobsFile) };
+	};
+	const casHashes = (file: string) => (fs.existsSync(file) ? sqlRows<{ hash: string }>(file, "SELECT hash FROM cas_objects").map((r) => r.hash).sort() : []);
+	const imgOf = (bytes: Uint8Array): [string, ImageSnapshot] => [sha(bytes), { mimeType: "image/png", data: b64(bytes), width: 1, height: 1 }];
+	// a small pool so chats share images
+	const POOL: Uint8Array[] = [1, 2, 3, 4].map((i) => new Uint8Array([i, i * 7, 9]));
+	const pool = (i: number) => POOL[i] as Uint8Array;
+
+	test("model run: save-with-image / delete-chat / crashed-save never lose a referenced blob", () => {
+		type Model = { chats: Map<string, Set<string>> };
+		type Real = ReturnType<typeof mk> & { ids: string[] };
+		const referenced = (m: Model) => new Set([...m.chats.values()].flatMap((s) => [...s]));
+		class Save implements fc.Command<Model, Real> {
+			constructor(readonly chat: number, readonly img: number) {}
+			check = (m: Model) => m.chats.size > 0;
+			run(m: Model, r: Real) {
+				const id = r.ids[this.chat % r.ids.length] as string;
+				if (!m.chats.has(id)) return;
+				const [h, snap] = imgOf(pool(this.img));
+				r.store.saveImageSnapshot(id, h, snap);
+				m.chats.get(id)?.add(h);
+			}
+			toString = () => `save(chat${this.chat},img${this.img})`;
+		}
+		class Crash implements fc.Command<Model, Real> {
+			constructor(readonly img: number) {}
+			check = () => true;
+			run(_m: Model, r: Real) {
+				r.raw.put(pool(this.img)); // bytes committed, JSON never written
+			}
+			toString = () => `crashedSave(img${this.img})`;
+		}
+		class Del implements fc.Command<Model, Real> {
+			constructor(readonly chat: number) {}
+			check = () => true;
+			run(m: Model, r: Real) {
+				const id = r.ids[this.chat % r.ids.length] as string;
+				const existed = m.chats.delete(id);
+				assert.equal(r.store.deleteChat(id), existed);
+				if (existed) assert.deepEqual(casHashes(r.blobsFile), [...referenced(m)].sort()); // (b) exact after a real delete
+				for (const [cid, hs] of m.chats) for (const h of hs) assert.equal(r.store.getChat(cid)?.imageSnapshots?.[h]?.data, b64(pool(POOL.findIndex((p) => sha(p) === h)))); // (a)
+			}
+			toString = () => `delete(chat${this.chat})`;
+		}
+		const idx = fc.integer({ min: 0, max: 2 });
+		const img = fc.integer({ min: 0, max: POOL.length - 1 });
+		fc.assert(
+			fc.property(
+				fc.commands([fc.tuple(idx, img).map(([c, i]) => new Save(c, i)), img.map((i) => new Crash(i)), idx.map((c) => new Del(c))], { maxCommands: 20 }),
+				(cmds) => {
+					const e = mk();
+					const ids = [0, 1, 2].map((i) => e.store.createChat(`c${i}`).id);
+					const real: Real = { ...e, ids };
+					fc.modelRun(() => ({ model: { chats: new Map(ids.map((id) => [id, new Set<string>()])) }, real }), cmds);
+				},
+			),
+			{ numRuns: 40 },
+		);
+	});
+
+	const orphanThenDelete = (breakChats: (e: ReturnType<typeof mk>) => void) => {
+		const e = mk();
+		const keep = e.store.createChat("keep");
+		const gone = e.store.createChat("gone");
+		const [h, snap] = imgOf(pool(0));
+		e.store.saveImageSnapshot(keep.id, h, snap);
+		e.raw.put(pool(1)); // orphan
+		breakChats(e);
+		const errs: string[] = [];
+		const orig = console.error;
+		console.error = (...a: unknown[]) => void errs.push(a.join(" "));
+		try {
+			assert.equal(e.store.deleteChat(gone.id), true);
+		} finally {
+			console.error = orig;
+		}
+		return { e, errs, h };
+	};
+
+	test("regression (shrunk counterexample): crashedSave then delete-chat leaves no orphan", () => {
+		const e = mk();
+		const c = e.store.createChat("c");
+		e.raw.put(pool(0));
+		e.store.deleteChat(c.id);
+		assert.deepEqual(casHashes(e.blobsFile), []);
+	});
+
+	test("an unparseable chat file skips the sweep, deleteChat still succeeds", () => {
+		const { e, errs } = orphanThenDelete((e) => fs.writeFileSync(path.join(e.chatsDir, "bad.json"), "{not json"));
+		assert.equal(casHashes(e.blobsFile).length, 2);
+		assert.equal(errs.filter((m) => m.includes("sweep")).length, 1);
+	});
+
+	test("a chat file stamped newer than this build skips the sweep", () => {
+		const { e, errs } = orphanThenDelete((e) => fs.writeFileSync(path.join(e.chatsDir, "future.json"), JSON.stringify({ id: "future", version: 9999, imageSnapshots: {} })));
+		assert.equal(casHashes(e.blobsFile).length, 2);
+		assert.equal(errs.filter((m) => m.includes("sweep")).length, 1);
+	});
+
+	test("a legacy inline entry counts as referenced; a missing blobs.sqlite is not created", () => {
+		const e = mk();
+		const a = e.store.createChat("a");
+		const b = e.store.createChat("b");
+		assert.equal(e.store.deleteChat(b.id), true);
+		assert.equal(fs.existsSync(e.blobsFile), false);
+		e.raw.put(pool(1));
+		const [h] = imgOf(pool(1));
+		const file = path.join(e.chatsDir, `${a.id}.json`);
+		const rec = JSON.parse(fs.readFileSync(file, "utf8"));
+		fs.writeFileSync(file, JSON.stringify({ ...rec, imageSnapshots: { [h]: { mimeType: "image/png", data: b64(pool(1)), width: 1, height: 1 } } }));
+		const c = e.store.createChat("c");
+		assert.equal(e.store.deleteChat(c.id), true);
+		assert.deepEqual(casHashes(e.blobsFile), [h]);
 	});
 });

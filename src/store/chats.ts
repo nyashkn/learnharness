@@ -261,10 +261,27 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 		try {
 			fs.unlinkSync(chatFile(id));
 			removeLeftoverTemps(chatFile(id));
-			emit("chats-changed", {}); // only a real removal — the present-entry law
-			return true;
 		} catch {
 			return false; // never existed, already deleted, or unreadable — same answer
+		}
+		sweepBlobs();
+		emit("chats-changed", {}); // only a real removal — the present-entry law
+		return true;
+	}
+
+	/** Delete CAS rows no chat references (orphans of a crashed save, a deleted chat's images). Synchronous under the store lock beforeWrite took,
+	 *  so no save in this process interleaves. Fail closed: any unreadable or newer file means delete nothing. Never throws. */
+	function sweepBlobs(): void {
+		try {
+			const keep = new Set<string>();
+			for (const f of fs.readdirSync(chatsDir).filter((f) => f.endsWith(".json"))) {
+				const parsed = JSON.parse(fs.readFileSync(path.join(chatsDir, f), "utf-8")) as { version?: unknown; imageSnapshots?: Record<string, unknown> };
+				if (typeof parsed.version === "number" && parsed.version > CURRENT_CHAT_VERSION) throw new Error(`${f} is stamped version ${parsed.version}`);
+				for (const h of Object.keys(parsed.imageSnapshots ?? {})) keep.add(h);
+			}
+			blobs.sweep(keep);
+		} catch (err) {
+			console.error("[chats] blob sweep skipped (nothing deleted):", err);
 		}
 	}
 
