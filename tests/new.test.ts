@@ -70,6 +70,10 @@ function tree(dir: string): Record<string, string> {
 
 const indexOf = (dir: string, kind = "graph") => fs.readFileSync(path.join(dir, MIG, kind, "index.ts"), "utf8");
 const exists = (dir: string, rel: string) => fs.existsSync(path.join(dir, rel));
+/** The graph ladder's top version, read from the fixture's rung file names (the repo's real ladder grows). */
+const graphTop = (dir: string) =>
+	Math.max(...fs.readdirSync(path.join(dir, MIG, "graph")).flatMap((f) => /^(\d{4})_.+\.ts$/.exec(f)?.[1] ?? []).map(Number));
+const pad = (v: number) => String(v).padStart(4, "0");
 
 /** A rung file that does one literal statement. */
 const rungWith = (version: number, name: string, sql: string) =>
@@ -85,23 +89,24 @@ describe("1: rung ladder", () => {
 			fc.asyncProperty(fc.uniqueArray(name, { minLength: 1, maxLength: 3 }), async (names) => {
 				const dir = fixture();
 				const prior = lockOf(dir);
-				const top = 1 + names.length;
+				const start = graphTop(dir);
+				const top = start + names.length;
 				const ids: string[] = [];
 				for (const [i, n] of names.entries()) {
 					const r = await inProcess(dir, ["rung", n]);
 					assert.equal(r.code, 0, r.err.join("\n"));
-					const version = 2 + i;
-					const base = `${String(version).padStart(4, "0")}_${n}`;
+					const version = start + 1 + i;
+					const base = `${pad(version)}_${n}`;
 					ids.push(`rung${version}`);
 					assert.ok(exists(dir, `${MIG}/graph/${base}.ts`));
 					assert.ok(indexOf(dir).includes(`import rung${version} from "./${base}";`));
 				}
-				assert.ok(indexOf(dir).includes(`export const graphRungs: readonly Rung[] = [${["rung1", ...ids].join(", ")}];`));
+				assert.ok(indexOf(dir).includes(`export const graphRungs: readonly Rung[] = [${[...Array.from({ length: start }, (_, i) => `rung${i + 1}`), ...ids].join(", ")}];`));
 				const lock = lockOf(dir);
-				assert.deepEqual(Object.keys(lock).sort(), [...Object.keys(prior), ...names.map((_, i) => `graph/${String(2 + i).padStart(4, "0")}_${names[i]}.ts`)].sort());
+				assert.deepEqual(Object.keys(lock).sort(), [...Object.keys(prior), ...names.map((_, i) => `graph/${pad(start + 1 + i)}_${names[i]}.ts`)].sort());
 				for (const k of Object.keys(prior)) assert.equal(lock[k], prior[k], `pre-existing ${k}`);
 				for (const [i, n] of names.entries()) {
-					const f = `${MIG}/graph/${String(2 + i).padStart(4, "0")}_${n}.ts`;
+					const f = `${MIG}/graph/${pad(start + 1 + i)}_${n}.ts`;
 					assert.equal(lock[`graph/${path.basename(f)}`], sha(fs.readFileSync(path.join(dir, f))));
 				}
 				const shapeFiles = fs.readdirSync(path.join(dir, MIG, "graph", "shapes")).sort();
@@ -115,19 +120,20 @@ describe("1: rung ladder", () => {
 // ---- 2. snapshot ------------------------------------------------------------------------------
 
 describe("2: snapshot", () => {
-	it("a refreshed rung rewrites snapshot.sql, shapes/v2.sql and its lock value", () => {
+	it("a refreshed rung rewrites snapshot.sql, its shapes/v<N>.sql and its lock value", () => {
 		const dir = fixture();
+		const next = graphTop(dir) + 1;
 		const original = fs.readFileSync(path.join(dir, MIG, "graph/snapshot.sql"), "utf8");
 		assert.equal(cli(dir, "rung", "zed").code, 0);
-		const rungFile = path.join(dir, MIG, "graph/0002_zed.ts");
-		fs.writeFileSync(rungFile, rungWith(2, "zed", "CREATE TABLE zed (a TEXT)"));
+		const rungFile = path.join(dir, MIG, `graph/${pad(next)}_zed.ts`);
+		fs.writeFileSync(rungFile, rungWith(next, "zed", "CREATE TABLE zed (a TEXT)"));
 		const r = cli(dir, "rung", "zed");
 		assert.equal(r.code, 0, r.err);
 		const snapshot = fs.readFileSync(path.join(dir, MIG, "graph/snapshot.sql"), "utf8");
 		assert.ok(snapshot.includes("CREATE TABLE zed (a TEXT);\n"));
 		for (const line of original.split("\n").filter(Boolean)) assert.ok(snapshot.includes(`${line}\n`), line);
-		assert.equal(fs.readFileSync(path.join(dir, MIG, "graph/shapes/v2.sql"), "utf8"), snapshot);
-		assert.equal(lockOf(dir)["graph/0002_zed.ts"], sha(fs.readFileSync(rungFile)));
+		assert.equal(fs.readFileSync(path.join(dir, MIG, `graph/shapes/v${next}.sql`), "utf8"), snapshot);
+		assert.equal(lockOf(dir)[`graph/${pad(next)}_zed.ts`], sha(fs.readFileSync(rungFile)));
 	});
 });
 
@@ -201,9 +207,10 @@ describe("5: seeds kind has no snapshot", () => {
 describe("6: failed generation", () => {
 	it("bad SQL on refresh exits 1 and leaves index, snapshot, shapes and lock unchanged", () => {
 		const dir = fixture();
+		const next = graphTop(dir) + 1;
 		assert.equal(cli(dir, "rung", "zed").code, 0);
-		const rungFile = `${MIG}/graph/0002_zed.ts`;
-		fs.writeFileSync(path.join(dir, rungFile), rungWith(2, "zed", "CREATE TABL zed (a TEXT)"));
+		const rungFile = `${MIG}/graph/${pad(next)}_zed.ts`;
+		fs.writeFileSync(path.join(dir, rungFile), rungWith(next, "zed", "CREATE TABL zed (a TEXT)"));
 		const before = tree(dir);
 		const r = cli(dir, "rung", "zed");
 		assert.equal(r.code, 1);
@@ -217,7 +224,7 @@ describe("6: failed generation", () => {
 		const before = tree(dir);
 		const r = cli(dir, "rung", "foo");
 		assert.equal(r.code, 1);
-		assert.equal(exists(dir, `${MIG}/graph/0002_foo.ts`), false);
+		assert.equal(exists(dir, `${MIG}/graph/${pad(graphTop(dir) + 1)}_foo.ts`), false);
 		assert.deepEqual(tree(dir), before);
 	});
 });
