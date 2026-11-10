@@ -11,8 +11,10 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, describe, test } from "node:test";
+import { after, afterEach, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
+import v8 from "node:v8";
+import vm from "node:vm";
 import fc from "fast-check";
 import { runCli } from "../scripts/lh-storage";
 import { StorageVersionError } from "../src/store/graph-format";
@@ -35,12 +37,40 @@ const mk = (): string => {
 	return d;
 };
 after(() => fs.rmSync(root, { recursive: true, force: true }));
+// lh-8jh: the DoltLite addon frees a closed store's fds only after a GC and a later event-loop turn. This file opens
+// hundreds of stores, so a 1024-fd Linux sandbox hit EMFILE late in the run. Collect between tests (the contract adapter does the same).
+v8.setFlagsFromString("--expose-gc");
+const collect = vm.runInNewContext("gc") as () => void;
+afterEach(async () => {
+	collect();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+});
 
 let clock = Date.UTC(2026, 0, 1);
 /** Every call a new stamp: two fresh runs in one folder never share a backup dir. */
 const now = (): Date => new Date((clock += 1000));
 
-const mig = (dir: string, to: Backend, opts: Parameters<typeof migrateBackend>[2] = {}) => migrateBackend(dir, to, opts);
+/** A migration INTO DoltLite runs as if on macOS arm64, the one host the app enables DoltLite on; the engine itself runs on every CI OS, and B22 tests the refusal elsewhere. */
+let addonLoaded = false;
+function asDoltliteHost<T>(fn: () => T): T {
+	// The addon picks its prebuild from process.platform at first load, so load it under the real host before faking.
+	if (!addonLoaded) {
+		openDoltlite(":memory:").close();
+		addonLoaded = true;
+	}
+	const real = { platform: process.platform, arch: process.arch };
+	const set = (platform: string, arch: string) => {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		Object.defineProperty(process, "arch", { value: arch, configurable: true });
+	};
+	set("darwin", "arm64");
+	try {
+		return fn();
+	} finally {
+		set(real.platform, real.arch);
+	}
+}
+const mig = (dir: string, to: Backend, opts: Parameters<typeof migrateBackend>[2] = {}) => (to === "doltlite" ? asDoltliteHost(() => migrateBackend(dir, to, opts)) : migrateBackend(dir, to, opts));
 const sha = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
 const storeName = (b: "sqlite" | "doltlite") => (b === "sqlite" ? "graph.sqlite" : "graph.doltlite");
 const openRO = (file: string, b: "sqlite" | "doltlite"): SqlDriver => (b === "sqlite" ? openNodeSqlite(file, { readOnly: true }) : openDoltlite(file, { readOnly: true }));
@@ -529,6 +559,11 @@ describe("C crash at every checkpoint, then resume", () => {
 				`import fs from "node:fs";
 const [, , mod, dir, to, ready] = process.argv;
 const { migrateBackend } = await import(mod);
+if (to === "doltlite") { // see asDoltliteHost: load the addon under the real host, then fake macOS arm64
+	const { openDoltlite } = await import(new URL("./sql/drivers/doltlite.ts", mod).href);
+	openDoltlite(":memory:").close();
+	for (const [k, v] of [["platform", "darwin"], ["arch", "arm64"]]) Object.defineProperty(process, k, { value: v });
+}
 migrateBackend(dir, to, { checkpoint(n) { if (n === "after:chains") { fs.writeFileSync(ready, "x"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000); } } });
 `,
 			);
@@ -897,12 +932,13 @@ describe("B export", () => {
 });
 
 describe("B CLI", () => {
-	const run = (argv: string[]) => {
+	const runRaw = (argv: string[]) => {
 		const out: string[] = [];
 		const err: string[] = [];
 		const code = runCli(argv, { out: (l) => out.push(l), err: (l) => err.push(l) });
 		return { code, out, err };
 	};
+	const run = (argv: string[]) => (argv[argv.indexOf("--to") + 1] === "doltlite" ? asDoltliteHost(() => runRaw(argv)) : runRaw(argv));
 	test("B8 migrate and export: exit 0, summary printed, files made", () => {
 		const dir = mk();
 		writeFolder(dir, DIRTY);
@@ -1009,7 +1045,7 @@ describe("B CLI", () => {
 					else seedSql(dir, "sqlite", ROWS, true);
 					const before = tree(dir);
 					const marker = readMarkerBytes(dir);
-					const r = run(["migrate", "--to", "doltlite", "--data-dir", dir]);
+					const r = runRaw(["migrate", "--to", "doltlite", "--data-dir", dir]);
 					assert.equal(r.code, 1, `${platform}-${arch} from ${from}`);
 					assert.match(r.err[0] as string, new RegExp(`^lh migrate: DoltLite runs only on macOS arm64 .*this machine is ${platform}-${arch}.*nothing was changed`));
 					assert.deepEqual(tree(dir), before, "no graph.doltlite, backup, journal or lock");
