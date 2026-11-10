@@ -479,6 +479,27 @@ describe("model text is redacted and clipped before it reaches the judge (lh-8o7
 	});
 });
 
+describe("align and prereq judge steps never carry raw model title or why (lh-w21)", () => {
+	const leaves = (v: unknown): string[] => (typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(leaves) : []);
+	it("a planted token and home path in the draft title and why reach no judge body, and the align and prereq steps ran", async () => {
+		const body = "QQQQ9999RRRR8888SSSS7777";
+		const token = `sk-ant-api03-${body}`; // built at runtime, not a literal token
+		const r = rig({ items: [...ALPHA, ...BETA] });
+		const real = r.deps.llm;
+		// every draft carries planted text: the first scan makes two new proposals (goal, decision, prereq), the second aligns against them
+		r.deps.llm = { complete: async (prompt, schema) => { const d = (await real.complete(prompt, schema)) as { title?: string; why?: string }; return "title" in d ? ({ ...d, title: `${d.title} ${token} /Users/bob/x`, why: `see /Users/bob/notes ${token}` } as never) : (d as never); } };
+		assert.equal(await r.run("scan", "--goals", "learn rust"), 0);
+		assert.equal(await r.run("scan", "--goals", "learn rust"), 0);
+		// each step must have carried the planted title, redacted, so a skipped or clean-titled step cannot pass this test
+		for (const id of ["same", "goal", "decision", "ab"]) assert.ok(r.wire.some((w) => w.includes(`"${id}"`) && w.includes("[redacted:secret] ~/x")), `the ${id} step carried the redacted title`);
+		for (const id of ["goal", "decision"]) assert.ok(r.wire.some((w) => w.includes(`"${id}"`) && w.includes("see ~/notes [redacted:secret]")), `the ${id} step carried the redacted why`);
+		for (const leaf of r.wire.flatMap((w) => leaves(JSON.parse(w) as unknown))) assert.equal(redact(leaf), leaf);
+		const all = r.wire.join("\n");
+		assert.equal(all.includes(body), false);
+		assert.equal(all.includes("/Users/bob"), false);
+	});
+});
+
 // ---- labels, propose ---------------------------------------------------------------------------------------------------------
 
 async function labelled(over: Parameters<typeof rig>[0] = { items: ALPHA }) {
