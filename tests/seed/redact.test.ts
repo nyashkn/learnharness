@@ -114,6 +114,11 @@ const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: str
 	// no scheme: with one, URL_RE takes the whole URL and this row could not fail
 	["JWT in a URL query", t("see example.com/cb?state=", JWT, "&x=1 now"), "see example.com/cb?state=[redacted:secret]&x=1 now"],
 	["dotted run without eyJ survives", t("see ", fake(10), ".", fake(12), ".", fake(8), " now"), t("see ", fake(10), ".", fake(12), ".", fake(8), " now")],
+	// the minimums of main's eyJ[\w-]{4,}\.[\w-]{4,} (lh-09r): header eyJ plus 4, payload 4
+	["JWT header of eyJ plus 4", t("use ", "ey", "J", fake(4), ".", fake(12), ".", fake(8), " now"), "use [redacted:secret] now"],
+	["JWT header of eyJ plus 3 survives", t("use ", "ey", "J", fake(3), ".", fake(12), ".", fake(8), " now"), t("use ", "ey", "J", fake(3), ".", fake(12), ".", fake(8), " now")],
+	["JWT payload of 4", t("use ", "ey", "J", fake(10), ".", fake(4), ".", fake(8), " now"), "use [redacted:secret] now"],
+	["JWT payload of 3 survives", t("use ", "ey", "J", fake(10), ".", fake(3), ".", fake(8), " now"), t("use ", "ey", "J", fake(10), ".", fake(3), ".", fake(8), " now")],
 	// key blocks
 	["PEM", t("-----BEGIN RSA PRIVATE KEY-----\n", "MIIabc\n-----END RSA PRIVATE KEY-----"), "[redacted:key]"],
 	["PGP block", t("-----BEGIN PGP PRIVATE KEY BLOCK-----\n", "lQOYBFabc\n=ab12\n-----END PGP PRIVATE KEY BLOCK-----"), "[redacted:key]"],
@@ -123,6 +128,16 @@ const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: str
 	["discord webhook", t("https://discord.com/api/webhooks/", "123456789012345678/AbCdEf-gHiJkL_mNoPq"), "[redacted:url]"],
 	["telegram bot", t("https://api.telegram.org/bot123456789:", "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/getMe"), "[redacted:url]"],
 	["telegram without scheme", t("GET api.telegram.org/bot123456789:", "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/getMe"), "GET [redacted:url]"],
+	// no cap on the scheme run or the local part (lh-09r): main redacts each of these whole
+	["URL glued after 70 alnum, user:pass@IP", t("see ", fake(70), "https://user:", "pass@10.0.0.1/x now"), "see [redacted:url] now"],
+	["URL glued after 70 alnum, ?code=", t("see ", fake(70), "https://example.com/cb?code=", fake(12), " now"), "see [redacted:url] now"],
+	// main's \b starts a URL after + . or - inside a run, so a run-start anchor alone misses this one
+	["URL after + and 70 alnum", t("see +", fake(70), "https://user:", "pass@10.0.0.1/x now"), "see +[redacted:url] now"],
+	// "1x" has no word boundary before a letter, so main matches nothing there and finds the URL inside
+	["URL inside a URL main cannot start", t("see 1x://h/?u=https://user:", "pass@10.0.0.1 now"), "see 1x://h/?u=[redacted:url] now"],
+	["local part over 64", t("mail ", "first.last.".repeat(7), "x@example.com now"), "mail [redacted:email] now"],
+	// main resumes where its last match ended, inside the run ".x"
+	["an email glued after an email", t("a@b.com", ".x@y.com"), "[redacted:email][redacted:email]"],
 	// opaque catch-all
 	["opaque run", "blob 9fA3kLq0ZxV7bN2mC5dR8sT1yW4uE6iO end", "blob [redacted:secret] end"],
 	["opaque hex digest", "sha 0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091 end", "sha [redacted:secret] end"],
@@ -546,6 +561,27 @@ describe("linear time on one long run (lh-09r)", () => {
 			assert.ok(slow / fast < 1000, `${(slow / fast).toFixed(0)}x`);
 		});
 	});
+
+	// Inputs with many starts on one line or one joined run. At 429bf3b COMMAND_FLAG scanned from each command to the end of its
+	// line, and the line-start token rules from each line start to the end of the joined run.
+	const BIG: ReadonlyArray<readonly [name: string, make: () => string]> = [
+		["a one-line JSON array of curl commands", () => JSON.stringify(Array.from({ length: 9_200 }, (_, i) => t("curl -s https://example.com/v1/items/", String(i))))],
+		["bare curl repeated", () => "curl ".repeat(80_000)],
+		["lines of sk- tokens", () => {
+			const r = prng(3200);
+			return fill(400_000, () => t("sk", "-", pick(r, A62, 48), "\n"));
+		}],
+	];
+	for (const [name, make] of BIG) {
+		it(`${name}: 400 KB takes under 1 s`, (ctx) => {
+			const s = make();
+			assert.ok(s.length >= 400_000);
+			let best = Infinity;
+			for (let k = 0; k < 3 && !(best < 1_000); k++) best = Math.min(best, time(s));
+			ctx.diagnostic(`${name}: ${(s.length / 1_000).toFixed(0)} KB in ${best.toFixed(1)} ms`);
+			assert.ok(best < 1_000, `${best.toFixed(0)} ms`);
+		});
+	}
 });
 
 describe("false positives (lh-tw1.1, lh-lmc)", () => {

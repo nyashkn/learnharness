@@ -30,8 +30,19 @@ const INLINE_ENV = /(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]+[ \t]*=(?![=>])[ \t]*)(?!\[
 const FLAG =
 	/(?<![A-Za-z0-9-])(--(?:[A-Za-z0-9]+[-_])*(?:password|passwd|passphrase|pass|token|secret|apikey|(?:api|access|secret|private)[-_]?key)(?:=|[ \t]+))(?!\[redacted:)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/gi;
 // Short flags that carry a password under one command only (elsewhere `-p` is a port, `-u` a user). mysql takes it attached; a bare `-p` prompts and stays.
-const COMMAND_FLAG =
-	/(\b(?:curl\b[^\n;&|]*?[ \t](?:-u[ \t]*|--user(?:=|[ \t]+))|sshpass\b[^\n;&|]*?[ \t]-p[ \t]*|docker[ \t]+login\b[^\n;&|]*?[ \t]-p[ \t]*|redis-cli\b[^\n;&|]*?[ \t]-a[ \t]*|mysql\b[^\n;&|]*?[ \t]-p))(?!\[redacted:)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g;
+// The scan for the flag stops at the command's next occurrence, which takes it from there: scanning from each to the end of the
+// line was quadratic (lh-09r).
+const commandFlag = (command: string, flag: string) => `${command}\\b(?:(?!\\b${command}\\b)[^\\n;&|])*?[ \\t]${flag}`;
+const COMMAND_FLAG = new RegExp(
+	`(\\b(?:${[
+		commandFlag("curl", "(?:-u[ \\t]*|--user(?:=|[ \\t]+))"),
+		commandFlag("sshpass", "-p[ \\t]*"),
+		commandFlag("docker[ \\t]+login", "-p[ \\t]*"),
+		commandFlag("redis-cli", "-a[ \\t]*"),
+		commandFlag("mysql", "-p"),
+	].join("|")}))(?!\\[redacted:)(?:"[^"\\n]*"|'[^'\\n]*'|[^\\s"']+)`,
+	"g",
+);
 // A comma ends the value only before whitespace or the end: `password=abc,def` goes whole, `a=1, b=2` stays two. The key starts
 // its run (the lookbehind takes _ . - too), so a long run is scanned once rather than from every _ . - (lh-09r).
 const KEY_VALUE =
@@ -40,10 +51,14 @@ const KEY_VALUE =
 const OPAQUE_RUN = /(?<![A-Za-z0-9])(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{32,}(?![A-Za-z0-9])/g;
 const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const ENV_LINE = /^([ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]+)=[^\n]*/gm;
-// Bounded scheme and local part, so a long dotted or lettered run is not rescanned from every start (lh-09r). shortcut: a URL
-// glued after 64+ word chars is not matched, and a local part past RFC 5321's 64 keeps its head; widen if either shows up.
-const URL_RE = /\b[a-z][a-z0-9+.-]{0,63}:\/\/[^\s"'<>]+/gi;
-const EMAIL = /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// URL and email match what `\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+` and `[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}` match, but
+// try each scheme or local-part run once rather than from every letter in it (quadratic on a long run, lh-09r). redactUrls finds
+// where in the run `\b[a-z]` would start.
+const SCHEME_RUN = /(?<![a-z0-9+.-])[a-z0-9+.-]+(?=:\/\/[^\s"'<>])/gi;
+const URL_END = /[\s"'<>]|$/g;
+const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// The unanchored rule tries again where its last match ended, which can be inside a run: "a@b.com.x@y.com" is two matches.
+const EMAIL_AT = new RegExp(EMAIL.source.replace(/^\(\?<!\[[^\]]*\]\)/, ""), "y");
 const SPLIT_RUN = /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{32,}(?![A-Za-z0-9_-])/g;
 // Measured: slugs and hyphenated English sit below this, random base64url above it.
 const MIN_ENTROPY = 4.4;
@@ -120,10 +135,15 @@ function namedSpans(s: string, starts: readonly number[]): Span[] {
 	for (const m of s.matchAll(JWT_RUN)) for (const [start, end] of jwtsIn(m[0])) spans.push([m.index + start, m.index + end]);
 	for (const re of TOKENS) for (const m of s.matchAll(re)) spans.push([m.index, m.index + m[0].length]);
 	for (const re of TOKENS_AT) {
+		// starts come in order; one inside the last span is not tried, since each match from there ran to the end of the joined run
+		// (quadratic, lh-09r). shortcut: a second token glued to the first and starting a line inside its span is not matched from
+		// that line start here, only by redactGroup's scan of that line alone; try such starts against the span end if that shows up.
+		let end = 0;
 		for (const at of starts) {
+			if (at < end) continue;
 			re.lastIndex = at;
 			const m = re.exec(s);
-			if (m) spans.push([at, at + m[0].length]);
+			if (m) spans.push([at, (end = at + m[0].length)]);
 		}
 	}
 	return spans;
@@ -211,6 +231,42 @@ function redactWrapped(chain: string): string {
 	return out + redactGroup(group);
 }
 
+/** URLs that carry credentials, starting where `\b[a-z]` would in each scheme run. */
+function redactUrls(s: string): string {
+	let out = "";
+	let from = 0;
+	SCHEME_RUN.lastIndex = 0;
+	for (let m; (m = SCHEME_RUN.exec(s)); ) {
+		const runEnd = SCHEME_RUN.lastIndex;
+		// the leftmost letter at a word boundary: the run start, or a letter after + . or -
+		let p = m.index;
+		while (p < runEnd && !(/[a-z]/i.test(s[p]!) && !/\w/.test(s[p - 1] ?? ""))) p++;
+		// none: the unanchored rule matches nothing in this run and scans on into the URL after it
+		if (p === runEnd) continue;
+		URL_END.lastIndex = runEnd + 3;
+		const end = URL_END.exec(s)!.index;
+		SCHEME_RUN.lastIndex = end;
+		// A "#" fragment holding key=value is an OAuth-style token carrier; bare anchors like #L10 stay.
+		if (/[?]|#[^#\s]*=|\/\/[^/]*@/.test(s.slice(p, end))) {
+			out += `${s.slice(from, p)}[redacted:url]`;
+			from = end;
+		}
+	}
+	return out + s.slice(from);
+}
+
+function redactEmails(s: string): string {
+	let out = "";
+	let from = 0;
+	EMAIL.lastIndex = 0;
+	for (let m = EMAIL.exec(s); m; ) {
+		out += `${s.slice(from, m.index)}[redacted:email]`;
+		from = EMAIL.lastIndex = EMAIL_AT.lastIndex = m.index + m[0].length;
+		m = EMAIL_AT.exec(s) ?? EMAIL.exec(s);
+	}
+	return out + s.slice(from);
+}
+
 /** Pure and idempotent: placeholders never match any rule. Always on; there is no switch. */
 export function redact(text: string): string {
 	let out = text.replace(PEM, "[redacted:key]");
@@ -220,8 +276,7 @@ export function redact(text: string): string {
 	out = out.replace(BEARER, "Bearer [redacted:token]");
 	out = out.replace(HEADER, "$1[redacted:header]");
 	out = out.replace(PATH_SECRET_URL, "[redacted:url]");
-	// A "#" fragment holding key=value is an OAuth-style token carrier; bare anchors like #L10 stay.
-	out = out.replace(URL_RE, (url) => (/[?]|#[^#\s]*=|\/\/[^/]*@/.test(url) ? "[redacted:url]" : url));
+	out = redactUrls(out);
 	out = out.replace(ENV_LINE, "$1=[redacted:env]");
 	out = out.replace(INLINE_ENV, "$1[redacted:env]");
 	out = out.replace(FLAG, "$1[redacted:secret]");
@@ -232,7 +287,7 @@ export function redact(text: string): string {
 	out = out.replace(OPAQUE_RUN, "[redacted:secret]");
 	// Again: cutting an alnum stretch out of a low-entropy run can leave a random piece that is a run of its own (idempotence).
 	out = out.replace(SPLIT_RUN, redactSplitRun);
-	out = out.replace(EMAIL, "[redacted:email]");
+	out = redactEmails(out);
 	for (const re of HOME_PATHS) out = out.replace(re, "~");
 	return out;
 }
