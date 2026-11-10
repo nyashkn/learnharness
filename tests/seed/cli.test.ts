@@ -225,6 +225,13 @@ describe("opt-out entries meet redacted projects (lh-an0)", () => {
 			{ numRuns: 500 },
 		);
 	});
+	it("an all-ignored list: home-path entries leave no-project rows allowed, swallowed entries still refuse them (lh-aei; lh-6tw decides)", () => {
+		const swallowed = ["Qz7-x9K", "mP2v-R8tL", "w4Yb-N6s", "Jd3h-u5Fq", "cE1"].join("");
+		assert.ok(blocksNothing("/Users/alice") && blocksNothing(swallowed), "precondition: both entries block nothing, so the CLI counts 0");
+		assert.equal(composeAllowEgress(["/Users/alice"])(null), true);
+		assert.equal(composeAllowEgress([swallowed])(null), false);
+		assert.equal(composeAllowEgress([swallowed])("~/work/app"), true);
+	});
 });
 
 describe("a project that redaction swallowed counts as no provenance (lh-3p3)", () => {
