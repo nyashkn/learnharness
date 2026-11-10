@@ -3,6 +3,7 @@
  * lh_version all arrive as parameters. Version 0 is "no lh_meta table"; rung 1 creates it.
  */
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
 import type { SqlDriver } from "./driver";
 import type { Rung } from "./rung";
 
@@ -66,7 +67,7 @@ function parseInt1(value: string | undefined, what: string): number {
 }
 
 /** Validates what is stored; never writes. */
-function checkStore(db: SqlDriver, opts: MigrateOptions, top: number): number {
+function checkStore(db: SqlDriver, opts: Pick<MigrateOptions, "kind" | "lineFormat">, top: number): number {
 	if (!hasMeta(db)) return 0;
 	const meta = readMeta(db);
 	const version = parseInt1(meta.get("schema_version"), "schema_version");
@@ -110,11 +111,35 @@ function checkRungs(rungs: readonly Rung[]): void {
 	});
 }
 
-/** True when `migrate` would write: no lh_meta yet, or a stored version below the top rung. A newer or malformed store is false (migrate refuses it). Never writes. */
-export function needsMigration(db: SqlDriver, rungs: readonly Rung[]): boolean {
-	if (!hasMeta(db)) return true;
-	const version = Number(readMeta(db).get("schema_version"));
-	return version < rungs.length;
+/** True when `migrate` would write: no lh_meta yet, or a stored version below the top rung. Throws MigrationRefusedError for a store `migrate` would refuse (same read-only checks), so callers can refuse before taking a lock. Never writes. */
+export function needsMigration(db: SqlDriver, opts: Pick<MigrateOptions, "rungs" | "kind" | "lineFormat">): boolean {
+	return checkStore(db, opts, opts.rungs.length) < opts.rungs.length;
+}
+
+/** Backup with the store's mode, not the umask's (as purge does): create it exclusively with that mode, then VACUUM INTO the empty file. */
+function backupInto(db: SqlDriver, dest: string): void {
+	const quoted = `'${dest.replaceAll("'", "''")}'`;
+	const file = db.get<{ file: string }>("SELECT file FROM pragma_database_list WHERE name = 'main'")?.file ?? "";
+	if (file === "") return void db.exec(`VACUUM INTO ${quoted}`); // in-memory: no file mode to copy
+	const mode = fs.statSync(file).mode & 0o777;
+	let fd: number;
+	try {
+		fd = fs.openSync(dest, "wx", mode);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`backup ${dest} already exists; nothing was changed`);
+		throw error;
+	}
+	try {
+		fs.fchmodSync(fd, mode);
+	} finally {
+		fs.closeSync(fd);
+	}
+	try {
+		db.exec(`VACUUM INTO ${quoted}`);
+	} catch (error) {
+		fs.rmSync(dest, { force: true }); // the file we created
+		throw error;
+	}
 }
 
 /** Brings the store to the top rung. Refusals (R3) happen before any write. */
@@ -125,7 +150,7 @@ export function migrate(db: SqlDriver, opts: MigrateOptions): MigrateResult {
 
 	if (from > 0 && from < top) {
 		if (db.engine === "doltlite") opts.log?.(`migrate ${opts.kind} from v${from}: HEAD ${db.head()}`);
-		else if (opts.backupPath) db.exec(`VACUUM INTO '${opts.backupPath(from).replaceAll("'", "''")}'`);
+		else if (opts.backupPath) backupInto(db, opts.backupPath(from));
 		else throw new Error(`migrate ${opts.kind}: upgrading from v${from} to v${top} needs a backupPath (R5: no upgrade without a backup)`);
 	}
 

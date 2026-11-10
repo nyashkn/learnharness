@@ -50,7 +50,7 @@ export async function runStoreScript(dataDir: string, authFile: string, main: (s
 		lock = lockDataFolder(dataDir, lockEnv);
 		await main(createFileStores(dataDir, authFile));
 	} catch (error) {
-		if (error instanceof Error && ["StoreLockedError", "StorageVersionError", "StorageMarkerError", "NoAdapterError"].includes(error.name)) {
+		if (error instanceof Error && ["StoreLockedError", "StorageVersionError", "StorageMarkerError", "NoAdapterError", "MigrationRefusedError"].includes(error.name)) {
 			console.error(`[store] refused: ${error.message}`);
 			process.exitCode = 1;
 			return;

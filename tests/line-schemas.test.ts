@@ -21,6 +21,8 @@ const { NodeLineSchema } = await import("../src/core/contracts/schemas/node-line
 const { ChainLineSchema } = await import("../src/core/contracts/schemas/chain-line.ts");
 const { CoverageLineSchema } = await import("../src/core/contracts/schemas/coverage-line.ts");
 const { CheckpointLineSchema } = await import("../src/core/contracts/schemas/checkpoint-line.ts");
+const { ReviewLineSchema, ReviewRemapLineSchema } = await import("../src/core/contracts/schemas/review-line.ts");
+const { lineCheck } = await import("../src/store/line-check.ts");
 
 // ── raw JSON fragment generators (text, so 1e999 survives) ──
 const str = fc.string({ maxLength: 8 }).map((s) => JSON.stringify(s));
@@ -92,6 +94,46 @@ describe("line schemas accept exactly what the graph.ts guards accept", () => {
 		assert.equal(graphStore.readCoverage().length, 1);
 		assert.ok(Value.Check(CoverageLineSchema, { chatId: "a", fp: "b", tokens: Infinity, foldedAt: "c" }));
 	});
+});
+
+// Review lines are not read by graph.ts guards, so they only feed the lineCheck-vs-Value.Check property below.
+const reviewOutcome = mostly(fc.constantFrom('"solved"', '"solvedWithHints"', '"movedOn"', '"surrendered"', '"dismissed"'), junk);
+const reviewRung = mostly(fc.constantFrom('"R0"', '"R1"', '"R2"', '"R3"', '"R4"', '"R5"', "null"), junk);
+const reviewMode = mostly(fc.constantFrom('"recall"', '"discrimination"', '"composition"'), junk);
+const reviewMissClass = mostly(fc.constantFrom('"cue"', '"discrimination"', '"execution"', '"careless"', '"structural"', "null"), junk);
+const confidence = mostly(fc.integer({ min: 0, max: 100 }).map(String), fc.constantFrom("-1", "101", "100.5", "-0.5", "1e999", "null"));
+const REVIEW = lineOf({
+	id: strField, chatId: strField, problemCallId: strField, at: strField, targets: premArr, outcome: reviewOutcome,
+	rung: reviewRung, mode: reviewMode, missClass: reviewMissClass, surface: strField, confidence,
+});
+const REMAP = lineOf({ from: strField, to: strField });
+
+/** Every line schema, paired with a generator of raw lines that mixes valid and junk values. */
+const PARITY_SCHEMAS = [
+	...KINDS.map((k) => ({ name: k.name, schema: k.schema, line: k.line })),
+	{ name: "review", schema: ReviewLineSchema, line: REVIEW },
+	{ name: "review-remap", schema: ReviewRemapLineSchema, line: REMAP },
+];
+
+describe("lineCheck (compiled, used by the stores) agrees with Value.Check (interpreted)", () => {
+	for (const s of PARITY_SCHEMAS) {
+		it(`${s.name}: verdicts match over 1,000 raw lines, both verdicts occur`, () => {
+			let accepted = 0, rejected = 0;
+			fc.assert(
+				fc.property(withNonObjects(s.line), (text) => {
+					let v: unknown;
+					try { v = JSON.parse(text); } catch { return true; } // unparsable text is outside the schema's domain
+					const compiled = lineCheck(s.schema, v);
+					if (compiled) accepted++; else rejected++;
+					return compiled === Value.Check(s.schema, v);
+				}),
+				{ numRuns: 1_000 },
+			);
+			// Measured over seeds 1-200 (lh-5rw): the lowest count of either verdict was review's accepted, 85-144 (mean ~115, sd ~10).
+			// 30 is far below that, so it never flakes, and still fails a generator that drifts to all-reject or all-accept.
+			assert.ok(accepted >= 30 && rejected >= 30, `accepted=${accepted} rejected=${rejected}`);
+		});
+	}
 });
 
 describe("check:schemas drift", () => {

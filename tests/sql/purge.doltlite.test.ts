@@ -319,6 +319,36 @@ describe("P5 CLI", () => {
 		}
 	});
 
+	test("the marker lock held by another holder is refused (exit 1), nothing changes: purge takes the marker lock the app holds", () => {
+		const f = dataFolder();
+		const bytes = sha(f.store);
+		const logs = (() => {
+			const d = openDoltlite(f.store, { readOnly: true });
+			try {
+				return logCount(d);
+			} finally {
+				d.close();
+			}
+		})();
+		const held = acquireStoreLock(path.join(f.folder, "storage.json"));
+		try {
+			const r = cli("purge", "--data-dir", f.folder, "--yes");
+			assert.equal(r.code, 1, r.out);
+			assert.ok(r.err.includes(`pid ${process.pid}`), r.err);
+			assert.equal(backups(f.store).length, 0, "no backup");
+			assert.equal(sha(f.store), bytes, "store bytes");
+			const d = openDoltlite(f.store, { readOnly: true });
+			try {
+				assert.equal(logCount(d), logs, "dolt_log count");
+			} finally {
+				d.close();
+			}
+		} finally {
+			held.release();
+		}
+		assert.deepEqual(fs.readdirSync(f.folder).filter((x) => x.endsWith(".lock")), [], "only the holder's lock existed and it is released");
+	});
+
 	test("--yes purges (leading -- tolerated), prints counts, backup and warning; the text is gone", () => {
 		const f = dataFolder();
 		const hashes = (() => {

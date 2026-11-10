@@ -443,6 +443,36 @@ describe("R5: backup before upgrade", () => {
 		assert.equal(versionOf(db), 2);
 		db.close();
 	});
+
+	test("the sqlite backup gets the store's mode, not the umask's (lh-tit)", () => {
+		const file = fresh();
+		const db = open(file);
+		migrate(db, graphOpts(1));
+		db.close();
+		fs.chmodSync(file, 0o600);
+		const bak = `${file}.bak`;
+		const up = open(file);
+		const umask = process.umask(0o277); // strips owner bits from 0600: only the fchmod keeps the store's mode
+		try {
+			migrate(up, graphOpts(graphRungs.length, { backupPath: () => bak }));
+		} finally {
+			process.umask(umask);
+		}
+		up.close();
+		assert.equal(fs.statSync(bak).mode & 0o777, 0o600);
+	});
+
+	test("an existing backup file is never overwritten: the upgrade refuses and the store stays at the old rung (lh-tit)", () => {
+		const file = fresh();
+		const db = open(file);
+		migrate(db, graphOpts(1));
+		const bak = `${file}.bak`;
+		fs.writeFileSync(bak, "occupied");
+		assert.throws(() => migrate(db, graphOpts(graphRungs.length, { backupPath: () => bak })), /already exists/);
+		assert.equal(fs.readFileSync(bak, "utf8"), "occupied");
+		assert.equal(versionOf(db), 1);
+		db.close();
+	});
 });
 
 // ---- real graph ladder ---------------------------------------------------------------------------

@@ -21,19 +21,19 @@ import type { GraphStore } from "../../src/core/ports.ts";
 /** adapter name -> test id -> owning bead. Runs as node:test `todo` for THAT adapter only: the test executes and reports but does not fail the run. A different adapter gets no allowance. */
 const KNOWN_GAPS: Record<string, Record<string, string>> = {
 	file: {
-		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+		"F5": "lh-1hl", "F3c": "lh-45r",
 	},
 	sqlite: {
-		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+		"F5": "lh-1hl", "F3c": "lh-45r",
 	},
 	"sqlite-app": {
-		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+		"F5": "lh-1hl", "F3c": "lh-45r",
 	},
 	doltlite: {
-		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+		"F5": "lh-1hl", "F3c": "lh-45r",
 	},
 	"doltlite-app": {
-		"F5": "lh-1hl", "F3c": "lh-45r", "H10b": "lh-b0m",
+		"F5": "lh-1hl", "F3c": "lh-45r",
 	},
 };
 
@@ -626,6 +626,9 @@ export function registerContract(f: AdapterFactory): void {
 		P("H10b", "hostile ids: positions/sources keyed by '__proto__' must round-trip (a SQL adapter will; the file adapter assigns into a plain object)", fc.constant(0), (b) => {
 			b.graph.writePositions(Object.fromEntries([["__proto__", { x: 1, y: 2 }]]));
 			eq(Object.keys(b.graph.readPositions()), ["__proto__"]);
+			b.graph.appendSourceUsage("__proto__", { startedAt: 1 } as never); // no such source yet: a no-op, never a write into Object.prototype
+			eq((({}) as { extractions?: unknown }).extractions, undefined);
+			eq(b.graph.readSources(), []);
 			b.graph.upsertSource({ id: "__proto__", filePath: "/x", importedAt: "t" });
 			eq(b.graph.readSources().map((s) => s.id), ["__proto__"]);
 		});
