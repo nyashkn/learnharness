@@ -1,3 +1,4 @@
+import { builtinModules } from "node:module";
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextPlugin from "@next/eslint-plugin-next";
 import tsParser from "@typescript-eslint/parser";
@@ -17,7 +18,8 @@ import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
  *                    the storage ports, the composition — arrive via
  *                    factories/closures from the chat-handler)
  *
- *   src/core/**    →  imports no node:* except node:crypto (core is pure; the one allowed builtin)
+ *   src/core/**    →  imports no node:* and no bare builtin name (fs, path, crypto...) except node:crypto
+ *                    (core is pure; the one allowed builtin); static, export-from, dynamic import()
  *   node:sqlite, @dolthub/doltlite → only src/store/sql/drivers/** may import
  *                    them (static, dynamic import() and require() forms);
  *                    src/seed gets a driver injected by scripts/seed.ts
@@ -56,7 +58,17 @@ const serverStoreRule = (except) => ({
 
 const driverMessage = "Only src/store/sql/drivers may import node:sqlite or @dolthub/doltlite; src/seed gets a driver injected by scripts/seed.ts.";
 const driverModule = "node:sqlite|@dolthub/doltlite";
-const coreMessage = "src/core is pure: it imports no node:* builtin except node:crypto.";
+const coreMessage = "src/core is pure: it imports no node:* builtin (or bare builtin name such as fs, path, crypto) except node:crypto.";
+// Bare builtin names from node:module, subpaths included ("fs/promises"); the node: forms are the other alternative.
+const bareBuiltins = builtinModules.filter((name) => !name.startsWith("node:") && !name.startsWith("_"));
+const coreRegex = `^(node:(?!crypto$)|(${bareBuiltins.join("|")})$)`;
+// esquery regexes cannot contain "/": "." stands for it, and the alternation is anchored so "." cannot over-match.
+const coreSource = `/^(node:(?!crypto$)|(${bareBuiltins.join("|").replaceAll("/", ".")})$)/`;
+const coreSyntax = [
+	`ImportExpression[source.value=${coreSource}]`,
+	`ImportExpression[source.expressions.length=0][source.quasis.0.value.cooked=${coreSource}]`,
+	`CallExpression[callee.name="require"][arguments.0.value=${coreSource}]`,
+].map((selector) => ({ selector, message: coreMessage }));
 // esquery regexes cannot contain "/", so "." stands for it and the subpath boundary is dropped.
 const driverSource = "/^(node:sqlite|@dolthub.doltlite)/";
 // Selectors cover what no-restricted-imports cannot see: import("x"), import(`x`), require("x").
@@ -159,7 +171,10 @@ export default defineConfig([
 	{
 		files: ["src/core/**"],
 		// replaces the base patterns, so the driver pattern repeats
-		rules: { "no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, { regex: "^node:(?!crypto$)", message: coreMessage }] }] },
+		rules: {
+			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, { regex: coreRegex, message: coreMessage }] }],
+			"no-restricted-syntax": ["error", ...driverSyntax, ...coreSyntax], // replaces the base list, so the driver selectors repeat
+		},
 	},
 	{
 		files: ["src/store/sql/drivers/**"],
