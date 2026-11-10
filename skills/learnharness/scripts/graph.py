@@ -119,7 +119,7 @@ def load_graph(root):
     """
     backend = store_backend(root)
     if backend == "doltlite":
-        raise DataError("This data folder uses the DoltLite backend, which this skill cannot read. To read it, run npm run lh -- export, then pass the exported folder as --data-dir (the export prints its path).")
+        raise DataError("This data folder uses the DoltLite backend, which this skill cannot read. To read it, run pnpm run lh -- export, then pass the exported folder as --data-dir (the export prints its path).")
     sources = None
     if backend == "sqlite":
         node_lines, chain_lines, sources = read_sql_snapshot(root)

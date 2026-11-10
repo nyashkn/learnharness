@@ -31,7 +31,7 @@ import sessions
 GOLDEN = ROOT / "tests" / "fixtures" / "golden-data"
 SCHEMAS = ROOT / "docs" / "architecture" / "schemas"
 DDL = re.search(r"db\.exec\(`(.*?)`\)", (ROOT / "src/store/sql/migrations/graph/0001_init.ts").read_text(encoding="utf-8"), re.S).group(1)
-DOLT_HINT = "run npm run lh -- export"
+DOLT_HINT = "run pnpm run lh -- export"
 
 
 def snapshot(root):
