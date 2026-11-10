@@ -19,23 +19,7 @@ import type { CoverageEntry, GraphChain, GraphNode, ReviewLine, SessionCheckpoin
 import type { GraphStore } from "../../src/core/ports.ts";
 
 /** adapter name -> test id -> owning bead. Runs as node:test `todo` for THAT adapter only: the test executes and reports but does not fail the run. A different adapter gets no allowance. */
-const KNOWN_GAPS: Record<string, Record<string, string>> = {
-	file: {
-		"F3c": "lh-45r",
-	},
-	sqlite: {
-		"F3c": "lh-45r",
-	},
-	"sqlite-app": {
-		"F3c": "lh-45r",
-	},
-	doltlite: {
-		"F3c": "lh-45r",
-	},
-	"doltlite-app": {
-		"F3c": "lh-45r",
-	},
-};
+const KNOWN_GAPS: Record<string, Record<string, string>> = {};
 
 
 // ── tiny oracle pieces (deliberately written differently from graph.ts) ──────

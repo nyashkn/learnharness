@@ -2461,6 +2461,24 @@ describe("chain simplification (the merger's maintenance pass, owner 2026-09-30 
 		assert.deepEqual(kept.map((c) => c.id), ["arg_1", "arg_2", "arg_3"]);
 	});
 
+	it("lh-45r F3c counterexample (cyclic input, shrunk): one pass is idempotent and keeps the hand-derived chains", () => {
+		// All four lines carry id arg_1 in the shrunk input; the key is premises+conclusion, so the expected is spelled out by those fields.
+		// Worst-first: [n1,n5]=>n2 (2 premises, key desc), [n1,n3]=>n2, [n1]=>n3 (later), [n2]=>n3. [n1,n5]=>n2 is derivable via [n1]=>n3 then [n1,n3]=>n2 (n2 has two routes), so it drops. [n1,n3]=>n2 is then n2's sole route, kept. [n1]=>n3 and [n2]=>n3 are each unreachable through the other, kept.
+		const input: GraphChain[] = [
+			{ id: "arg_1", premises: ["n2"], conclusion: "n3", createdAt: "2026-01-01T00:00:00.000Z", provenance: [] },
+			{ id: "arg_1", premises: ["n1"], conclusion: "n3", createdAt: "2026-01-02T00:00:00.000Z", provenance: [] },
+			{ id: "arg_1", premises: ["n3", "n1"], conclusion: "n2", createdAt: "2026-01-01T00:00:00.000Z", provenance: [] },
+			{ id: "arg_1", premises: ["n5", "n1"], conclusion: "n2", createdAt: "2026-01-01T00:00:00.000Z", provenance: [] },
+		];
+		const once = simplifyChains(input);
+		assert.deepEqual(once.map((c) => `${c.premises.join("+")}>${c.conclusion}@${c.createdAt}`), [
+			"n2>n3@2026-01-01T00:00:00.000Z",
+			"n1>n3@2026-01-02T00:00:00.000Z",
+			"n3+n1>n2@2026-01-01T00:00:00.000Z",
+		]);
+		assert.deepEqual(simplifyChains(once), once);
+	});
+
 	it("same-key provenance lines drop TOGETHER (a key is kept or dropped as a whole)", () => {
 		const kept = simplifyChains([
 			chain("arg_1", ["n_a"], "n_z", "2026-09-30T01:00:00.000Z"),
