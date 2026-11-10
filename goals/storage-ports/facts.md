@@ -8,7 +8,7 @@
 |---|---|---|
 | 1 | 14 store-adapter import lines in 9 `src/server` files bypass `stores.ts`. | auto: ESLint server→store zone plus `eslint/leak-allowlist.mjs` |
 | 2 | Every merge that simplifies chains calls `rewriteLedgers` (`core/graph.ts:274`), so the SQL rewrite must be fast and keep row order. | auto: contract suite (C1) |
-| 3 | `graphRevision` stats the mtimes of 4 ledgers plus `positions.json`; it becomes `GraphStore.revision()`. | auto: contract suite |
+| 3 | `graphRevision` stats the mtimes of 4 ledgers plus `positions.json`; it became `GraphStore.revision()`, which now covers the 4 ledgers, `sources.json` and `source-organization.json`, not `positions.json`. | auto: contract suite |
 | 4 | The newer-format check runs only on read paths. All our stores refuse at open, for reads and writes. | auto: contract suite |
 | 5 | The versioned store holds no blobs today; image snapshots live in chat JSON, keyed by SHA-256. | manual |
 | 6 | `zod` is installed but never imported. TypeBox is used for LLM tool arguments. | manual |

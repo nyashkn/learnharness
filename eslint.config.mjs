@@ -17,6 +17,7 @@ import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
  *                    the storage ports, the composition — arrive via
  *                    factories/closures from the chat-handler)
  *
+ *   src/core/**    →  imports no node:* except node:crypto (core is pure; the one allowed builtin)
  *   node:sqlite, @dolthub/doltlite → only src/store/sql/drivers/** may import
  *                    them (static, dynamic import() and require() forms);
  *                    src/seed gets a driver injected by scripts/seed.ts
@@ -30,7 +31,8 @@ import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
  *                    the R6 hash covers only the rung's own source, so a value
  *                    import would let a rung change behaviour unhashed
  *
- * tests/ and scripts/ are internal — unrestricted.
+ * tests/ are internal — unrestricted. scripts/ and electron/ (internal, plain
+ * Node) get the driver ban only: no Next rules, no import zones.
  */
 
 const leakedFiles = [...new Set(leakAllowlist.map((leak) => leak.file))];
@@ -54,6 +56,7 @@ const serverStoreRule = (except) => ({
 
 const driverMessage = "Only src/store/sql/drivers may import node:sqlite or @dolthub/doltlite; src/seed gets a driver injected by scripts/seed.ts.";
 const driverModule = "node:sqlite|@dolthub/doltlite";
+const coreMessage = "src/core is pure: it imports no node:* builtin except node:crypto.";
 // esquery regexes cannot contain "/", so "." stands for it and the subpath boundary is dropped.
 const driverSource = "/^(node:sqlite|@dolthub.doltlite)/";
 // Selectors cover what no-restricted-imports cannot see: import("x"), import(`x`), require("x").
@@ -77,11 +80,10 @@ const rungSyntax = [
 ].map((selector) => ({ selector, message: rungMessage }));
 
 export default defineConfig([
-	// electron/** — the desktop shell: plain Node, no framework, outside the
-// import law (same rationale as scripts/).
-	globalIgnores([".worktrees/**", ".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**"]),
+	globalIgnores([".worktrees/**", ".next/**", "node_modules/**", "data/**", "next-env.d.ts", "dist/**"]),
 	{
 		files: ["**/*.{js,mjs,ts,tsx}"],
+		ignores: ["scripts/**", "electron/**"], // driver ban only, see the block below
 		languageOptions: {
 			parser: tsParser,
 			parserOptions: { ecmaVersion: "latest", sourceType: "module" },
@@ -141,6 +143,23 @@ export default defineConfig([
 				},
 			],
 		},
+	},
+	{
+		files: ["scripts/**/*.{js,mjs,cjs,ts}", "electron/**/*.{js,mjs,cjs,ts}"],
+		languageOptions: { parser: tsParser, parserOptions: { ecmaVersion: "latest", sourceType: "module" } },
+		rules: {
+			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }] }],
+			"no-restricted-syntax": ["error", ...driverSyntax],
+		},
+	},
+	{
+		files: ["scripts/**/*.cjs", "electron/**/*.cjs"],
+		languageOptions: { parserOptions: { sourceType: "commonjs" } },
+	},
+	{
+		files: ["src/core/**"],
+		// replaces the base patterns, so the driver pattern repeats
+		rules: { "no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, { regex: "^node:(?!crypto$)", message: coreMessage }] }] },
 	},
 	{
 		files: ["src/store/sql/drivers/**"],

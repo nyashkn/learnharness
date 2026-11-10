@@ -225,8 +225,7 @@ function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: Rea
 
 	// 4. Positions: prune dead nodes AND dead chains (an argument's derived
 	//    implication node carries the chain's arg_ id — stale resting spots
-	//    would pin nothing; pruning keeps the ledger honest and the
-	//    revision moving for exactly the right reason).
+	//    would pin nothing, so pruning keeps the positions file honest).
 	const deadChainIds = new Set(
 		chainLines
 			.filter((line) => !outChains.includes(line))

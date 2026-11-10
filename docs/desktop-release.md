@@ -20,13 +20,13 @@ The custom app bar remains on all platforms. macOS has left traffic lights/syste
 
 Build **on each target OS**. Next traces native binaries for its build machine; a macOS standalone tree is not a Windows/Linux payload.
 
-1. `npm ci`
+1. `pnpm install --frozen-lockfile`
 2. Run native renderer/browser-service tests in Electron's Node:
    ```sh
-   ELECTRON_RUN_AS_NODE=1 NODE_ENV=test npx electron --import tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
+   ELECTRON_RUN_AS_NODE=1 NODE_ENV=test pnpm exec electron --import tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
    ```
    This environment-prefix syntax is for a POSIX shell; CI uses Bash on every OS.
-3. `npm run build`
+3. `pnpm build`
 4. `node scripts/smoke-provider-runtime.mjs` — check the **fresh trace before curation**, including native provider initialization and fixture payloads, not real sign-in/generation.
 5. `node scripts/build-server.mjs` — copy static assets, validate prompt assets, refuse known data/credential leaks, and remove only standalone-root old installers/development Electron.
 6. `node scripts/smoke-server.mjs --electron` — check renderer/demo dependencies, providers, gzip backpressure, and isolated standalone HTTP boot under Electron's Node.
@@ -40,13 +40,13 @@ The release workflow also checks providers from the **packaged** payload under h
 
 ### Local packages
 
-`npm run desktop:dist` is the local **signed macOS** path using the `LH_NOTARY` keychain profile and Xcode `DEVELOPER_DIR`. It clears `dist` and `.next/standalone`, builds, checks the fresh provider trace, curates, runs the server smoke under **host Node**, and packages. It does not itself run the Electron-Node/post-package gates or the tag-upload workflow.
+`pnpm desktop:dist` is the local **signed macOS** path using the `LH_NOTARY` keychain profile and Xcode `DEVELOPER_DIR`. It clears `dist` and `.next/standalone`, builds, checks the fresh provider trace, curates, runs the server smoke under **host Node**, and packages. It does not itself run the Electron-Node/post-package gates or the tag-upload workflow.
 
 For Windows/Linux, perform steps 1–6 on that OS, then:
 
 ```sh
-npx electron-builder --win --x64 --publish never    # Windows
-npx electron-builder --linux --x64 --publish never # Linux
+pnpm exec electron-builder --win --x64 --publish never  # Windows
+pnpm exec electron-builder --linux --x64 --publish never # Linux
 ```
 
 ## CI and release modes
