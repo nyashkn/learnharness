@@ -47,18 +47,6 @@ function ftsQuery(query: string): string | null {
 	return words.length === 0 ? null : words.map((w) => `"${w.replaceAll('"', '""')}"`).join(" OR ");
 }
 
-/** `PRAGMA journal_mode = WAL` on a fresh file ignores busy_timeout: two openers at once get "database is locked". Retry that open. */
-function openWithRetry(file: string): SqlDriver {
-	for (let attempt = 0; ; attempt++) {
-		try {
-			return openNodeSqlite(file, { busyTimeoutMs: BUSY_TIMEOUT_MS });
-		} catch (error) {
-			if (attempt >= 100 || !/database is locked/.test(String(error))) throw error;
-			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
-		}
-	}
-}
-
 export interface OpenProjectionOptions {
 	file: string;
 	storeId: string;
@@ -69,7 +57,7 @@ export interface OpenProjectionOptions {
 
 export function openProjectionStore(options: OpenProjectionOptions): ProjectionStore & { close(): void } {
 	const { storeId, graph } = options;
-	const raw = openWithRetry(options.file);
+	const raw = openNodeSqlite(options.file, { busyTimeoutMs: BUSY_TIMEOUT_MS });
 	const driver = options.wrapDriver ? options.wrapDriver(raw) : raw;
 
 	function rebuild(): void {

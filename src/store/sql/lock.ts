@@ -6,6 +6,8 @@
  * exclusive. A lock is stale only when its pid is dead on this machine, or alive but
  * started after the lock was written (a recycled pid); a lock from another machine
  * (`host` is a stable per-user id, see machine-id.ts), or one we cannot parse, is never reclaimed.
+ * A reclaim runs under `<store>.lock.reclaim`, linked from the same temp file (so it names its creator): it removes the
+ * stale lock only if the file still holds the text we judged. A leftover `.reclaim` is never removed automatically.
  */
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -22,9 +24,12 @@ export class StoreLockedError extends Error {
 	constructor(
 		readonly file: string,
 		readonly holder: LockInfo | null,
+		readonly reclaimFile?: string,
 	) {
 		super(
-			holder
+			reclaimFile
+				? `${reclaimFile} exists: another process is reclaiming the lock, or a reclaim was interrupted${holder ? ` (pid ${holder.pid})` : ""}; delete it if no other process is using the store`
+				: holder
 				? `${file} is held by pid ${holder.pid} on ${holder.host} (since ${holder.startedAt})`
 				: `${file} has an unreadable lock file; delete it if no other process is using the store`,
 		);
@@ -132,27 +137,21 @@ export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLoc
 				const started = processStart(holder.pid);
 				if (started === undefined || !(started.getTime() > Date.parse(holder.startedAt))) throw new StoreLockedError(storeFile, holder);
 			}
-			// Stale. Move it aside (atomic: one reclaimer wins) and confirm we moved the lock we judged, not a fresh one.
-			const tomb = `${lockFile}.${randomUUID()}.tomb`;
+			// Stale. Judge-and-remove is one step under `.reclaim` (exclusive link): a fresh lock can only appear while the
+			// lock file is absent and its text differs from `seen`, so this re-read never removes a live lock.
+			const reclaimFile = `${lockFile}.reclaim`;
 			try {
-				fs.renameSync(lockFile, tomb);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; // another reclaimer won
-				throw error;
-			}
-			const moved = readText(tomb);
-			if (moved === seen) {
-				fs.rmSync(tomb, { force: true });
-				continue;
-			}
-			// We evicted a live writer's fresh lock: put it back and refuse.
-			try {
-				fs.linkSync(tomb, lockFile);
+				fs.linkSync(temp, reclaimFile);
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+				const other = readText(reclaimFile);
+				throw new StoreLockedError(storeFile, other === undefined ? null : parseLock(other), reclaimFile);
 			}
-			fs.rmSync(tomb, { force: true });
-			throw new StoreLockedError(storeFile, moved === undefined ? null : parseLock(moved));
+			try {
+				if (readText(lockFile) === seen) fs.rmSync(lockFile, { force: true });
+			} finally {
+				fs.rmSync(reclaimFile, { force: true }); // ours: only its creator ever removes it
+			}
 		}
 		const last = readText(lockFile);
 		throw new StoreLockedError(storeFile, last === undefined ? null : parseLock(last));

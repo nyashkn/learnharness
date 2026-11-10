@@ -1,9 +1,10 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import readline from "node:readline";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, before, describe, test } from "node:test";
+import { after, before, describe, mock, test } from "node:test";
 import fc from "fast-check";
 import { acquireStoreLock, lockFileFor, pidIsAlive, psProcessStart, StoreLockedError } from "../../src/store/sql/lock";
 import { machineId } from "../../src/store/sql/machine-id";
@@ -17,6 +18,9 @@ before(() => {
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 const store = () => path.join(dir, `g${n++}.sqlite`);
 const leftovers = () => fs.readdirSync(dir).filter((f) => f.endsWith(".tmp"));
+
+// Shrunk counterexamples [a, d]: A reclaims before B renames, D links in the gap.
+const REGRESSION_SEEDS: [number, number][] = [[3, 4], [4, 3]];
 
 describe("store lock (CB6)", () => {
 	test("a second writer is refused and the error names the holder's pid", () => {
@@ -109,7 +113,7 @@ describe("store lock (CB6)", () => {
 				host: "h1",
 				isAlive: (pid) => {
 					if (pid === 7 && !a) a = acquireStoreLock(f, { pid: 10, host: "h1", isAlive: () => false });
-					return false;
+					return pid === 10; // A is a live process; the crashed holder 7 is dead
 				},
 			});
 		assert.throws(b, (e) => e instanceof StoreLockedError && e.holder?.pid === 10);
@@ -257,5 +261,147 @@ describe("store lock (CB6)", () => {
 		assert.equal(pidIsAlive(process.pid), true);
 		const dead = spawnSync(process.execPath, ["-e", "0"]).pid as number;
 		assert.equal(pidIsAlive(dead), false);
+	});
+	describe("reclaim race (lh-cdu)", () => {
+		type Lock = ReturnType<typeof acquireStoreLock>;
+		const aliveExcept7 = (pid: number) => pid !== 7;
+		const fsCalls = ["writeFileSync", "linkSync", "readFileSync", "renameSync", "rmSync"] as const;
+
+		// B reclaims a stale lock (pid 7); A and D each run a full acquire just before B's `a`-th / `d`-th fs call.
+		const interleave = (a: number, d: number) => {
+			const f = store();
+			acquireStoreLock(f, { pid: 7, host: "h1" }); // crashed holder
+			const got: Lock[] = [];
+			const refusals: unknown[] = [];
+			const run = (pid: number) => {
+				try { got.push(acquireStoreLock(f, { pid, host: "h1", isAlive: aliveExcept7 })); } catch (e) { refusals.push(e); }
+			};
+			const pending = [{ at: a, pid: 10 }, { at: d, pid: 11 }].sort((x, y) => x.at - y.at);
+			let calls = 0;
+			let busy = false;
+			const hook = () => {
+				if (busy) return;
+				busy = true;
+				try {
+					const i = calls++;
+					while (pending[0] && pending[0].at <= i) run(pending.shift()?.pid ?? 0);
+				} finally { busy = false; }
+			};
+			const mocks = fsCalls.map((name) => {
+				const orig = (fs as any)[name] as (...x: unknown[]) => unknown;
+				return mock.method(fs as any, name, function (this: unknown, ...args: unknown[]) { hook(); return orig.apply(this, args); });
+			});
+			try {
+				run(20);
+				for (const p of pending.splice(0)) run(p.pid);
+			} finally {
+				mocks.forEach((m) => m.mock.restore());
+			}
+			for (const e of refusals) assert.ok(e instanceof StoreLockedError, String(e));
+			assert.equal(got.filter((l) => l.held()).length, got.length, `an acquirer lost its lock (a=${a}, d=${d})`);
+			assert.ok(got.length <= 1, `two actors hold the lock (a=${a}, d=${d})`);
+			const base = path.basename(f);
+			assert.deepEqual(fs.readdirSync(dir).filter((x) => x.startsWith(base) && /\.(tomb|reclaim|tmp)$/.test(x)), []);
+			got.forEach((l) => l.release());
+		};
+
+		test("property: A and D acquiring at any point among B's fs calls never leave two holders or a lost lock", () => {
+			fc.assert(fc.property(fc.integer({ min: 0, max: 14 }), fc.integer({ min: 0, max: 14 }), (a, d) => interleave(a, d)), { numRuns: 200 });
+		});
+
+		test("regression seeds: the interleavings that broke the tomb-and-link-back reclaim", () => {
+			for (const [a, d] of REGRESSION_SEEDS) interleave(a, d);
+		});
+
+		const leftover = (f: string, content: string) => {
+			acquireStoreLock(f, { pid: 7, host: "h1" }); // stale lock
+			fs.writeFileSync(`${lockFileFor(f)}.reclaim`, content);
+		};
+		for (const [label, content, pidText] of [
+			["dead pid", JSON.stringify({ pid: 5, host: "h1", startedAt: "2026-01-01T00:00:00Z" }), /pid 5/],
+			["unparsable", "{not json", /^(?![\s\S]*pid)/],
+		] as const) {
+			test(`a leftover .reclaim (${label}) blocks the reclaim, names the file, and is not removed`, () => {
+				const f = store();
+				leftover(f, content);
+				assert.throws(
+					() => acquireStoreLock(f, { pid: 99, host: "h1", isAlive: aliveExcept7 }),
+					(e) => e instanceof StoreLockedError && e.message.includes(`${lockFileFor(f)}.reclaim`) && /delete it if no other process/.test(e.message) && pidText.test(e.message),
+				);
+				assert.equal(fs.readFileSync(`${lockFileFor(f)}.reclaim`, "utf8"), content);
+				assert.equal(JSON.parse(fs.readFileSync(lockFileFor(f), "utf8")).pid, 7, "the stale lock is untouched");
+			});
+		}
+
+		test("a normal stale reclaim works and leaves no .reclaim, .tomb or .tmp", () => {
+			const f = store();
+			acquireStoreLock(f, { pid: 7, host: "h1" });
+			const b = acquireStoreLock(f, { pid: 99, host: "h1", isAlive: aliveExcept7 });
+			assert.equal(b.held(), true);
+			assert.deepEqual(fs.readdirSync(dir).filter((x) => x.startsWith(path.basename(f)) && /\.(tomb|reclaim|tmp)$/.test(x)), []);
+			b.release();
+		});
+
+		test("with no lock file, a leftover .reclaim does not block a plain acquire", () => {
+			const f = store();
+			fs.writeFileSync(`${lockFileFor(f)}.reclaim`, "x");
+			const a = acquireStoreLock(f, { pid: 99, host: "h1", isAlive: aliveExcept7 });
+			assert.equal(a.held(), true);
+			a.release();
+		});
+
+		test("real processes racing to reclaim one stale lock: at most one wins and the winner stays held", { timeout: 60000 }, async () => {
+			const N = 6;
+			const R = 25;
+			const lockTs = path.resolve(import.meta.dirname, "../../src/store/sql/lock.ts");
+			const code = `import fs from "node:fs"; import readline from "node:readline";
+				const { acquireStoreLock } = await import(${JSON.stringify(lockTs)});
+				const nap = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1 + Math.random() * 2);
+				for (const m of ${JSON.stringify(fsCalls.slice(1))}) { const o = fs[m]; fs[m] = function (p, ...r) { if (/\\.(lock|reclaim|tomb)/.test(String(p))) nap(); return o.call(this, p, ...r); }; }
+				const out = (o) => console.log(JSON.stringify(o));
+				let lock;
+				out({ ready: 1 });
+				for await (const line of readline.createInterface({ input: process.stdin })) {
+					if (line.startsWith("go ")) { try { lock = acquireStoreLock(line.slice(3)); out({ acquired: true }); } catch (e) { out({ acquired: false, err: e.name }); } }
+					else if (line === "check") out({ held: lock ? lock.held() : null });
+					else if (line === "release") { lock?.release(); lock = undefined; out({ ok: 1 }); }
+				}`;
+			const workers = Array.from({ length: N }, () => {
+				const p = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
+					cwd: path.resolve(import.meta.dirname, "../.."), stdio: ["pipe", "pipe", "inherit"],
+					env: { PATH: process.env.PATH, HOME: process.env.HOME, NODE_ENV: "test" },
+				});
+				const q: string[] = [];
+				let wake: (() => void) | undefined;
+				readline.createInterface({ input: p.stdout }).on("line", (l) => { q.push(l); wake?.(); });
+				const next = async (): Promise<any> => {
+					while (!q.length) await new Promise<void>((r) => { wake = r; });
+					return JSON.parse(q.shift()!);
+				};
+				return { p, next, send: (s: string) => p.stdin.write(`${s}\n`) };
+			});
+			try {
+				for (const w of workers) await w.next(); // ready
+				const dead = spawnSync(process.execPath, ["-e", "0"]).pid as number;
+				for (let round = 0; round < R; round++) {
+					const f = store();
+					fs.writeFileSync(lockFileFor(f), JSON.stringify({ pid: dead, host: machineId(), startedAt: new Date().toISOString() }));
+					workers.forEach((w) => w.send(`go ${f}`));
+					const results = await Promise.all(workers.map((w) => w.next()));
+					workers.forEach((w) => w.send("check"));
+					const checks = await Promise.all(workers.map((w) => w.next()));
+					const won = results.map((r, i) => (r.acquired ? i : -1)).filter((i) => i >= 0);
+					for (const r of results) assert.ok(r.acquired || r.err === "StoreLockedError", JSON.stringify(r));
+					assert.ok(won.length <= 1, `round ${round}: ${won.length} processes acquired`);
+					for (const i of won) assert.equal(checks[i].held, true, `round ${round}: winner ${i} lost its lock`);
+					workers.forEach((w) => w.send("release"));
+					await Promise.all(workers.map((w) => w.next()));
+					const base = path.basename(f);
+					assert.deepEqual(fs.readdirSync(dir).filter((x) => x.startsWith(base) && /\.(tomb|reclaim|tmp)$/.test(x)), [], `round ${round}`);
+				}
+			} finally {
+				workers.forEach((w) => w.p.kill());
+			}
+		});
 	});
 });
