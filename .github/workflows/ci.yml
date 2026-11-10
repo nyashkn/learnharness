@@ -17,39 +17,15 @@ env:
   NEXT_TELEMETRY_DISABLED: "1"
 
 jobs:
-  quality:
-    name: Typecheck, tests, lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "26"
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # The Electron binary is fetched lazily from github.com (pnpm skips its postinstall).
-      # Cache it per version/OS, then fetch with backoff on a cold cache.
-      - id: electron
-        shell: bash
-        run: echo "version=$(node -p "require('electron/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/electron-cache
-          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ steps.electron.outputs.version }}
-      - name: Fetch Electron binary (retry with backoff)
-        shell: bash
-        env:
-          electron_config_cache: ${{ runner.temp }}/electron-cache
-        run: |
-          for delay in 0 15 45 90 180; do
-            sleep "$delay"
-            node node_modules/electron/install.js && exit 0
-          done
-          echo "::error::Electron binary download failed after 5 attempts (GitHub outage?)"
-          exit 1
-      - run: pnpm run ci
+  # Typecheck, tests and lint run in cf-ci sandboxes (.cf-ci.yml). The job only starts
+  # the run; the cf-ci App posts one check per step, named "cf-ci / <step>".
+  cf-ci:
+    permissions:
+      contents: read
+      id-token: write
+    uses: nyashkn/cf-ci/.github/workflows/run.yml@v1
+    with:
+      wait: false
 
   standalone:
     name: Standalone (${{ matrix.platform }})
