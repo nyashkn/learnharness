@@ -19,13 +19,24 @@ function request(names: string[]) {
 	return new Request("http://localhost/api/graph/import", { method: "POST", body: form });
 }
 
-it("route keeps three-worker batching, request positions and mixed per-file outcomes/config details", async () => {
+// Timeout is a hang guard (the waits are event-driven), not a pass condition.
+it("route keeps three-worker batching, request positions and mixed per-file outcomes/config details", { timeout: 30_000 }, async () => {
 	let active = 0;
 	let peak = 0;
+	let calls = 0;
+	// Every call waits until three run at once, so peak 3 needs no timer.
+	let threeActive!: () => void;
+	const barrier = new Promise<void>((resolve) => { threeActive = resolve; });
+	// A 4th call means a worker already pushed a result, so slow.md cannot be first.
+	let fourthCall!: () => void;
+	const gate = new Promise<void>((resolve) => { fourthCall = resolve; });
 	extraction.importNotes = async ({ filePath }) => {
 		active++; peak = Math.max(peak, active);
+		if (active === 3) threeActive();
+		if (++calls === 4) fourthCall();
 		try {
-			await new Promise((resolve) => setTimeout(resolve, filePath === "slow.md" ? 25 : 1));
+			await barrier;
+			if (filePath === "slow.md") await gate;
 			if (filePath === "models.md") throw new ModelsNotConfiguredError(["cheap"]);
 			if (filePath === "key.md") throw new ProviderKeyMissingError("openai", ["cheap"]);
 			if (["failed", "partial", "aborted", "busy"].includes(filePath)) throw new NotesImportError(filePath as NotesImportError["outcome"], { nodes: 2, chains: 1 }, `synthetic ${filePath}`);
