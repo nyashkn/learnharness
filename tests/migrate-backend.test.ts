@@ -76,7 +76,12 @@ const storeName = (b: "sqlite" | "doltlite") => (b === "sqlite" ? "graph.sqlite"
 const openRO = (file: string, b: "sqlite" | "doltlite"): SqlDriver => (b === "sqlite" ? openNodeSqlite(file, { readOnly: true }) : openDoltlite(file, { readOnly: true }));
 const openRW = (file: string, b: "sqlite" | "doltlite", lock?: StoreLock): SqlDriver => (b === "sqlite" ? openNodeSqlite(file) : openDoltlite(file, { lock }));
 
-/** Every file under dir: relative path -> sha. SQLite side files that a read-only open may leave empty are not content (recorded as a FACT). */
+/** A read-only DoltLite open creates this beside the store; it holds no data. */
+const DOLTLITE_LOCK = ".graph.doltlite-lock";
+/** The ONE exemption (owner decision): -shm, an EMPTY -wal, the DoltLite lock file. Anything else, a non-empty -wal included, is a change. */
+const isEngineSideFile = (name: string, size: number): boolean => name.endsWith("-shm") || (name.endsWith("-wal") && size === 0) || name === DOLTLITE_LOCK;
+
+/** Every file under dir: relative path -> sha. Engine side files a read-only open may leave (isEngineSideFile) are not content. */
 function tree(dir: string): Record<string, string> {
 	const out: Record<string, string> = {};
 	const walk = (d: string): void => {
@@ -85,7 +90,7 @@ function tree(dir: string): Record<string, string> {
 			if (e.isDirectory()) walk(p);
 			else {
 				const buf = fs.readFileSync(p);
-				if (e.name.endsWith("-shm") || (e.name.endsWith("-wal") && buf.length === 0)) continue; // engine side files a read-only open leaves
+				if (isEngineSideFile(e.name, buf.length)) continue;
 				out[path.relative(dir, p)] = sha(buf);
 			}
 		}
@@ -203,7 +208,7 @@ function sourceState(dir: string, from: Backend): Record<string, string> {
 	const files = from === "file" ? (fs.readdirSync(path.join(dir, "graph"), { recursive: true, withFileTypes: true }) as fs.Dirent[]).filter((e) => e.isFile()).map((e) => path.join(e.parentPath, e.name)) : [path.join(dir, storeName(from)), path.join(dir, `${storeName(from)}-wal`)];
 	for (const f of files) {
 		const st = fs.statSync(f, { throwIfNoEntry: false });
-		if (st && !(f.endsWith("-wal") && st.size === 0)) out[path.relative(dir, f)] = `${sha(fs.readFileSync(f))}@${st.mtimeMs}`;
+		if (st && !isEngineSideFile(path.basename(f), st.size)) out[path.relative(dir, f)] = `${sha(fs.readFileSync(f))}@${st.mtimeMs}`;
 	}
 	return out;
 }
@@ -356,6 +361,7 @@ describe("R round trip", () => {
 		for (const b of ["sqlite", "doltlite"] as const) {
 			const ok = roundTrip({ nodes: 'a\u0000b\n{"x":"\\u0000"}\n', chains: "", sessions: "", coverage: "" }, [b]);
 			console.log(`FACT NUL inside a ledger line on ${b}: ${ok ? "survives byte-identically" : "verify refused it"}`);
+			assert.equal(ok, true, `NUL survives on ${b} (measured on sqlite and doltlite); a verify refusal here means the engine started losing bytes`);
 		}
 		console.log(`FACT round-trip properties: ${refusedForNul} generated cases were refused by verify (all contained NUL)`);
 	});
@@ -558,28 +564,31 @@ describe("C crash at every checkpoint, then resume", () => {
 		}
 	});
 
-	for (const to of ["sqlite", "doltlite"] as const) {
-		test(`C-kill: a real SIGKILL mid-migration (file -> ${to}); the stale lock is reclaimed and the resume completes`, async () => {
-			const ref = reference("file", to);
+	for (const [from, to] of DIRS) {
+		test(`C-kill: a real SIGKILL mid-migration (${from} -> ${to}); the stale lock is reclaimed and the resume completes`, async () => {
+			const ref = reference(from, to);
 			const dir = mk();
-			buildState(dir, "file", to);
+			buildState(dir, from, to);
+			const markerBefore = readMarkerBytes(dir);
 			const scratch = mk();
 			const script = path.join(scratch, "child.mjs");
 			const ready = path.join(scratch, "ready");
 			fs.writeFileSync(
 				script,
 				`import fs from "node:fs";
-const [, , mod, dir, to, ready] = process.argv;
+const [, , mod, dir, to, ready, loadAddon] = process.argv;
 const { migrateBackend } = await import(mod);
-if (to === "doltlite") { // see asDoltliteHost: load the addon under the real host, then fake macOS arm64
+if (loadAddon === "1") { // see asDoltliteHost: load the addon under the real host, then (target only) fake macOS arm64
 	const { openDoltlite } = await import(new URL("./sql/drivers/doltlite.ts", mod).href);
 	openDoltlite(":memory:").close();
+}
+if (to === "doltlite") {
 	for (const [k, v] of [["platform", "darwin"], ["arch", "arm64"]]) Object.defineProperty(process, k, { value: v });
 }
 migrateBackend(dir, to, { checkpoint(n) { if (n === "after:chains") { fs.writeFileSync(ready, "x"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000); } } });
 `,
 			);
-			const child = spawn(process.execPath, ["--import", "tsx", script, pathToFileURL(path.resolve("src/store/migrate-backend.ts")).href, dir, to, ready], { cwd: path.resolve("."), stdio: "ignore" });
+			const child = spawn(process.execPath, ["--import", "tsx", script, pathToFileURL(path.resolve("src/store/migrate-backend.ts")).href, dir, to, ready, from === "doltlite" || to === "doltlite" ? "1" : "0"], { cwd: path.resolve("."), stdio: "ignore" });
 			const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
 			const deadline = Date.now() + 60_000;
 			while (!fs.existsSync(ready) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
@@ -588,7 +597,7 @@ migrateBackend(dir, to, { checkpoint(n) { if (n === "after:chains") { fs.writeFi
 			await exited;
 			assert.ok(fs.existsSync(journalPath(dir)), "the kill left the journal");
 			assert.ok(fs.existsSync(`${markerFile(dir)}.lock`), "the kill left a stale lock");
-			assert.equal(readMarkerBytes(dir), undefined, "no marker yet");
+			assert.equal(readMarkerBytes(dir), markerBefore, "the marker is still the source's (none for a file source)");
 			const r = mig(dir, to, { now });
 			assert.equal(r.resumed, true);
 			assert.deepEqual(exportOf(dir), ref.exportTree);
@@ -924,7 +933,7 @@ describe("B export", () => {
 		writeFolder(dir, DIRTY);
 		const out = mk();
 		fs.writeFileSync(path.join(out, "keep"), "mine");
-		assert.throws(() => exportStore(dir, out), /not empty/);
+		assert.throws(() => exportStore(dir, out), { name: "MigrateRefusedError", message: MIGRATE_TEXT.outNotEmpty(out) }); // exact text: the OS's ENOTEMPTY also says "not empty"
 		assert.deepEqual(fs.readdirSync(out), ["keep"]);
 		const empty = mk();
 		exportStore(dir, empty);
@@ -1246,4 +1255,215 @@ describe("V a source still at rung 1 (no review tables)", () => {
 			assertV1Arrived(exportTree(out));
 		});
 	}
+});
+
+// ─── G gaps found by the M1 review (bead lh-16g): each test names the break it guards ────────────
+
+/** A sqlite store whose newest row lives only in the -wal: the files are copied while a writer still holds the WAL, so main, -wal and -shm all really exist. */
+function seedSqliteWithWal(dir: string, rows: Rows, marker: boolean): void {
+	const t = mk();
+	seedSql(t, "sqlite", rows, false);
+	const writer = openNodeSqlite(path.join(t, "graph.sqlite"));
+	try {
+		writer.exec("PRAGMA wal_autocheckpoint = 0");
+		writer.run("INSERT INTO ledger_nodes (seq, line_json) VALUES (?, ?)", 99, '{"id":"only-in-wal"}');
+		fs.mkdirSync(dir, { recursive: true });
+		for (const s of ["", "-wal", "-shm"]) fs.copyFileSync(path.join(t, `graph.sqlite${s}`), path.join(dir, `graph.sqlite${s}`));
+	} finally {
+		writer.close();
+	}
+	assert.ok(fs.statSync(path.join(dir, "graph.sqlite-wal")).size > 0 && fs.existsSync(path.join(dir, "graph.sqlite-shm")), "control: the fixture has a non-empty -wal and a -shm");
+	if (marker) writeMarker(dir, "sqlite");
+}
+/** Open a COPY of a backed-up sqlite store (every file in `from` together) and read the WAL-only row. */
+function walRowOf(from: string): string | undefined {
+	const copy = mk();
+	for (const n of fs.readdirSync(from)) fs.copyFileSync(path.join(from, n), path.join(copy, n));
+	const db = openNodeSqlite(path.join(copy, "graph.sqlite"));
+	try {
+		return db.get<{ line_json: string }>("SELECT line_json FROM ledger_nodes WHERE seq = 99")?.line_json;
+	} finally {
+		db.close();
+	}
+}
+const EMPTY_FOLDER: Raw = { nodes: "", chains: "", sessions: "", coverage: "" };
+const backupDirOf = (dir: string): string => JSON.parse(fs.readFileSync(journalPath(dir), "utf8")).backupDir;
+const crashAt = (name: string) => (n: string): void => {
+	if (n === name) throw new Error(`crash@${n}`);
+};
+
+describe("G backup contents (lh-16g 1-4)", () => {
+	test("G1 a sqlite source's -wal is in the backup: the copy (main + -wal) gives the WAL-only row back", () => {
+		const dir = mk();
+		seedSqliteWithWal(dir, ROWS, true);
+		const r = mig(dir, "file", { now });
+		assert.equal(walRowOf(path.join(r.backupDir, "source")), '{"id":"only-in-wal"}');
+	});
+	test("G2 a pre-existing sqlite target's -wal and -shm are moved aside with it: readable in backup/target, none left beside the new store", () => {
+		const dir = mk();
+		writeFolder(dir, DIRTY);
+		seedSqliteWithWal(dir, STALE, false);
+		let backup = "";
+		mig(dir, "sqlite", {
+			now,
+			checkpoint: (n) => {
+				if (n !== "after-journal") return;
+				backup = backupDirOf(dir);
+				for (const s of ["", "-wal", "-shm"]) assert.equal(fs.existsSync(path.join(dir, `graph.sqlite${s}`)), false, `graph.sqlite${s} still beside the store before the new target is built`);
+			},
+		});
+		assert.deepEqual(fs.readdirSync(path.join(backup, "target")).sort(), ["graph.sqlite", "graph.sqlite-shm", "graph.sqlite-wal"]);
+		assert.equal(walRowOf(path.join(backup, "target")), '{"id":"only-in-wal"}');
+	});
+	test("G3 every SIDE_FILES entry present in a file source is in backup/source with the same bytes", () => {
+		const dir = mk();
+		writeFolder(dir, DIRTY);
+		const sides: Record<string, string> = { "positions.json": DIRTY.positions as string, "render-settings.json": '{"zoom":2}' };
+		for (const [name, text] of Object.entries(sides)) fs.writeFileSync(graphFile(dir, name), text);
+		const r = mig(dir, "sqlite", { now });
+		for (const [name, text] of Object.entries(sides)) assert.equal(fs.readFileSync(path.join(r.backupDir, "source", "graph", name), "utf8"), text, name);
+	});
+	test("G4 the backup dir is mode 0700", () => {
+		const dir = mk();
+		writeFolder(dir, DIRTY);
+		const r = mig(dir, "sqlite", { now });
+		assert.equal(fs.statSync(r.backupDir).mode & 0o777, 0o700);
+	});
+});
+
+describe("G resume conditions (lh-16g 5, 6, 13)", () => {
+	test("G5 the backup dir was deleted after the crash: not resumed, a fresh backup is made, the run completes", () => {
+		const dir = mk();
+		buildState(dir, "file", "sqlite");
+		assert.throws(() => mig(dir, "sqlite", { now, checkpoint: crashAt("after-journal") }), /crash@after-journal/);
+		const old = backupDirOf(dir);
+		fs.rmSync(old, { recursive: true });
+		const r = mig(dir, "sqlite", { now });
+		assert.equal(r.resumed, false);
+		assert.notEqual(r.backupDir, old);
+		assert.ok(fs.existsSync(path.join(r.backupDir, "source", "graph", "nodes.jsonl")), "a fresh backup holds the source");
+		assert.deepEqual(exportOf(dir), reference("file", "sqlite").exportTree);
+	});
+	for (const [first, second] of [["sqlite", "doltlite"], ["doltlite", "sqlite"]] as const) {
+		test(`G6 a run to ${first} crashed after the journal; a run to ${second} does not resume it and completes`, () => {
+			const dir = mk();
+			buildState(dir, "file", first);
+			assert.throws(() => mig(dir, first, { now, checkpoint: crashAt("after-journal") }), /crash@after-journal/);
+			const old = backupDirOf(dir);
+			const r = mig(dir, second, { now });
+			assert.equal(r.resumed, false);
+			assert.notEqual(r.backupDir, old, "a new backup, not the other direction's");
+			assert.equal(JSON.parse(readMarkerBytes(dir) as string).backend, second);
+			assert.equal(fs.existsSync(journalPath(dir)), false);
+			assert.deepEqual(exportOf(dir), reference("file", second).exportTree);
+		});
+	}
+	test("G13 a crash between the target renames of backUp (store moved, -wal and -shm still beside) loses nothing: the rerun completes and every old target byte is in a backup", () => {
+		const dir = mk();
+		writeFolder(dir, DIRTY);
+		seedSqliteWithWal(dir, STALE, false);
+		const old = ["", "-wal"].map((s) => sha(fs.readFileSync(path.join(dir, `graph.sqlite${s}`))));
+		assert.throws(() => mig(dir, "sqlite", { now, checkpoint: crashAt("backup:target:store") }), /crash@backup:target:store/);
+		assert.equal(fs.existsSync(path.join(dir, "graph.sqlite")), false, "control: the store was moved");
+		assert.equal(fs.existsSync(path.join(dir, "graph.sqlite-wal")), true, "control: its -wal was not yet");
+		const r = mig(dir, "sqlite", { now });
+		assert.equal(r.resumed, false);
+		assert.deepEqual(exportOf(dir), reference("file", "sqlite").exportTree);
+		assert.equal(JSON.parse(readMarkerBytes(dir) as string).backend, "sqlite");
+		const kept = new Set<string>();
+		for (const b of fs.readdirSync(path.join(dir, "migrate-backups"))) {
+			const t = path.join(dir, "migrate-backups", b, "target");
+			if (fs.existsSync(t)) for (const n of fs.readdirSync(t)) kept.add(sha(fs.readFileSync(path.join(t, n))));
+		}
+		for (const h of old) assert.ok(kept.has(h), "an old target file is in no backup");
+	});
+});
+
+describe("G export is built beside out (lh-16g 7)", () => {
+	test("G7 a fault inside export leaves no out: out does not exist while building, nor after the crash, and no temp folder is left", () => {
+		const dir = mk();
+		writeFolder(dir, DIRTY);
+		const parent = mk();
+		const out = path.join(parent, "out");
+		let existedWhileBuilding: boolean | undefined;
+		assert.throws(() => exportStore(dir, out, { now, checkpoint: (n) => { if (n === "before-rename") { existedWhileBuilding = fs.existsSync(out); throw new Error("boom"); } } }), /boom/);
+		assert.equal(existedWhileBuilding, false, "the half-built export is not at out");
+		assert.equal(fs.existsSync(out), false);
+		assert.deepEqual(fs.readdirSync(parent), [], "no temp folder left beside out");
+	});
+});
+
+describe("G empty source and verify (lh-16g 8, 9)", () => {
+	test("G8a an empty source does not replace a target that holds ONLY sources", () => {
+		const dir = mk();
+		writeFolder(dir, EMPTY_FOLDER);
+		seedSql(dir, "sqlite", { ...STALE, nodes: [], sources: [["a", '{"id":"a","filePath":"/a","importedAt":"t"}']] }, false);
+		const before = tree(dir);
+		assert.throws(() => mig(dir, "sqlite", { now }), /holds no data/);
+		assert.deepEqual(tree(dir), before);
+		assert.equal(fs.existsSync(path.join(dir, "migrate-backups")), false);
+	});
+	test("G8b an empty source does not replace a target that holds ONLY a source organization", () => {
+		const dir = mk();
+		writeFolder(dir, EMPTY_FOLDER);
+		seedSql(dir, "sqlite", { ...STALE, nodes: [], org: '{"version":1,"folders":[]}' }, false);
+		const before = tree(dir);
+		assert.throws(() => mig(dir, "sqlite", { now }), /holds no data/);
+		assert.deepEqual(tree(dir), before);
+		assert.equal(fs.existsSync(path.join(dir, "migrate-backups")), false);
+	});
+	for (const to of ["sqlite", "doltlite"] as const) {
+		test(`G9 verify on ${to} catches a line_format that differs from the source's`, () => {
+			const dir = mk();
+			buildState(dir, "file", to);
+			const file = path.join(dir, storeName(to));
+			const held = { lockFile: `${file}.lock`, held: () => true, release: () => {} }; // migrate itself holds the real one
+			assert.throws(
+				() =>
+					mig(dir, to, {
+						now,
+						checkpoint: (n) => {
+							if (n !== "before-verify") return;
+							const db = openRW(file, to, held);
+							db.exec("UPDATE lh_meta SET value = '2' WHERE key = 'line_format'");
+							db.close();
+						},
+					}),
+				/differs from the source at lh_meta\.line_format/,
+			);
+			assert.equal(readMarkerBytes(dir), undefined, "no marker");
+		});
+	}
+});
+
+describe("G test helpers stay narrow (lh-16g 15)", () => {
+	test("G15 tree() and sourceState() exempt exactly -shm, an empty -wal and the DoltLite lock file: a non-empty -wal or any other new file is a change", () => {
+		const dir = mk();
+		fs.writeFileSync(path.join(dir, "graph.sqlite"), "main");
+		const exempt = ["graph.sqlite-shm", "graph.sqlite-wal", DOLTLITE_LOCK]; // -wal empty here
+		fs.writeFileSync(path.join(dir, "graph.sqlite-shm"), "shm bytes");
+		fs.writeFileSync(path.join(dir, "graph.sqlite-wal"), "");
+		fs.writeFileSync(path.join(dir, DOLTLITE_LOCK), "x");
+		assert.deepEqual(Object.keys(tree(dir)), ["graph.sqlite"], `exempt: ${exempt.join(", ")}`);
+		assert.deepEqual(Object.keys(sourceState(dir, "sqlite")), ["graph.sqlite"]);
+		fs.writeFileSync(path.join(dir, "graph.sqlite-wal"), "frame");
+		assert.deepEqual(Object.keys(tree(dir)).sort(), ["graph.sqlite", "graph.sqlite-wal"], "a non-empty -wal is a change");
+		assert.deepEqual(Object.keys(sourceState(dir, "sqlite")).sort(), ["graph.sqlite", "graph.sqlite-wal"]);
+		fs.rmSync(path.join(dir, "graph.sqlite-wal"));
+		for (const other of ["new.tmp", ".graph.sqlite-lock", "graph.doltlite.lock", ".graph.doltlite-lock.bak", "x-shm.bak"]) {
+			fs.writeFileSync(path.join(dir, other), "y");
+			assert.ok(other in tree(dir), `${other} is reported`);
+			fs.rmSync(path.join(dir, other));
+		}
+	});
+	test("G15b the lock file a read-only DoltLite open creates is exactly DOLTLITE_LOCK, and tree() ignores it", () => {
+		const dir = mk();
+		seedSql(dir, "doltlite", ROWS, true);
+		fs.rmSync(path.join(dir, DOLTLITE_LOCK), { force: true });
+		const before = tree(dir);
+		const names = new Set(fs.readdirSync(dir));
+		openRO(path.join(dir, "graph.doltlite"), "doltlite").close();
+		assert.deepEqual(fs.readdirSync(dir).filter((n) => !names.has(n)), [DOLTLITE_LOCK]);
+		assert.deepEqual(tree(dir), before);
+	});
 });

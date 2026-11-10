@@ -412,7 +412,7 @@ const sameMarker = (a: Marker, b: Marker): boolean => JSON.stringify(a) === JSON
 // ─── export ──────────────────────────────────────────────────────────────────
 
 export interface ExportOptions {
-	/** Tests only: called at after-refusals and after-lock. */
+	/** Tests only: called at after-refusals, after-lock and before-rename (the export is complete in its temp folder). A throw is a crash. */
 	checkpoint?: (name: string) => void;
 	now?: () => Date;
 }
@@ -454,6 +454,7 @@ export function exportStore(dataDirIn: string, outIn?: string, options: ExportOp
 				const src = path.join(dataDir, "graph", name);
 				if (fs.existsSync(src)) fs.copyFileSync(src, path.join(tmp, "graph", name));
 			}
+			options.checkpoint?.("before-rename");
 			fs.renameSync(tmp, out);
 		} catch (error) {
 			fs.rmSync(tmp, { recursive: true, force: true });
@@ -497,7 +498,7 @@ function readJournal(file: string): Journal | undefined {
 const writeJournal = (file: string, j: Journal): void => writeFileAtomicSync(file, `${JSON.stringify(j, null, "\t")}\n`, { allowInPlaceFallback: true });
 
 export interface MigrateOptions {
-	/** Tests only: called at after-refusals, after-lock, after-backup, after-journal, commit:<entity>, after:<entity>, before-verify, after-verify, after-journal-removed, after-marker. A throw is a crash. */
+	/** Tests only: called at after-refusals, after-lock, after-backup, after-journal, commit:<entity>, after:<entity>, before-verify, after-verify, after-journal-removed, after-marker, and backup:target:<store|wal|shm> (after each pre-existing target file is set aside). A throw is a crash. */
 	checkpoint?: (name: string) => void;
 	now?: () => Date;
 	/** `--allow-empty-source`: let a source with no data replace a target that holds data. */
@@ -519,7 +520,7 @@ function copyKeepMode(src: string, dst: string): void {
 }
 
 /** Copy the source into backup/source and set the pre-existing target aside in backup/target. The source is only read. */
-function backUp(dataDir: string, from: Backend, to: Backend, dir: string): void {
+function backUp(dataDir: string, from: Backend, to: Backend, dir: string, checkpoint: (name: string) => void): void {
 	const src = path.join(dir, "source");
 	const tgt = path.join(dir, "target");
 	if (isSql(from)) {
@@ -539,6 +540,7 @@ function backUp(dataDir: string, from: Backend, to: Backend, dir: string): void 
 			if (!fs.existsSync(f)) continue;
 			fs.mkdirSync(tgt, { recursive: true });
 			fs.renameSync(f, path.join(tgt, path.basename(f)));
+			checkpoint(`backup:target:${suffix === "" ? "store" : suffix.slice(1)}`);
 		}
 	} else {
 		for (const name of FAMILY_FILES) {
@@ -745,7 +747,7 @@ export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateO
 			fs.mkdirSync(backups, { recursive: true });
 			const backupDir = path.join(backups, `${from}-to-${to}-${stamp(now())}`);
 			fs.mkdirSync(backupDir, { mode: 0o700 }); // not recursive: EEXIST errors with nothing changed
-			backUp(dataDir, from, to, backupDir);
+			backUp(dataDir, from, to, backupDir, checkpoint);
 			checkpoint("after-backup");
 			journal = { version: 1, from, to, fingerprint: fp, backupDir, done: [] };
 			writeJournal(jfile, journal);
