@@ -2422,6 +2422,7 @@ function DockOverlay({
 								/>
 							) : practice ? (
 								<PracticeDock
+									key={practice.toolCallId}
 									problemCallId={practice.toolCallId}
 									input={practice.input as { statement: string }}
 									expanded={expanded}
