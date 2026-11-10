@@ -200,6 +200,11 @@ describe("target validation — names normalize to ids, unknowns reject", () => 
 		assert.equal(Value.Check(problemInputObject, without), false);
 	});
 
+	it("surface is capped at 200 chars on the problem schema (a pose cannot write an unbounded line)", () => {
+		assert.equal(Value.Check(problemInputObject, { ...PROBLEM_INPUT, surface: "s".repeat(200) }), true);
+		assert.equal(Value.Check(problemInputObject, { ...PROBLEM_INPUT, surface: "s".repeat(201) }), false);
+	});
+
 	it("ONE-TARGET RECALL (owner, 2026-11-03): recall with two targets rejects and frees the slot; other modes may tag several", async () => {
 		const tool = problemTool(createPracticeGate(ctxOf([])), graphNodes);
 		const rejected = await tool.execute("call_r", { ...PROBLEM_INPUT, target: ["n_parity", "n_pairing"] } as never);

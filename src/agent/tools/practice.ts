@@ -80,6 +80,7 @@ export const problemInputObject = Type.Object({
 		description: "REQUIRED — the demand mode: recall, discrimination, or composition (bare words, no quotes).",
 	}),
 	surface: Type.String({
+		maxLength: 200,
 		description:
 			"REQUIRED — one line naming the problem's situation class and its setup structure (e.g. \"projectile launched up an incline, find the range\" " +
 				"or \"struct held in a class field and an auto-property, writes through each\"): " +

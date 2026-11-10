@@ -45,7 +45,7 @@ export function practiceReviewsOf(chatId: string, messages: readonly LhMessage[]
 		seen.add(problemCallId);
 		const mode = (args as { mode?: unknown } | undefined)?.mode;
 		const rawSurface = (args as { surface?: unknown } | undefined)?.surface;
-		const surface = typeof rawSurface === "string" ? rawSurface.trim() : "";
+		const surface = typeof rawSurface === "string" ? rawSurface.trim().slice(0, 200) : "";
 		reviews.push({
 			id: `${chatId}:${problemCallId}`,
 			chatId,

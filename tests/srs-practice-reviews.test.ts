@@ -93,6 +93,12 @@ describe("practiceReviewsOf", () => {
 		}
 	});
 
+	it("P10b an over-long surface (older lines predate the schema cap) is cut to its first 200 chars after trimming", () => {
+		const long = "a".repeat(150) + "b".repeat(150);
+		const [l] = practiceReviewsOf("c", [...pose("p1", ["n_a"], 1_000, { surface: `  ${long}  ` }), ...conclude("c1", "solved", null)]);
+		assert.equal(l!.surface, "a".repeat(150) + "b".repeat(50));
+	});
+
 	it("P11 the conclude's confidence rides the line; absent stays absent; a dismissal never carries it; non-stops drop", () => {
 		const one = (confidence?: unknown) => practiceReviewsOf("c", [...pose("p1", ["n_a"]), ...conclude("c1", "solved", null, 5_000, false, null, confidence)])[0]!;
 		for (const stop of CONFIDENCE_STOPS) assert.equal(one(stop).confidence, stop);
