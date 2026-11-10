@@ -14,6 +14,7 @@ import { openNodeSqlite } from "../../src/store/sql/drivers/node-sqlite";
 import { MigrationRefusedError, migrate } from "../../src/store/sql/migrate";
 import { seedMigration } from "../../src/store/sql/migrations/seeds/index";
 import { composeAllowEgress, LlmUnavailableError, loadSeedConfig, main, parseOptOut, readOptOut, realLlm } from "../../scripts/seed";
+import { blocksNothing, createAllowEgress } from "../../src/seed/egress";
 import { redact } from "../../src/seed/redact";
 
 const NOW = "2026-11-08T00:00:00.000Z";
@@ -208,6 +209,21 @@ describe("opt-out entries meet redacted projects (lh-an0)", () => {
 	it("an entry that canonicalises to nothing is dropped, not a block-all", () => {
 		assert.equal(composeAllowEgress(["/Users/alice"])("~/work/app"), true);
 		assert.equal(composeAllowEgress(["/Users/alice"])(null), true);
+	});
+	it("blocksNothing agrees with the allow function it feeds (lh-aei)", () => {
+		const word = fc.constantFrom("acme", "client_x", "Pivot", "dockblocks", "a b", "x.y");
+		const home = fc.constantFrom("/Users/alice", "C:\\Users\\bob", "/home/carol", "~", "/");
+		const sep = fc.constantFrom("/", "-", "_", " ", ".", "\\");
+		const entropy = fc.stringMatching(/^[A-Za-z0-9_-]{24,48}$/);
+		const entry = fc.array(fc.oneof(word, home, sep, entropy), { minLength: 1, maxLength: 4 }).map((a) => a.join(""));
+		fc.assert(
+			fc.property(entry, (e) => {
+				const allow = createAllowEgress([e]);
+				if (blocksNothing(e)) return [`~/work/${e}`, `~-work-${e.replace(/[^A-Za-z0-9]+/g, "-")}`, e].every((p) => allow(p));
+				return allow(e) === false;
+			}),
+			{ numRuns: 500 },
+		);
 	});
 });
 
@@ -822,6 +838,15 @@ describe("scripts/seed main", () => {
 				assert.deepEqual(optLines(r.atFirstCall[0]!), [`opt-out: 0 entries from ${join(r.dir, "seed-optout.txt")}`]);
 			});
 		}
+		it("counts only entries that block something and names each ignored one, redacted (lh-aei)", async () => {
+			const swallowed = ["aB3xK9", "mQ7zT2pL", "vR8nW4yC", "5hJ6dF1s", "Gq0eU"].join("");
+			assert.ok(redact(swallowed).includes("[redacted:"), "the slug really is swallowed");
+			const r = await ordering("scan", `acme\n/Users/alice\nC:\\Users\\bob\n${swallowed}\n`);
+			const file = join(r.dir, "seed-optout.txt");
+			const ignoring = (e: string) => `opt-out: ignoring entry ${JSON.stringify(redact(e))}: after redaction it names no project, so it blocks nothing`;
+			assert.deepEqual(optLines(r.lines), [`opt-out: 1 entries from ${file}`, ignoring("/Users/alice"), ignoring("C:\\Users\\bob"), ignoring(swallowed)]);
+			assert.ok(!r.lines.join("\n").includes(swallowed), "the raw slug is never printed");
+		});
 		it("scan with the configured-llm judge prints it before the model is built", async () => {
 			const r = await ordering("scan", "x\n", ["--judge", "configured-llm"]);
 			assert.ok(r.atFirstCall.length >= 1, "the model was built");
