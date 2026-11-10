@@ -220,6 +220,17 @@ describe("the thinking input", () => {
 		});
 	});
 
+	it("carries the confidence stop into the marker (details + a model-facing line); a non-stop is a 400", () => {
+		const input = parseChatInput({ type: "thinking", problemCallId: "call_p1", text: "x", confidence: 30 });
+		assert.deepEqual(input, { type: "thinking", problemCallId: "call_p1", text: "x", confidence: 30 });
+		const marker = inputAppends({ messages: problemPose() }, input)[0] as { content: string; details: unknown };
+		assert.equal(marker.content, "Your thinking:\nx\nConfidence: 30%");
+		assert.deepEqual(marker.details, { problemCallId: "call_p1", text: "x", confidence: 30 });
+		for (const confidence of [65, 101, -1, "50", null]) {
+			assert.throws(() => parseChatInput({ type: "thinking", problemCallId: "call_p1", text: "x", confidence }), /confidence/);
+		}
+	});
+
 	it("400s against a stale or unknown problem call", () => {
 		assert.throws(
 			() => inputAppends({ messages: problemPose() }, { type: "thinking", problemCallId: "call_ghost", text: "x" }),

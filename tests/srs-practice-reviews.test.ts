@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import fc from "fast-check";
 import { concludedByDismissalPair, newProblemDismissedMarker, PRACTICE_PROBLEM_TOOL, type LhMessage } from "../src/core/native-messages.ts";
-import { practiceReviewsOf } from "../src/core/srs/index.ts";
+import { CONFIDENCE_STOPS } from "../src/core/question-core.ts";
+import { gradeOf, practiceReviewsOf } from "../src/core/srs/index.ts";
 import { call, conclude, OUTCOMES, pose, recordOf, type ProblemSpec } from "./helpers/review-fixtures.ts";
 
 const specArb = fc.array(
@@ -22,7 +23,7 @@ describe("practiceReviewsOf", () => {
 			assert.deepEqual(lines.map((l) => l.id), expected.map((s) => `chat:p_${s.id}`));
 			assert.deepEqual(lines.map((l) => l.outcome), expected.map((s) => s.outcome));
 			assert.deepEqual(lines.map((l) => l.targets), expected.map((s) => [`n_${s.id}`]));
-			for (const l of lines) assert.equal("confidence" in l, false, "R1 demotion stays inert: no confidence is written");
+			for (const l of lines) assert.equal("confidence" in l, false, "no confidence was concluded, so none is written");
 		}));
 	});
 
@@ -90,5 +91,37 @@ describe("practiceReviewsOf", () => {
 			const [l] = practiceReviewsOf("c", [...pose("p1", ["n_a"], 1_000, { surface: surface as never }), ...conclude("c1", "solved", null)]);
 			assert.equal("surface" in l!, false);
 		}
+	});
+
+	it("P11 the conclude's confidence rides the line; absent stays absent; a dismissal never carries it; non-stops drop", () => {
+		const one = (confidence?: unknown) => practiceReviewsOf("c", [...pose("p1", ["n_a"]), ...conclude("c1", "solved", null, 5_000, false, null, confidence)])[0]!;
+		for (const stop of CONFIDENCE_STOPS) assert.equal(one(stop).confidence, stop);
+		assert.equal("confidence" in one(), false);
+		for (const bad of [65, 101, -1, "50", null, Number.NaN]) assert.equal("confidence" in one(bad), false, String(bad));
+		const dismissed = practiceReviewsOf("c", [...pose("p1", ["n_a"]), { ...newProblemDismissedMarker("p1"), timestamp: 3_000 }])[0]!;
+		assert.equal("confidence" in dismissed, false);
+		const dismissedConclude = practiceReviewsOf("c", [...pose("p1", ["n_a"]), ...conclude("c1", "dismissed", null, 5_000, false, null, 30)])[0]!;
+		assert.equal(dismissedConclude.outcome, "dismissed");
+		assert.equal("confidence" in dismissedConclude, false);
+	});
+
+	it("P12 ACCEPTANCE: a right answer concluded with confidence under 50 grades Hard; without it (or at 50+) Good — oracle table, property over stops x outcome x rung", () => {
+		// Independent oracle (ts-fsrs Rating: Again 1, Hard 2, Good 3), not gradeOf's own tables.
+		const base = (outcome: string, rung: string | null) =>
+			outcome !== "solved" && outcome !== "solvedWithHints" ? 1 : ["R3", "R4", "R5"].includes(rung ?? "") ? 1 : rung === "R2" ? 2 : 3;
+		const gradeOfRecord = (outcome: string, rung: string | null, confidence?: number) => {
+			const [line] = practiceReviewsOf("c", [...pose("p1", ["n_a"]), ...conclude("c1", outcome, rung, 5_000, false, null, confidence)]);
+			return gradeOf(line!);
+		};
+		assert.equal(gradeOfRecord("solved", null, 30), 2);
+		assert.equal(gradeOfRecord("solved", null), 3);
+		assert.equal(gradeOfRecord("solved", null, 50), 3);
+		fc.assert(fc.property(
+			fc.constantFrom(...OUTCOMES), fc.constantFrom<string | null>(null, "R0", "R1", "R2", "R3", "R4", "R5"), fc.option(fc.constantFrom(...CONFIDENCE_STOPS), { nil: undefined }),
+			(outcome, rung, confidence) => {
+				const expected = confidence !== undefined && confidence < 50 ? Math.min(base(outcome, rung), 2) : base(outcome, rung);
+				assert.equal(gradeOfRecord(outcome, rung, confidence), expected);
+			},
+		));
 	});
 });

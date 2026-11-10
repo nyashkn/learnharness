@@ -24,6 +24,7 @@ import { grepTool } from "./grep.ts";
 import { jobTools, type JobToolContext } from "./jobs.ts";
 import { proberGraphTools, type GraphToolContext } from "./graph.ts";
 import { activeProblemOf } from "../../core/native-messages.ts";
+import { CONFIDENCE_STOPS } from "../../core/question-core.ts";
 import type { LhMessage } from "../../core/native-messages.ts";
 import { concludeResult, invalidInputResult, problemResult } from "../tool-execute.ts";
 import { healEncodedArguments, healToolRecord } from "./heal.ts";
@@ -206,6 +207,12 @@ export const concludeInputObject = Type.Object({
 		{ description: "REQUIRED — the miss classification: cue, discrimination, execution, careless, or structural — or null = no miss (bare, no quotes)." },
 	),
 	retest: Type.Boolean({ description: "REQUIRED — true marks the problem for a fresh-surface retest before the session ends." }),
+	confidence: Type.Optional(
+		Type.Union(
+			CONFIDENCE_STOPS.map((stop) => Type.Literal(stop)),
+			{ description: "The learner's confidence from their latest thinking submission on this problem; omit if they gave none." },
+		),
+	),
 });
 
 export type ConcludeInput = Static<typeof concludeInputObject>;

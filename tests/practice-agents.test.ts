@@ -345,6 +345,10 @@ describe("persistent practice nudges", () => {
 		assert.deepEqual(concludeInputObject.properties.outcome.anyOf.map((outcome) => outcome.const), [
 			"solved", "solvedWithHints", "movedOn", "surrendered", "dismissed",
 		]);
+		// lh-g5b: confidence is optional and restricted to the quiz stops.
+		for (const confidence of [0, 30, 50, 70, 90, 100]) assert.equal(Value.Check(concludeInputObject, { ...CONCLUDE_INPUT, confidence }), true, String(confidence));
+		assert.equal(Value.Check(concludeInputObject, CONCLUDE_INPUT), true);
+		for (const confidence of [65, 101, -1, "50"]) assert.equal(Value.Check(concludeInputObject, { ...CONCLUDE_INPUT, confidence }), false, String(confidence));
 		const result = await tool.execute("call_persistent_nudges", CONCLUDE_INPUT as never);
 		assert.equal((result.content[0] as { text: string }).text, CONCLUDE_ACK_TEXT);
 		assert.equal(result.terminate, undefined, "closing prose stays possible; the pause remains an instruction, not a new runtime gate");

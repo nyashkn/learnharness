@@ -327,14 +327,14 @@ export function newGraphContextMessage(
  *  content label is the single "Your thinking"; `details` keeps the raw
  *  payload for the transcript card. One problem may carry many
  *  submissions. */
-export function newThinkingMessage(problemCallId: string, text: string): LhMarkerMessage {
+export function newThinkingMessage(problemCallId: string, text: string, confidence?: number): LhMarkerMessage {
 	return {
 		id: newMessageId(),
 		role: "custom",
 		customType: "practice-thinking",
-		content: `${THINKING_LABEL}:\n${text}`,
+		content: `${THINKING_LABEL}:\n${text}` + (confidence === undefined ? "" : `\nConfidence: ${confidence}%`),
 		display: true,
-		details: { problemCallId, text },
+		details: { problemCallId, text, ...(confidence === undefined ? {} : { confidence }) },
 		timestamp: Date.now(),
 	};
 }

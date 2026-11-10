@@ -58,6 +58,9 @@ describe("PracticeDock", () => {
 		assert.match(html, /--dock-max-h/);
 		assert.match(html, /YOUR THINKING/);
 		assert.match(html, /data-testid="practice-send"/);
+		// lh-g5b: the quiz's confidence slider, resting at the default 50.
+		assert.match(html, /data-testid="confidence-slider"/);
+		assert.match(html, /data-testid="confidence-value"[^>]*>50%</);
 		assert.ok(!html.includes("practice-nudge") && !html.includes("practice-commit"), "the two-lane buttons are gone");
 		// The buttons carry their lane in the disabled gate; both start
 		// disabled (empty field).

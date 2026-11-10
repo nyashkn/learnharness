@@ -3,9 +3,11 @@
  *  conclude the transcript lost). Calls count only through clean results; a conclude attaches to the
  *  newest cleanly-posed problem before it; a dismissal marker concludes its problem as "dismissed" and the
  *  synthesized conclude that follows is the same problem (identity dedupes it). Untagged problems are no review.
- *  Lines carry no `confidence` (R1's demotion stays inert); `surface` is the problem's trimmed one-liner, absent on old transcripts. */
+ *  A line carries the conclude's `confidence` (one of the quiz stops; the learner's stated confidence, which R1 may use to demote a
+ *  right answer to Hard) when given and valid, never on a dismissal; `surface` is the problem's trimmed one-liner, absent on old transcripts. */
 
 import type { ReviewLine, ReviewMissClass, ReviewMode, ReviewOutcome, ReviewRung } from "../contracts/review.ts";
+import { CONFIDENCE_STOPS } from "../question-core.ts";
 import { PRACTICE_CONCLUDE_TOOL, PRACTICE_PROBLEM_TOOL, type LhMarkerMessage, type LhMessage } from "../native-messages.ts";
 
 const OUTCOMES: readonly ReviewOutcome[] = ["solved", "solvedWithHints", "movedOn", "surrendered", "dismissed"];
@@ -34,7 +36,7 @@ export function practiceReviewsOf(chatId: string, messages: readonly LhMessage[]
 	const posed = new Map<string, unknown>(); // clean problem call id -> its arguments
 	const reviews: ReviewLine[] = [];
 	const seen = new Set<string>();
-	const emit = (problemCallId: string, at: number, outcome: unknown, rung: unknown, missClass?: unknown) => {
+	const emit = (problemCallId: string, at: number, outcome: unknown, rung: unknown, missClass?: unknown, confidence?: unknown) => {
 		if (seen.has(problemCallId) || !posed.has(problemCallId)) return;
 		if (!OUTCOMES.includes(outcome as ReviewOutcome)) return;
 		const args = posed.get(problemCallId);
@@ -55,6 +57,7 @@ export function practiceReviewsOf(chatId: string, messages: readonly LhMessage[]
 			...(MODES.includes(mode as ReviewMode) ? { mode: mode as ReviewMode } : {}),
 			...(surface ? { surface } : {}),
 			...(outcome === "dismissed" ? {} : missClassOf(missClass)),
+			...(outcome !== "dismissed" && CONFIDENCE_STOPS.includes(confidence as number) ? { confidence: confidence as number } : {}),
 		});
 	};
 
@@ -77,8 +80,8 @@ export function practiceReviewsOf(chatId: string, messages: readonly LhMessage[]
 				posed.set(block.id, block.arguments);
 				active = block.id;
 			} else if (block.name === PRACTICE_CONCLUDE_TOOL && active !== null) {
-				const args = (block.arguments ?? {}) as { outcome?: unknown; rung?: unknown; missClass?: unknown };
-				emit(active, at, args.outcome, args.rung, args.missClass);
+				const args = (block.arguments ?? {}) as { outcome?: unknown; rung?: unknown; missClass?: unknown; confidence?: unknown };
+				emit(active, at, args.outcome, args.rung, args.missClass, args.confidence);
 				active = null;
 			}
 		}

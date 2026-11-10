@@ -17,8 +17,8 @@ export function call(callId: string, name: string, args: JsonObject, at: number,
 export const pose = (callId: string, target: string[] | undefined, at = 1_000, extra: JsonObject = {}) =>
 	call(callId, PRACTICE_PROBLEM_TOOL, { statement: "s", mode: "recall", modelSolution: "m", ...(target ? { target } : {}), ...extra }, at);
 
-export const conclude = (callId: string, outcome: string, rung: string | null, at = 5_000, isError = false, missClass: string | null = null) =>
-	call(callId, PRACTICE_CONCLUDE_TOOL, { outcome, verdict: "v", rung, missClass, retest: false }, at, isError);
+export const conclude = (callId: string, outcome: string, rung: string | null, at = 5_000, isError = false, missClass: string | null = null, confidence?: unknown) =>
+	call(callId, PRACTICE_CONCLUDE_TOOL, { outcome, verdict: "v", rung, missClass, retest: false, ...(confidence === undefined ? {} : { confidence }) } as JsonObject, at, isError);
 
 export const OUTCOMES = ["solved", "solvedWithHints", "movedOn", "surrendered"] as const;
 

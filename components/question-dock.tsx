@@ -38,7 +38,7 @@ import {
 	type SelectMode,
 	type Phase3,
 } from "@/src/core";
-import { CONFIDENCE_COLORS, confidenceRailStyle } from "@/components/confidence-rail";
+import { ConfidenceSlider } from "@/components/confidence-slider";
 
 /**
  * The question dock — a pending quiz/ask REPLACES the chat composer: the
@@ -754,79 +754,13 @@ function QuestionDockForm({
 				signal stands alone. */}
 			{kind === "quiz" && (
 				<div className="border-t border-border/60 px-4 py-2.5">
-					<div className="flex items-center gap-3">
-						<span
-							className={cn(
-								"shrink-0 text-xs font-medium uppercase tracking-wide",
-								sel.dontKnow ? "text-muted-foreground/50" : "text-muted-foreground",
-							)}
-						>
-							Confidence
-						</span>
-						<div
-							className={cn("relative h-4 min-w-0 flex-1", sel.dontKnow && "opacity-40")}
-							data-testid="confidence-track"
-						>
-							{/* The RAIL is painted here, not on the input: this overlay spans
-								exactly the thumb-CENTER range (inset 8px = half the 16px disc,
-								left and right), so at 0 and 100 the disc sits flush against the
-								rail's very ends — no bare stub poking past it (owner round 4).
-								STACKING LAW (owner round 5): the input is absolute too — a
-								positioned overlay paints above an in-flow input no matter the
-								DOM order, which put the rail OVER the disc. Both positioned,
-								input later in DOM → the disc rides on top. The wrapper's height
-								is pinned (h-4) so the rail's top-1/2 and the disc's track share
-								one box — centered by construction, not by hope. */}
-							<div
-								aria-hidden
-								data-testid="confidence-rail"
-								className="pointer-events-none absolute top-1/2 left-2 right-2 h-1.5 -translate-y-1/2 rounded-full border border-border"
-								style={confidenceRailStyle(CONFIDENCE_STOPS[confIdx]!)}
-							/>
-							<input
-								type="range"
-								min={0}
-								max={100}
-								step={1}
-								value={CONFIDENCE_STOPS[confIdx]}
-								disabled={sel.dontKnow}
-								aria-label="Confidence — the probability your selected answer is correct"
-								aria-valuetext={`${CONFIDENCE_STOPS[confIdx]} percent`}
-								title="The probability your selected answer is correct — 50% is a coin flip. Adjust with ←/→."
-								data-testid="confidence-slider"
-								onChange={(e) => {
-									// Snap to the nearest stop; the rendered VALUE is the stop's own
-									// percent, so the thumb always rests at its true fraction (50 =
-									// halfway). Keyboard needs no handler here: the dock machine treats
-									// a focused range as non-typing (see the guard above) and its ←/→
-									// branch preventDefaults, which also cancels the native 1% step.
-									const v = Number(e.target.value);
-									let best = 0;
-									for (let i = 1; i < CONFIDENCE_STOPS.length; i++) {
-										if (Math.abs(CONFIDENCE_STOPS[i]! - v) < Math.abs(CONFIDENCE_STOPS[best]! - v)) best = i;
-									}
-									setConfIdx(best);
-								}}
-								style={{ color: CONFIDENCE_COLORS[confIdx] }}
-								className={cn(
-									"absolute inset-0 h-4 w-full cursor-pointer appearance-none bg-transparent outline-none",
-									"[&::-webkit-slider-runnable-track]:h-4 [&::-webkit-slider-runnable-track]:bg-transparent",
-									"[&::-webkit-slider-thumb]:size-4 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-current",
-									"[&::-moz-range-track]:h-4 [&::-moz-range-track]:bg-transparent",
-									"[&::-moz-range-thumb]:size-4 [&::-moz-range-thumb]:appearance-none [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:bg-current",
-								)}
-							/>
-						</div>
-						<span
-							data-testid="confidence-value"
-							className={cn(
-								"w-9 shrink-0 text-right font-mono text-sm tabular-nums",
-								sel.dontKnow && "text-muted-foreground/50",
-							)}
-						>
-							{sel.dontKnow ? "—" : `${CONFIDENCE_STOPS[confIdx]}%`}
-						</span>
-					</div>
+					<ConfidenceSlider
+						index={confIdx}
+						onIndexChange={setConfIdx}
+						disabled={sel.dontKnow}
+						ariaLabel="Confidence — the probability your selected answer is correct"
+						title="The probability your selected answer is correct — 50% is a coin flip. Adjust with ←/→."
+					/>
 				</div>
 			)}
 

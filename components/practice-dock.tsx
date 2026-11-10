@@ -8,7 +8,8 @@ import { joinDictation, useDictationTarget } from "@/components/dictation";
 import { useEnterSubmits } from "@/components/enter-submits";
 import { PathInput } from "@/components/path-input";
 import { ProblemTally } from "@/components/problem-tally";
-import type { PracticeTally } from "@/src/core";
+import { ConfidenceSlider } from "@/components/confidence-slider";
+import { CONFIDENCE_STOPS, DEFAULT_CONFIDENCE_INDEX, type PracticeTally } from "@/src/core";
 import { cn } from "@/lib/utils";
 
 /**
@@ -41,7 +42,7 @@ export interface PracticeDockProps {
 	expanded: boolean;
 	onExpand: () => void;
 	/** text — POST {type:"thinking"} (one lane; the register is read from the text). */
-	onSubmit: (text: string) => void;
+	onSubmit: (text: string, confidence: number) => void;
 	/** Escape in the thinking field stops dictation (threaded from the page). */
 	onEscape?: () => void;
 	/** Compaction is running for this chat (owner round 14): the thinking
@@ -60,6 +61,7 @@ export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmi
 	// discipline): a submit resuming after `await finishDictation()` reads
 	// the tail, never a stale closure.
 	const thinkingRef = useRef("");
+	const [confIdx, setConfIdx] = useState<number>(DEFAULT_CONFIDENCE_INDEX);
 
 	useDictationTarget(
 		useCallback(
@@ -79,7 +81,7 @@ export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmi
 		if (text.length === 0) return;
 		thinkingRef.current = "";
 		setThinking("");
-		onSubmit(text);
+		onSubmit(text, CONFIDENCE_STOPS[confIdx]!);
 	};
 
 	/* ENTER SUBMITS FROM ANYWHERE (owner round 6, 2026-10-05): dictation
@@ -157,6 +159,14 @@ export function PracticeDock({ problemCallId, input, expanded, onExpand, onSubmi
 						"field-sizing-content lh-input max-h-64 min-h-16 w-full resize-none bg-transparent px-2.5 pb-2 outline-none placeholder:text-muted-foreground",
 					)}
 				/>
+				<div className="px-2.5 pb-1">
+					<ConfidenceSlider
+						index={confIdx}
+						onIndexChange={setConfIdx}
+						ariaLabel="Confidence — the probability your thinking reaches the right answer"
+						title="How likely your thinking is right — 50% is a coin flip."
+					/>
+				</div>
 				{/* The submit row (owner round 4, 2026-10-05): IDENTICAL to the
 				    question dock's — hint left, the SAME Button (h-9, px-3.5),
 				    one p-1 row. Corner radii concentric: shell 16 − m-1.5 (6) =
