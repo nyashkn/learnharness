@@ -8,8 +8,9 @@
  * (src/agent/prompt-segments.ts) — composition is an agent concern, and
  * the architecture law pins the layers apart (store may not import agent;
  * agent may not import store). Both sides share the pure path grammar
- * (src/core/prompt-segments.ts); the store's readOverride and the agent's
- * readPromptOverride read the SAME mirror layout.
+ * (src/core/prompt-segments.ts). The agent reads overrides only through
+ * this store's readOverride (the core port, PromptOverrideStore.readOverride,
+ * injected into its composition), so there is one reader of the mirror layout.
  *
  * SEGMENTS: a prompt composes from the SHARED base
  * (src/agent/system-prompt.md), the shared/ fragments (composed by both
