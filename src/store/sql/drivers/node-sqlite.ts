@@ -12,7 +12,17 @@ export interface NodeSqliteOptions {
 export function openNodeSqlite(file: string, options: NodeSqliteOptions = {}): SqlDriver {
 	const db = new DatabaseSync(file, { readOnly: options.readOnly === true, timeout: options.busyTimeoutMs ?? 5000 });
 	// synchronous=FULL: a COMMIT that returned survives power loss. journal_mode is persistent in the file; a read-only handle cannot set it.
-	if (options.readOnly !== true) db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
+	if (options.readOnly !== true) {
+		try {
+			db.exec("PRAGMA journal_mode = WAL");
+		} catch (error) {
+			if ((error as { errcode?: number }).errcode !== 5) throw error;
+			// The WAL switch upgrades read->write inside SQLite, which skips the busy handler: another opener is converting this file. BEGIN IMMEDIATE waits (busy_timeout applies) for its commit, after which the file is already WAL.
+			db.exec("BEGIN IMMEDIATE; COMMIT;");
+			db.exec("PRAGMA journal_mode = WAL");
+		}
+		db.exec("PRAGMA synchronous = FULL;");
+	}
 	db.exec("PRAGMA foreign_keys = ON;");
 	const engineVersion = (db.prepare("SELECT sqlite_version() AS v").get() as { v: string }).v;
 

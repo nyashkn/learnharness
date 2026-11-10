@@ -3,7 +3,7 @@
  * The DoltLite twin (D1) must reproduce every fact that is not sqlite-specific.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -283,5 +283,61 @@ describe("engine facts: node:sqlite", () => {
 		db.exec(LEDGER);
 		assert.throws(() => db.run("INSERT INTO ledger(line_json) VALUES (?)", undefined as never));
 		db.close();
+	});
+});
+
+describe("engine facts: concurrent first open", () => {
+	// PRAGMA journal_mode=WAL upgrades read->write inside SQLite, where the busy handler is not invoked; openers racing a fresh file got "database is locked".
+	test("F21 processes racing the first open of a fresh file all succeed and the file ends in WAL", async () => {
+		const KIDS = 6;
+		const ROUNDS = 12;
+		const root = fs.mkdtempSync(path.join(dir, "race-"));
+		const code = `
+			import fs from "node:fs";
+			import { openNodeSqlite } from ${JSON.stringify(path.resolve(import.meta.dirname, "../../src/store/sql/drivers/node-sqlite.ts"))};
+			const [root, kid, rounds] = process.argv.slice(1);
+			for (let r = 0; r < Number(rounds); r++) {
+				fs.writeFileSync(root + "/r" + r + ".ready" + kid, "1");
+				while (!fs.existsSync(root + "/r" + r + ".go")) { /* spin: all children start together */ }
+				let err = null;
+				try {
+					const db = openNodeSqlite(root + "/r" + r + ".sqlite");
+					db.exec("CREATE TABLE IF NOT EXISTS t (k INTEGER)");
+					db.run("INSERT INTO t VALUES (?)", Number(kid));
+					db.close();
+				} catch (e) { err = String(e); }
+				console.log(JSON.stringify({ r, kid, err }));
+			}`;
+		const kids = Array.from({ length: KIDS }, (_, k) => {
+			const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code, root, String(k), String(ROUNDS)], { cwd: path.resolve(import.meta.dirname, "../.."), stdio: ["ignore", "pipe", "pipe"] });
+			let out = "";
+			let errText = "";
+			child.stdout.on("data", (d) => { out += d; });
+			child.stderr.on("data", (d) => { errText += d; });
+			const done = new Promise<void>((resolve, reject) => child.on("exit", (c) => (c === 0 ? resolve() : reject(new Error(`child ${k} exited ${c}: ${errText.slice(0, 500)}`)))));
+			return { child, done, out: () => out };
+		});
+		try {
+			for (let r = 0; r < ROUNDS; r++) {
+				const deadline = Date.now() + 30_000;
+				while (!Array.from({ length: KIDS }, (_, k) => fs.existsSync(path.join(root, `r${r}.ready${k}`))).every(Boolean)) {
+					if (Date.now() > deadline) throw new Error(`round ${r}: children never became ready`);
+					await new Promise((res) => setTimeout(res, 5));
+				}
+				fs.writeFileSync(path.join(root, `r${r}.go`), "1");
+			}
+			await Promise.all(kids.map((k) => k.done));
+		} finally {
+			for (const k of kids) if (k.child.exitCode === null) k.child.kill();
+		}
+		const reports = kids.flatMap((k) => k.out().trim().split("\n").map((l) => JSON.parse(l) as { r: number; kid: string; err: string | null }));
+		assert.equal(reports.length, KIDS * ROUNDS);
+		assert.deepEqual(reports.filter((x) => x.err !== null), []);
+		for (let r = 0; r < ROUNDS; r++) {
+			const db = openNodeSqlite(path.join(root, `r${r}.sqlite`));
+			assert.equal(db.get<{ journal_mode: string }>("PRAGMA journal_mode")?.journal_mode, "wal");
+			assert.equal(count(db, "t"), KIDS);
+			db.close();
+		}
 	});
 });
