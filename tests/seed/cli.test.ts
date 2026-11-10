@@ -248,6 +248,16 @@ describe("a project that redaction swallowed counts as no provenance (lh-3p3)", 
 		assert.equal(composeAllowEgress(["acme"])("~/work/[redacted:email]/app"), false);
 		assert.equal(composeAllowEgress([])("~-[redacted:secret]"), true);
 	});
+	it("direct calls: a raw slug redaction swallows, and a stored slug a second redaction swallows, are refused once a list exists (lh-09r)", () => {
+		assert.ok(redact(SLUG).includes("[redacted:"), "precondition: the raw slug is swallowed");
+		assert.equal(composeAllowEgress(["unrelated"])(SLUG), false);
+		assert.equal(composeAllowEgress([])(SLUG), true);
+		// the store keeps redact(raw): clean here, and swallowed by the second redaction egress runs on it
+		const stored = redact("-Users-alice-EK-Mobile-Shared-Documents-Initech-api-2025-dev");
+		assert.ok(!stored.includes("[redacted:") && redact(stored).includes("[redacted:"), "precondition: clean, then swallowed");
+		assert.equal(composeAllowEgress(["unrelated"])(stored), false);
+		assert.equal(composeAllowEgress([])(stored), true);
+	});
 });
 
 // ---- redaction ------------------------------------------------------------------------------------------------------
@@ -781,6 +791,13 @@ describe("scripts/seed main", () => {
 		assert.deepEqual(await readOptOut("/x", async () => Promise.reject(Object.assign(new Error("n"), { code: "ENOENT" }))), []);
 		assert.deepEqual(parseOptOut("# client\n\nPivot\n  dockblocks  \n"), ["Pivot", "dockblocks"]);
 		await assert.rejects(readOptOut("/x", async () => Promise.reject(Object.assign(new Error("n"), { code: "EACCES" }))));
+	});
+	it("opt-out file: whitespace then # starts an inline comment, a # inside an entry stays (lh-09r)", () => {
+		assert.deepEqual(parseOptOut("acme  # client\nc#-tools\nfoo\t#bar\n  # note\n#x\n"), ["acme", "c#-tools", "foo"]);
+		const entry = fc.stringMatching(/^[a-z0-9_.-][a-z0-9#_.-]{0,10}$/);
+		fc.assert(fc.property(entry, fc.constantFrom(" ", "  ", "\t"), fc.string().filter((s) => !s.includes("\n")), (e, sep, note) => {
+			assert.deepEqual(parseOptOut(`${e}${sep}# ${note}`), [e]);
+		}));
 	});
 	describe("opt-out line (lh-h9y)", () => {
 		const NOTE = "opt-out:";

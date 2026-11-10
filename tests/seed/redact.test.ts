@@ -8,9 +8,14 @@ const t = (...parts: string[]) => parts.join("");
 const A62 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 // deterministic mixed letters and digits; 7 is coprime to 62, so no character repeats within 62
 const fake = (n: number) => Array.from({ length: n }, (_, i) => A62[(i * 7 + 3) % 62]).join("");
+const JWT = t("ey", "J", fake(10), ".", fake(12), ".", fake(8));
 
 // Credential flags, with "=" and with whitespace before the value.
-const FLAGS = ["--password", "--passwd", "--token", "--api-key", "--apikey", "--secret", "--auth-token", "--access-token"];
+const FLAGS = [
+	"--password", "--passwd", "--token", "--api-key", "--apikey", "--secret", "--auth-token", "--access-token",
+	// the last name segment is a credential word, or the name ends in api/access/secret/private key (lh-09r)
+	"--api-token", "--github-token", "--client-secret", "--secret-key", "--access-key", "--pass", "--passphrase", "--api_key",
+];
 const FLAG_ROWS = FLAGS.flatMap((f) =>
 	(["=", " "] as const).map((sep) => [`flag ${f} ${sep === "=" ? "equals" : "space"}`, t("run ", f, sep, fake(12), " now"), `run ${f}${sep}[redacted:secret] now`] as const),
 );
@@ -19,6 +24,24 @@ const FLAG_ROWS = FLAGS.flatMap((f) =>
 const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: string]> = [
 	...FLAG_ROWS,
 	["flag-like option survives", "run --token-count 5 now", "run --token-count 5 now"],
+	["--key-file survives", "run --key-file x now", "run --key-file x now"],
+	["--sort-key survives", "run --sort-key name now", "run --sort-key name now"],
+	["--passes survives", "run --passes 3 now", "run --passes 3 now"],
+	["--password-stdin survives", "docker login --password-stdin -u me", "docker login --password-stdin -u me"],
+	["quoted flag value", 'run --password "two words" now', "run --password [redacted:secret] now"],
+	// short flags that carry a password under one command only; the same flag elsewhere survives
+	["curl -u", "curl -u user:pass https://example.com", "curl -u [redacted:secret] https://example.com"],
+	["curl --user", "curl -s --user user:pass https://example.com", "curl -s --user [redacted:secret] https://example.com"],
+	["-u outside curl survives", "git push -u origin main && sort -u f", "git push -u origin main && sort -u f"],
+	["--user outside curl survives", "docker run --user 1000:1000 img", "docker run --user 1000:1000 img"],
+	["sshpass -p", "sshpass -p hunter2 ssh host", "sshpass -p [redacted:secret] ssh host"],
+	["-p outside sshpass survives", "ls -p dir", "ls -p dir"],
+	["docker login -p", "docker login -u me -p hunter2 registry.example.com", "docker login -u me -p [redacted:secret] registry.example.com"],
+	["docker run -p survives", "docker run -p 8080:80 img", "docker run -p 8080:80 img"],
+	["mysql -p attached", "mysql -u root -phunter2 db", "mysql -u root -p[redacted:secret] db"],
+	["mysql bare -p survives", "mysql -u root -p db", "mysql -u root -p db"],
+	["redis-cli -a", "redis-cli -h host -a hunter2 ping", "redis-cli -h host -a [redacted:secret] ping"],
+	["-a outside redis-cli survives", "grep -a x file", "grep -a x file"],
 	// inline and spaced env
 	["env after &&", "cd app && API_KEY=abc123xyz run", "cd app && API_KEY=[redacted:env] run"],
 	["env with spaces", "API_KEY = abc123xyz", "API_KEY = [redacted:env]"],
@@ -31,6 +54,11 @@ const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: str
 	["json apiKey", '{"apiKey": "abc123xyz"}', "{\"apiKey\": [redacted:secret]}"],
 	["json password no space", '{"password":"hunter2","user":"bob"}', '{"password":[redacted:secret],"user":"bob"}'],
 	["passwd", "passwd=s3cr3t", "passwd=[redacted:secret]"],
+	["passphrase", "passphrase=s3cr3t", "passphrase=[redacted:secret]"],
+	["passwords", "passwords: s3cr3t", "passwords: [redacted:secret]"],
+	["comma inside a value", "password=abc,def", "password=[redacted:secret]"],
+	["comma then space ends a value", "password=abc, user=bob", "password=[redacted:secret], user=bob"],
+	["trailing comma stays", "password=abc,", "password=[redacted:secret],"],
 	["pwd", "pwd: s3cr3t", "pwd: [redacted:secret]"],
 	["secret", "secret = s3cr3t", "secret = [redacted:secret]"],
 	["client_secret", "client_secret: s3cr3t", "client_secret: [redacted:secret]"],
@@ -52,6 +80,8 @@ const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: str
 	["Basic", "Authorization: Basic dXNlcjpwYXNz", "Authorization: [redacted:header]"],
 	["Token", "Authorization: Token abc123xyz", "Authorization: [redacted:header]"],
 	["Bearer header", "Authorization: Bearer abc12345678", "Authorization: [redacted:header]"],
+	// no header and a body under 32: only BEARER catches it
+	["bare Bearer, short body", "curl with Bearer abc12345678 now", "curl with Bearer [redacted:token] now"],
 	["Cookie", "Cookie: session=abc123; theme=dark", "Cookie: [redacted:header]"],
 	["Set-Cookie", "Set-Cookie: sid=abc123; HttpOnly", "Set-Cookie: [redacted:header]"],
 	["curl -H quoted", 'curl -H "X-Api-Key: abc123xyz" https://example.com/v1', 'curl -H "X-Api-Key: [redacted:header]" https://example.com/v1'],
@@ -65,6 +95,9 @@ const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: str
 	["npm", t("use npm_", "ZkQmWxLpVbNcTdHyRgJfUaBeCoDiEgFhIj now"), "use [redacted:secret] now"],
 	["glpat", t("use glpat-", fake(20), " now"), "use [redacted:secret] now"],
 	["phx", t("use phx_", "ZkQmWxLpVbNcTdHyRgJfUaBeCoDiEg now"), "use [redacted:secret] now"],
+	// under 32 chars in all, so neither OPAQUE_RUN nor SPLIT_RUN shadows the named rule
+	["short ghp_", t("use gh", "p_", fake(20), " now"), "use [redacted:secret] now"],
+	["short github_pat_", t("use github_", "pat_", fake(20), " now"), "use [redacted:secret] now"],
 	["pk_live", t("use pk_live_", fake(20), " now"), "use [redacted:secret] now"],
 	["pk plain", t("use pk_", "ZkQmWxLpVbNcTdHyRgJfUaBeCoDiEg now"), "use [redacted:secret] now"],
 	["sk_live", t("use sk_live_", fake(20), " now"), "use [redacted:secret] now"],
@@ -74,6 +107,13 @@ const SHAPES: ReadonlyArray<readonly [name: string, input: string, expected: str
 	["AIza", t("use AIza", "SyDk3Qm9Wx7-Lp2Vb8Nc4Td6_Hy1Rg5Jf0Ua now"), "use [redacted:secret] now"],
 	["st.", t("use st.", fake(36), " now"), "use [redacted:secret] now"],
 	["xapp", t("use xapp-", "1-A0123BCDE-123456789-abcdef now"), "use [redacted:secret] now"],
+	// JWTs with every segment under 32, so only the JWT rule catches them; glued after "_" or "-" the prefix stays
+	["JWT", t("use ", JWT, " now"), "use [redacted:secret] now"],
+	["JWT after token_", t("use token_", JWT, " now"), "use token_[redacted:secret] now"],
+	["JWT after x-", t("use x-", JWT, " now"), "use x-[redacted:secret] now"],
+	// no scheme: with one, URL_RE takes the whole URL and this row could not fail
+	["JWT in a URL query", t("see example.com/cb?state=", JWT, "&x=1 now"), "see example.com/cb?state=[redacted:secret]&x=1 now"],
+	["dotted run without eyJ survives", t("see ", fake(10), ".", fake(12), ".", fake(8), " now"), t("see ", fake(10), ".", fake(12), ".", fake(8), " now")],
 	// key blocks
 	["PEM", t("-----BEGIN RSA PRIVATE KEY-----\n", "MIIabc\n-----END RSA PRIVATE KEY-----"), "[redacted:key]"],
 	["PGP block", t("-----BEGIN PGP PRIVATE KEY BLOCK-----\n", "lQOYBFabc\n=ab12\n-----END PGP PRIVATE KEY BLOCK-----"), "[redacted:key]"],
@@ -152,6 +192,12 @@ const embedded = fc.tuple(noise, fc.constantFrom(" ", "\n", "(", ": "), plant, f
 	text: `${a}${p.ownLine ? "\n" : sep}${p.text}${end}${b}`,
 }));
 
+/** Shannon entropy in bits per char, written apart from redact's own. */
+const shannon = (s: string) => [...new Set(s)].reduce((h, c) => {
+	const p = (s.split(c).length - 1) / s.length;
+	return h - p * Math.log2(p);
+}, 0);
+
 const word = fc.stringMatching(/^[a-z]{3,12}$/).filter((w) => !["glpat", "pplx", "tvly", "xapp"].includes(w));
 
 describe("redact shapes", () => {
@@ -188,6 +234,38 @@ describe("redact properties", () => {
 
 	it("uuids survive", () => {
 		fc.assert(fc.property(fc.uuid(), (u) => redact(u) === u && redact(`session ${u} ok`) === `session ${u} ok`));
+	});
+
+	it("uuids joined by - or _ into one run survive", () => {
+		fc.assert(
+			fc.property(fc.array(fc.uuid(), { minLength: 2, maxLength: 4 }), fc.constantFrom("-", "_"), (us, sep) => {
+				const run = us.join(sep);
+				return redact(`id ${run} ok`) === `id ${run} ok`;
+			}),
+		);
+	});
+
+	it("MIN_ENTROPY is pinned from above: a dashed run between 4.4 and 4.6 bits is redacted", () => {
+		// 26 distinct letters and digits in pieces of 4 plus 6 dashes: 32 chars, every piece too short for OPAQUE_RUN
+		const run = fake(26).match(/.{1,4}/g)!.join("-");
+		const h = shannon(run);
+		assert.ok(h >= 4.4 && h < 4.6, `entropy ${h}`);
+		assert.equal(redact(`tok ${run} end`), "tok [redacted:secret] end");
+	});
+
+	// lh-09r LOW: OPAQUE_RUN cuts an alnum stretch out of a low-entropy run and leaves a random piece that is a run of its own
+	it("is idempotent on a low-entropy stretch dashed to a random piece", () => {
+		const low = chars(["a", "1"], 32, 48);
+		const random = chars([...ALNUM, "-", "_"], 32, 64);
+		fc.assert(
+			fc.property(low, fc.constantFrom("-", "_"), random, fc.boolean(), (l, sep, r, lowFirst) => {
+				const once = redact(`see ${lowFirst ? l + sep + r : r + sep + l} done`);
+				assert.equal(redact(once), once);
+			}),
+			{ numRuns: 500 },
+		);
+		const dashed = fake(26).match(/.{1,4}/g)!.join("-");
+		assert.equal(redact(t("see ", "a1".repeat(16), "_", dashed, " done")), "see [redacted:secret][redacted:secret] done");
 	});
 
 	it("hyphenated slugs and compounds survive", () => {
@@ -323,6 +401,29 @@ describe("wrapped tokens (lh-tw1.1)", () => {
 			assert.equal(wrapped, 0);
 		});
 	}
+
+	// lh-09r items 9 and 10: the whole line hard-wrapped at a fixed column from 5 to 19, so a token takes up to 8 breaks and can start a
+	// line. Part A leaked sk- 3.86%, ghp_ 2.71%, pplx- 3.53%, xoxb- 2.62%, AKIA 35.15%. Random tokens are not held here: at column 8
+	// they leak 2.4-2.8%, past the 2% bar above, since only a named rule joins across a plain-word fragment.
+	const hardWrap = (r: () => number, text: string) => {
+		const col = 5 + Math.floor(r() * 15);
+		const sep = WRAPS[Math.floor(r() * WRAPS.length)]!;
+		const lines = [text.slice(0, Math.floor(r() * col))];
+		for (let at = lines[0]!.length; at < text.length; at += col) lines.push(text.slice(at, at + col));
+		return lines.filter(Boolean).join(sep);
+	};
+	for (const [name, seed, make] of PREFIXED) {
+		it(`${name} tokens hard-wrapped at columns 5-19 never leak a body fragment`, (ctx) => {
+			const r = prng(seed + 100);
+			let wrapped = 0;
+			for (let i = 0; i < N; i++) {
+				const [prefix, body] = make(r);
+				if (leaks(hardWrap(r, t("see ", prefix, body, " done")), body)) wrapped++;
+			}
+			ctx.diagnostic(`${name} at columns 5-19: wrapped leak ${pct(wrapped / N)}`);
+			assert.equal(wrapped, 0);
+		});
+	}
 });
 
 describe("more wrap forms (lh-lmc)", () => {
@@ -355,6 +456,15 @@ describe("wrapped redaction, exact output", () => {
 		["wrapped twice with indentation", t("use sk-", B.slice(0, 12), "\n  ", B.slice(12, 30), "\n  ", B.slice(30, 60), " now"), "use [redacted:secret] now"],
 		["a break outside the redaction stays", t("the end.\n", B.slice(0, 20), "\n", B.slice(20, 48), " ok"), "the end.\n[redacted:secret] ok"],
 		["a blank line after the token stays", t("use sk-", B.slice(0, 12), "\n", B.slice(12, 30), "\n\nthen more"), "use [redacted:secret]\n\nthen more"],
+		// M15 nested prefixes, N04 the other right borders, N12 NBSP before the break
+		["nested quote prefix", t("use sk-", B.slice(0, 10), "\n> > ", B.slice(10, 40), " now"), "use [redacted:secret] now"],
+		["box then quote prefix", t("use sk-", B.slice(0, 10), "\n│ > ", B.slice(10, 40), " now"), "use [redacted:secret] now"],
+		["right border ┃", t("┃ key ", B.slice(0, 20), " ┃\n┃ ", B.slice(20, 48), " ┃"), "┃ key [redacted:secret] ┃"],
+		["right border ║", t("║ key ", B.slice(0, 20), " ║\n║ ", B.slice(20, 48), " ║"), "║ key [redacted:secret] ║"],
+		["right border |", t("| key ", B.slice(0, 20), " |\n| ", B.slice(20, 48), " |"), "| key [redacted:secret] |"],
+		["NBSP before the break", t("see ", B.slice(0, 20), "\u00a0\n", B.slice(20, 48), " done"), "see [redacted:secret] done"],
+		// known limit, lh-09r item 8: the bead's fix leaks 33-56%; a prefix-only version costs sk- up to 0.02%
+		...["# ", "// ", " * ", "* ", "+", "| ", "┃ ", "  "].map((p) => [`known limit: a whole token eats the word after "${p}"`, t("use sk-", B.slice(0, 48), "\n", p, "Thanks for the key"), "use [redacted:secret] for the key"] as const),
 	];
 	for (const [name, input, expected] of ROWS) it(name, () => assert.equal(redact(input), expected));
 
@@ -365,6 +475,22 @@ describe("wrapped redaction, exact output", () => {
 		}
 	});
 
+	it("a symbol that is not a prefix never joins (N20)", () => {
+		for (const sym of ["$", "=", "~", "@", "%", "!", "?", ";", ",", "&", "^", ":"]) {
+			const input = t("see ", B.slice(0, 20), "\n", sym, " ", B.slice(20, 40), " done");
+			assert.equal(redact(input), input, sym);
+		}
+	});
+
+	// PLAIN_WORD (M07-M10): 30 + 4 joins into a 34-char run; a 5-letter plain word in any case stops the join
+	it("a 4-letter fragment joins, a 5-letter plain word does not", () => {
+		for (const w of ["abcd", "Abcd", "ABCD"]) assert.equal(redact(t("see ", B.slice(0, 30), "\n", w, " done")), "see [redacted:secret] done", w);
+		for (const w of ["abcde", "Abcde", "ABCDE"]) {
+			const input = t("see ", B.slice(0, 30), "\n", w, " done");
+			assert.equal(redact(input), input, w);
+		}
+	});
+
 	// x1.y2 lines join with each other but never form a match, so they only push the running length
 	const filler = (n: number) => Array.from({ length: n }, () => "x1.y2\n").join("");
 	it("a token wrapped 3,000 characters into a chain of joinable lines is still joined", () => {
@@ -372,11 +498,53 @@ describe("wrapped redaction, exact output", () => {
 		const out = redact(t(filler(600), "use sk-", body.slice(0, 18), "\n", body.slice(18), " now"));
 		assert.ok(out.endsWith("use [redacted:secret] now"));
 	});
-	it("MAX_JOIN is 4096: a break exactly at that length starts a new group (known limit, lh-09r)", () => {
-		// 815 fillers of 5 chars = 4075, then "sk-" + 18 = 4096, so the second fragment is outside the group
+	it("a token straddling 4,096 characters into a chain is joined: there is no length cap (lh-09r)", () => {
+		// 815 fillers of 5 chars = 4075, then "sk-" + 18 = 4096: the old 4,096 cap started a new group here and left the rest whole
 		const body = B.slice(0, 40);
 		const out = redact(t(filler(815), "sk-", body.slice(0, 18), "\n", body.slice(18), " now"));
-		assert.ok(out.endsWith(t("[redacted:secret]\n", body.slice(18), " now")));
+		assert.ok(out.endsWith("\nx1.[redacted:secret] now"), out.slice(-60));
+	});
+});
+
+describe("linear time on one long run (lh-09r)", () => {
+	// 100x the length must take under 1,000x the time; linear measured 61-139x. Reverting one fix measured 3,000-13,700x on its row:
+	// KEY_VALUE, PATH_SECRET_URL, URL_RE and EMAIL rescanned a run from every start, and the JWT rule from every "eyJ". A cut × span
+	// check in the joined view measured 1,776-2,173x on the token-per-line row. At part A, 200 KB of letters took 49.8 s.
+	const fill = (n: number, unit: () => string) => {
+		let s = "";
+		while (s.length < n) s += unit();
+		return s.slice(0, n);
+	};
+	const LONG: ReadonlyArray<readonly [name: string, make: (r: () => number, n: number) => string]> = [
+		["alnum", (r, n) => pick(r, A62, n)],
+		["base64url with many - and _", (r, n) => pick(r, `${A62}-_-_-_`, n)],
+		["short dotted segments", (r, n) => fill(n, () => t(pick(r, A62, 1 + Math.floor(r() * 4)), "."))],
+		["letters only", (r, n) => pick(r, "abcdefghij", n)],
+		["short wrapped lines", (r, n) => fill(n, () => t(pick(r, A62, 8), "\n"))],
+		["one xoxb- token per line", (r, n) => fill(n, () => t("xox", "b-", pick(r, A62, 10), ".\n"))],
+		["base64url JSON blob", (r, n) => fill(n, () => t(pick(r, "-_", 1), "ey", "J", pick(r, A62, 36)))],
+	];
+	const time = (s: string) => {
+		const t0 = performance.now();
+		redact(s);
+		return performance.now() - t0;
+	};
+	LONG.forEach(([name, make], i) => {
+		it(`${name}: 100x the length takes under 1,000x the time`, (ctx) => {
+			const r = prng(3100 + i);
+			const small = t("see ", make(r, 1_000), " done");
+			const big = t("see ", make(r, 100_000), " done");
+			for (let k = 0; k < 3; k++) time(small);
+			// the least of interleaved runs, since load only adds time; stop once under the bar
+			let fast = Infinity;
+			let slow = Infinity;
+			for (let k = 0; k < 3 && !(slow / fast < 1000); k++) {
+				fast = Math.min(fast, time(small));
+				slow = Math.min(slow, time(big));
+			}
+			ctx.diagnostic(`${name}: 1 KB ${fast.toFixed(3)} ms, 100 KB ${slow.toFixed(1)} ms, ${(slow / fast).toFixed(0)}x`);
+			assert.ok(slow / fast < 1000, `${(slow / fast).toFixed(0)}x`);
+		});
 	});
 });
 
@@ -384,7 +552,7 @@ describe("false positives (lh-tw1.1, lh-lmc)", () => {
 	// directory names as they appear in cwd slugs; the mixed case comes from the names themselves
 	const DIRS = ["Documents", "dev", "work", "personal", "productivity", "learn", "harness", "fork", "feature", "projects", "Mobile", "Data", "payments", "frontend", "infra", "Initech", "acme", "client", "api", "web", "app", "core", "Shared", "notes", "src", "code", "repos", "Desktop", "sandbox", "experiments", "2025", "v2", "EK", "RK"];
 	const slug = (r: () => number) => `-Users-alice-${Array.from({ length: 3 + Math.floor(r() * 9) }, () => DIRS[Math.floor(r() * DIRS.length)]).join("-")}`;
-	it("mixed-case slugs: at most 0.25% alone, and a one-per-line list redacts exactly as its lines do", (ctx) => {
+	it("mixed-case slugs: at most 0.2% alone, and a one-per-line list redacts exactly as its lines do", (ctx) => {
 		const r = prng(777);
 		let single = 0;
 		let listed = 0;
@@ -397,7 +565,7 @@ describe("false positives (lh-tw1.1, lh-lmc)", () => {
 			assert.equal(list, t(redact(a), "\n", redact(b)));
 		}
 		ctx.diagnostic(`slugs: alone ${pct(single / N)}, in a two-line list ${pct(listed / N)}`);
-		assert.ok(single / N <= 0.0025);
+		assert.ok(single / N <= 0.002);
 	});
 
 	const WORDS = ["the", "quick", "parser", "returns", "a", "value", "when", "input", "is", "empty", "and", "then", "we", "retry", "with", "backoff", "because", "network", "errors", "happen", "often", "in", "practice", "eigenvalues", "matrix", "sorted", "pivot", "element", "quicksort", "degrades", "version", "release", "notes", "build", "test", "server", "client", "request", "response", "2025", "12", "v2", "O(n)", "x86_64", "README.md", "config.json"];

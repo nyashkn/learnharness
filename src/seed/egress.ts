@@ -53,7 +53,8 @@ export function composeAllowEgress(optOut: readonly string[]): AllowEgress {
 export function parseOptOut(text: string): string[] {
 	return text
 		.split("\n")
-		.map((line) => line.trim())
+		// whitespace then "#" starts a comment; a "#" inside an entry (c#-tools) stays
+		.map((line) => line.replace(/\s#.*/s, "").trim())
 		.filter((line) => line !== "" && !line.startsWith("#"));
 }
 
