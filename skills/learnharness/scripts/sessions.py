@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from _data import DataError, add_common_arguments, data_root, print_json, read_chat, safe_path
+from _data import DataError, add_common_arguments, data_root, print_json, read_chat, safe_path, store_backend
 
 QUESTION_TOOLS = {"quiz", "probe", "ask_user_question", "explain", "recall"}
 LEARNING_TOOLS = QUESTION_TOOLS | {"problem", "conclude", "probe_done", "plan_init", "research", "pdf", "visual", "demo"}
@@ -436,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         root = data_root(args.data_dir)
+        store_backend(root)  # refuse a corrupt or newer-layout marker; chats are files on every backend
         if args.command == "list":
             value = list_sessions(root)
             if args.format == "json":

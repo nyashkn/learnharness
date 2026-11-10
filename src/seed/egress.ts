@@ -35,6 +35,33 @@ export function createAllowEgress(optOut: readonly string[]): AllowEgress {
 	};
 }
 
+/**
+ * Default-on egress holds with an empty opt-out list. With any entry, a project with no usable provenance is refused:
+ * Signet entities, cwd-less rows and slugs that redaction swallowed cannot be proven not to be opted-out work.
+ */
+export function composeAllowEgress(optOut: readonly string[]): AllowEgress {
+	const inner = createAllowEgress(optOut);
+	const listed = optOut.some((entry) => canonProject(entry) !== "");
+	return (project) => (matchableProject(project) === null ? !listed : inner(project));
+}
+
+export function parseOptOut(text: string): string[] {
+	return text
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line !== "" && !line.startsWith("#"));
+}
+
+/** ENOENT is an empty list; any other failure propagates, because a list we could not read must not mean "allow all". */
+export async function readOptOut(file: string, read: (file: string) => Promise<string>): Promise<string[]> {
+	try {
+		return parseOptOut(await read(file));
+	} catch (error) {
+		if ((error as { code?: string }).code === "ENOENT") return [];
+		throw error;
+	}
+}
+
 export function clipSnippet(redactedText: string): string {
 	return redactedText.length <= MAX_SNIPPET_CHARS ? redactedText : redactedText.slice(0, MAX_SNIPPET_CHARS);
 }
