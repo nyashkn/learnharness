@@ -5,7 +5,7 @@ import { providerEventObserver } from "./provider-events.ts";
 import type { Usage } from "@earendil-works/pi-ai";
 import { PATHS } from "../../config.ts";
 import { APP_IDENTITY, piEngineFor, type PiEngine } from "./models.ts";
-import { effectivePromptSegments } from "./prompt-segments.ts";
+import { effectivePromptSegments, type ReadOverride } from "./prompt-segments.ts";
 import {
 	askUserQuestionTool,
 	createProberTools,
@@ -74,8 +74,11 @@ export type AgentKind = "prober" | "teacher" | "practice";
  *  tests/prompt-overrides.test.ts). Overrides are a static-file read
  *  through config paths, not request state — the store import carries no
  *  chat/job machinery. */
-export function composeInstructions(kind: AgentKind, switches?: Record<string, boolean>): string {
-	const segments = effectivePromptSegments(kind, switches ?? {});
+export function composeInstructions(kind: AgentKind): string;
+export function composeInstructions(kind: AgentKind, switches: Record<string, boolean>, readOverride: ReadOverride): string;
+export function composeInstructions(kind: AgentKind, switches?: Record<string, boolean>, readOverride?: ReadOverride): string {
+	// No switches → no override can compose, so no reader is needed.
+	const segments = effectivePromptSegments(kind, switches ?? {}, readOverride ?? (() => null));
 	return segments
 		.map((s) => (s.enabled ? s.overrideText! : s.sourceText))
 		.map((t) => t.trim())
@@ -123,6 +126,9 @@ export interface AgentBuildOptions {
 	 *  fresh per turn, honoring enabled overrides (switch on + file
 	 *  exists); absent → the cached pure-source composition. */
 	promptSwitches?: Record<string, boolean>;
+	/** The override reader paired with promptSwitches (the core port's
+	 *  PromptOverrideStore.readOverride) — required whenever switches are. */
+	readPromptOverride?: ReadOverride;
 	/** Native conversation identity: the existing persisted chat id, reused
 	 * across reconstructed prober, teacher, and practice Agents.
 	 * Debug: when set AND LH_PROVIDER_EVENTS=1, raw provider stream events
@@ -184,8 +190,9 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 	const engine = opts.engine ?? piEngineFor(kind as "prober" | "teacher");
 	const stopper = makeQuestionStopper(kind);
 	const narrationGuard = narrationGuardApplies(kind, engine.model, opts.tools !== undefined);
+	if (opts.promptSwitches && !opts.readPromptOverride) throw new Error("promptSwitches needs readPromptOverride");
 	const composedPrompt = opts.promptSwitches
-		? composeInstructions(kind, opts.promptSwitches)
+		? composeInstructions(kind, opts.promptSwitches, opts.readPromptOverride!)
 		: composedInstructions[kind]!;
 	const systemPrompt = narrationGuard ? `${composedPrompt}\n\n---\n\n${SEND_TO_USER_DELIVERY_RULE}` : composedPrompt;
 	// Debug recorder (owner, 2026-10-04): raw provider events when

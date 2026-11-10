@@ -46,6 +46,8 @@ const { PUT: putSettingsSection } = await import("../app/api/settings/[section]/
 const { PUT: putPromptText, DELETE: deletePromptText } = await import("../app/api/settings/prompts/[...segment]/route.ts");
 const { GET: getPromptSegments } = await import("../app/api/settings/prompts/route.ts");
 const { readSettingsRecord } = await import("../src/server/index.ts");
+const { createPromptOverrides } = await import("../src/store/prompt-overrides.ts");
+const readOverride = promptOverrides.readOverride;
 
 /** The REAL repo prompts dir this suite must never touch (read-only). */
 const REPO_PROMPTS = path.resolve(import.meta.dirname, "../data/prompts");
@@ -151,7 +153,7 @@ describe("the override store", () => {
 
 	it("switches are NOT the store's concern — files alone never enable", () => {
 		promptOverrides.writeOverride("system-prompt.md", "custom base");
-		const off = effectivePromptSegments("teacher", {}) // no switches
+		const off = effectivePromptSegments("teacher", {}, readOverride) // no switches
 			.find((s) => s.path === "system-prompt.md");
 		assert.ok(off);
 		assert.equal(off.overrideText, "custom base"); // file exists...
@@ -162,8 +164,8 @@ describe("the override store", () => {
 
 describe("the source-derived segment list", () => {
 	it("mirrors composeInstructions' discovery: base first, numeric fragments sorted, per agent", () => {
-		const prober = effectivePromptSegments("prober", {});
-		const teacher = effectivePromptSegments("teacher", {});
+		const prober = effectivePromptSegments("prober", {}, readOverride);
+		const teacher = effectivePromptSegments("teacher", {}, readOverride);
 		// The shared base composes both prompts, SAME path.
 		assert.equal(prober[0]?.path, "system-prompt.md");
 		assert.equal(teacher[0]?.path, "system-prompt.md");
@@ -216,7 +218,7 @@ describe("the source-derived segment list", () => {
 	it("effective segments: switch+file → override; either missing → source text", () => {
 		promptOverrides.writeOverride("teacher/20-teaching.md", "MY WAY");
 		const switches = { "teacher/20-teaching.md": true, "system-prompt.md": false };
-		const teacher = effectivePromptSegments("teacher", switches);
+		const teacher = effectivePromptSegments("teacher", switches, readOverride);
 		const teaching = teacher.find((s) => s.path === "teacher/20-teaching.md");
 		assert.ok(teaching);
 		assert.equal(teaching.overrideText, "MY WAY");
@@ -227,7 +229,7 @@ describe("the source-derived segment list", () => {
 		assert.equal(base.overrideText, null);
 		assert.equal(base.enabled, false);
 		// a switch for a segment with NO override file never enables it
-		const weird = effectivePromptSegments("teacher", { "teacher/10-planning.md": true });
+		const weird = effectivePromptSegments("teacher", { "teacher/10-planning.md": true }, readOverride);
 		const planning = weird.find((s) => s.path === "teacher/10-planning.md");
 		assert.ok(planning);
 		assert.equal(planning.enabled, false);
@@ -275,17 +277,35 @@ describe("composeInstructions: override honoring + the byte-identical source pat
 	it("an enabled override swaps in; switch off or file absent composes source", () => {
 		promptOverrides.writeOverride("teacher/20-teaching.md", "CUSTOM TEACHING LOOP");
 		try {
-			const on = composeInstructions("teacher", { "teacher/20-teaching.md": true });
+			const on = composeInstructions("teacher", { "teacher/20-teaching.md": true }, readOverride);
 			assert.ok(on.includes("CUSTOM TEACHING LOOP"), "override composes when switch on");
 			assert.ok(!on.includes("# Teach — one step at a time"), "source text is replaced");
 			// switch off → source default (the file stays on disk)
-			const off = composeInstructions("teacher", {});
+			const off = composeInstructions("teacher", {}, readOverride);
 			assert.ok(off.includes("# Teach — one step at a time"), "source composes when switch off");
 			// switch on for a segment with NO file → source (enabled needs both)
-			const noFile = composeInstructions("teacher", { "teacher/10-planning.md": true });
+			const noFile = composeInstructions("teacher", { "teacher/10-planning.md": true }, readOverride);
 			assert.ok(noFile.includes("# Planning"), "file absent → source default");
 		} finally {
 			promptOverrides.deleteOverride("teacher/20-teaching.md");
+		}
+	});
+
+	it("composes through the injected store reader, not config.PROMPTS_OVERRIDE_DIR (lh-rmz)", () => {
+		const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-other-prompts-"));
+		assert.notEqual(otherDir, PROMPTS_OVERRIDE_DIR);
+		const other = createPromptOverrides(otherDir, { dataDir: TMP_DATA });
+		other.writeOverride("teacher/20-teaching.md", "OTHER STORE TEACHING");
+		try {
+			const switches = { "teacher/20-teaching.md": true };
+			assert.ok(composeInstructions("teacher", switches, other.readOverride).includes("OTHER STORE TEACHING"));
+			const seg = effectivePromptSegments("teacher", switches, other.readOverride).find((s) => s.path === "teacher/20-teaching.md");
+			assert.equal(seg?.enabled, true);
+			assert.equal(seg?.overrideText, "OTHER STORE TEACHING");
+			// the app store has no such file: the same switches compose source there
+			assert.ok(!composeInstructions("teacher", switches, readOverride).includes("OTHER STORE TEACHING"));
+		} finally {
+			fs.rmSync(otherDir, { recursive: true, force: true });
 		}
 	});
 
@@ -294,7 +314,7 @@ describe("composeInstructions: override honoring + the byte-identical source pat
 		try {
 			const switches = { "shared/30-learner-files.md": true };
 			for (const kind of ["teacher", "prober"] as const) {
-				const composed = composeInstructions(kind, switches);
+				const composed = composeInstructions(kind, switches, readOverride);
 				assert.ok(composed.includes("MY SHARED FILES DOCTRINE"), `${kind} composes the override`);
 				assert.ok(!composed.includes("## Learner files"), `${kind} source fragment is replaced`);
 			}
@@ -312,7 +332,7 @@ describe("composeInstructions: override honoring + the byte-identical source pat
 			// an injected engine; a scripted faux one stands in (the prompt is
 			// what's under test here, not the model).
 			const engine = fauxEngine();
-			const agent = createTeacherAgent(undefined, { engine, promptSwitches: { "system-prompt.md": true } });
+			const agent = createTeacherAgent(undefined, { engine, promptSwitches: { "system-prompt.md": true }, readPromptOverride: readOverride });
 			assert.ok(agent.state.systemPrompt.includes("TOTALLY CUSTOM BASE"));
 			const source = createTeacherAgent(undefined, { engine });
 			assert.ok(!source.state.systemPrompt.includes("TOTALLY CUSTOM BASE"), "no switches → cached source");
@@ -416,7 +436,7 @@ describe("Practice settings API and effective prompt loading", () => {
 		assert.equal(response.status, 200);
 		const view = await response.json();
 		for (const kind of ["teacher", "prober", "practice"] as const) {
-			assert.deepEqual(view[kind], effectivePromptSegments(kind, readSettingsRecord()?.agent?.prompts ?? {}));
+			assert.deepEqual(view[kind], effectivePromptSegments(kind, readSettingsRecord()?.agent?.prompts ?? {}, readOverride));
 		}
 		assert.deepEqual(view.practice.map((s: { path: string }) => s.path), [
 			"practice/00-base.md", "practice/10-doctrine.md",
@@ -434,7 +454,7 @@ describe("Practice settings API and effective prompt loading", () => {
 				method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
 			}), context);
 			assert.equal(saved.status, 200);
-			const loaded = () => teacherAgent.composeInstructions("practice", readSettingsRecord()?.agent?.prompts ?? {});
+			const loaded = () => teacherAgent.composeInstructions("practice", readSettingsRecord()?.agent?.prompts ?? {}, readOverride);
 			assert.equal((await putSection("agent", { prompts: {} })).status, 200);
 			assert.equal(loaded(), defaults.practice, "saving text alone does not enable it");
 			for (const on of [true, false, true]) {
@@ -443,10 +463,10 @@ describe("Practice settings API and effective prompt loading", () => {
 				const row = view.practice.find((s: { path: string }) => s.path === segment);
 				assert.equal(row.enabled, on);
 				assert.equal(row.overrideText, text);
-				const expected = effectivePromptSegments("practice", {}).map((s) => (on && s.path === segment ? text : s.sourceText).trim()).filter(Boolean).join("\n\n---\n\n");
+				const expected = effectivePromptSegments("practice", {}, readOverride).map((s) => (on && s.path === segment ? text : s.sourceText).trim()).filter(Boolean).join("\n\n---\n\n");
 				assert.equal(loaded(), expected, "actual composed instructions replace exactly one source fragment");
 				for (const kind of ["teacher", "prober"] as const) {
-					assert.equal(teacherAgent.composeInstructions(kind, readSettingsRecord()?.agent?.prompts ?? {}), defaults[kind]);
+					assert.equal(teacherAgent.composeInstructions(kind, readSettingsRecord()?.agent?.prompts ?? {}, readOverride), defaults[kind]);
 				}
 			}
 			assert.equal((await deleteSegment(segment.split("/"))).status, 200);
@@ -457,7 +477,7 @@ describe("Practice settings API and effective prompt loading", () => {
 			const row = view.practice.find((s: { path: string }) => s.path === segment);
 			assert.equal(row.enabled, false);
 			assert.equal(row.overrideText, null);
-			assert.equal(teacherAgent.composeInstructions("practice", { [segment]: true }), defaults.practice, "missing file cannot enable an override");
+			assert.equal(teacherAgent.composeInstructions("practice", { [segment]: true }, readOverride), defaults.practice, "missing file cannot enable an override");
 		});
 	}
 
@@ -468,8 +488,8 @@ describe("Practice settings API and effective prompt loading", () => {
 			promptOverrides.writeOverride(segment, text);
 			try {
 				for (const kind of ["teacher", "prober", "practice"] as const) {
-					const member = effectivePromptSegments(kind, {}).some((s) => s.path === segment);
-					const composed = teacherAgent.composeInstructions(kind, { [segment]: true });
+					const member = effectivePromptSegments(kind, {}, readOverride).some((s) => s.path === segment);
+					const composed = teacherAgent.composeInstructions(kind, { [segment]: true }, readOverride);
 					assert.equal(composed.includes(text), member);
 					if (!member) assert.equal(composed, defaults[kind]);
 				}

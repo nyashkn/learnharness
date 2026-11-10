@@ -7,11 +7,9 @@
  * rules the pre-P2 loader used, now in one place.
  *
  * The architecture law pins the layout: the agent layer never imports the
- * store adapters, so the override-file READ lives here too (config-anchored
- * static file, same discipline as reading the source fragments); the
- * override-file CRUD (write/delete/list — the mutating store behind the
- * core port) stays in src/store/prompt-overrides.ts. Both sides share the
- * pure path grammar (src/core/prompt-segments.ts).
+ * store adapters, so the override READ arrives through the core port
+ * (PromptOverrideStore.readOverride, injected as a ReadOverride); the source
+ * fragments stay config-anchored static files read here.
  *
  * SEGMENTS: the SHARED base (src/agent/system-prompt.md), then every
  * numeric-prefix *.md fragment in the agent's own directory (sorted by
@@ -21,7 +19,7 @@
  * longer ships stops composing automatically.
  *
  * OVERRIDES: override files mirror the source layout under
- * config.PROMPTS_OVERRIDE_DIR — "system-prompt.md" at the root,
+ * the store's prompts dir — "system-prompt.md" at the root,
  * "shared/<file>", "teacher/<file>" / "prober/<file>". File presence is NOT
  * the override: the settings SWITCH is (owner decision) — the user keeps
  * their file and flips back to the source default to compare.
@@ -29,8 +27,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { PATHS, PROMPTS_OVERRIDE_DIR } from "../../config.ts";
-import { FRAGMENT_RE, isValidSegmentPath, type PromptAgent, type PromptSegmentInfo } from "../core/prompt-segments.ts";
+import { PATHS } from "../../config.ts";
+import { FRAGMENT_RE, type PromptAgent, type PromptSegmentInfo } from "../core/prompt-segments.ts";
 
 const PROMPTS_DIR = path.join(PATHS.root, "src", "agent", "prompts");
 
@@ -42,22 +40,10 @@ const PROMPTS_DIR = path.join(PATHS.root, "src", "agent", "prompts");
  *  (practice has no such tools). */
 const PRACTICE_SHARED_FRAGMENTS = ["10-voice.md", "15-accuracy.md", "16-mental-model.md", "40-formatting.md"];
 
-/** Absolute path for an override file (unchecked — validate first). */
-function overrideFileFor(segmentPath: string): string {
-	return path.join(PROMPTS_OVERRIDE_DIR, ...segmentPath.split("/"));
-}
-
-/** Read one override file, or null when absent/invalid — the composition
- *  side's reader (the store's readOverride is the same mirror layout,
- *  kept separate because the layers may not import each other). */
-export function readPromptOverride(segmentPath: string): string | null {
-	if (!isValidSegmentPath(segmentPath)) return null;
-	try {
-		return fs.readFileSync(overrideFileFor(segmentPath), "utf-8");
-	} catch {
-		return null;
-	}
-}
+/** The override read, injected: the core port's PromptOverrideStore.readOverride
+ *  (callers pass stores.promptOverrides.readOverride). The agent layer may not
+ *  import the store adapters, so the reader arrives as a parameter. */
+export type ReadOverride = (segmentPath: string) => string | null;
 
 /** List the SOURCE segments for one agent, in composition order — the
  *  shared base, then the agent's own fragments sorted by filename, then
@@ -105,6 +91,7 @@ export function listSourceSegments(agent: PromptAgent): Array<{ path: string; sh
 export function effectivePromptSegments(
 	agent: PromptAgent,
 	switches: Record<string, boolean>,
+	readOverride: ReadOverride,
 ): PromptSegmentInfo[] {
 	return listSourceSegments(agent).map((segment) => {
 		let sourceText: string;
@@ -113,7 +100,7 @@ export function effectivePromptSegments(
 		} catch {
 			sourceText = ""; // source unreadable — the agent loader would crash anyway
 		}
-		const overrideText = readPromptOverride(segment.path);
+		const overrideText = readOverride(segment.path);
 		return {
 			path: segment.path,
 			sourceText,
