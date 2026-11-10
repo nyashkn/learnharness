@@ -604,6 +604,28 @@ describe("false positives (lh-tw1.1, lh-lmc)", () => {
 		assert.ok(single / N <= 0.002);
 	});
 
+	// lh-9hg: a "-Users-name" head can hold a long run's entropy down; the "~" cut left the tail above MIN_ENTROPY and a second pass redacted it.
+	it("cwd slugs: redact is idempotent (lh-9hg)", () => {
+		const slugArb = fc.tuple(fc.constantFrom("Users", "home"), fc.constantFrom("alice", "someone", "bob_smith", "a1", "x"), fc.array(fc.constantFrom(...DIRS), { minLength: 3, maxLength: 14 }))
+			.map(([root, name, dirs]) => `-${root}-${name}-${dirs.join("-")}`);
+		fc.assert(
+			fc.property(slugArb, (x) => {
+				const once = redact(x);
+				assert.equal(redact(once), once);
+			}),
+			{ numRuns: 20_000 },
+		);
+	});
+
+	// shrunk from the pre-fix code: it gave "~-dev-acme-..." here and a second pass changed the tail
+	for (const x of [
+		"-Users-someone-dev-acme-2025-harness-sandbox-Mobile-v2-Shared-Documents-TQ-productivity",
+		"-Users-alice-productivity-Shared-web-2025-learn-lh-dev_work-Mobile-Desktop-sandbox-harness-src-Shared",
+		"-home-someone-2025-experiments-Shared-sandbox-RK-Documents-x2-productivity-payments-payments-learn-Initech-2025",
+	]) {
+		it(`cwd slug regression: ${x.slice(0, 30)}...`, () => assert.equal(redact(x), "~[redacted:secret]"));
+	}
+
 	const WORDS = ["the", "quick", "parser", "returns", "a", "value", "when", "input", "is", "empty", "and", "then", "we", "retry", "with", "backoff", "because", "network", "errors", "happen", "often", "in", "practice", "eigenvalues", "matrix", "sorted", "pivot", "element", "quicksort", "degrades", "version", "release", "notes", "build", "test", "server", "client", "request", "response", "2025", "12", "v2", "O(n)", "x86_64", "README.md", "config.json"];
 	const words = (r: () => number, n: number) => Array.from({ length: n }, () => WORDS[Math.floor(r() * WORDS.length)]).join(" ");
 	const breaks = ["\n", "\r\n", "  \n", "\n> ", "\n│ ", "\n| ", "\n# ", "\n// ", "\n * ", "\n+", "\r", " │\n│ "];
