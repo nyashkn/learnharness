@@ -12,6 +12,8 @@ Paths below are relative to the selected **data** directory:
 
 ```text
 chats/<session-id>.json    Full session: messages, optional plan, usage metadata
+storage.json              Storage marker: {"layout": 1, "backend": "file" | "sqlite" | "doltlite"}; absent means file
+graph.sqlite              SQLite backend only: the graph ledgers and sources (see below)
 graph/nodes.jsonl          Proposition assertions; IDs can repeat
 graph/chains.jsonl         Reasoning-chain assertions; logical chains can repeat
 graph/sources.json        Imported-note source metadata, keyed by source ID
@@ -22,6 +24,21 @@ graph/positions.json      Canvas layout, not semantic relationships
 graph/render-settings.json  Presentation preferences, not learning evidence
 jobs/<job-id>.json        Background work records; delivered artifacts also appear in sessions
 ```
+
+### Storage backends
+
+The readers check `storage.json` first. `file` (also when it is missing) uses the
+`graph/` files above. `sqlite` keeps the graph in `graph.sqlite`: tables
+`ledger_nodes` and `ledger_chains` hold the same lines as `nodes.jsonl` and
+`chains.jsonl` (`seq`, `line_json`), table `sources` holds the source records
+(`id`, `record_json`), and `lh_meta.line_format` is the graph format version.
+`positions.json` and `render-settings.json` stay files in `graph/`. The readers
+open it read-only and never write in the data folder. Sessions are read
+from `chats/` on every backend. A marker that is not an object, has an unknown
+backend, or has a layout newer than 1 is refused.
+
+A `doltlite` data folder is refused: the readers cannot open it. Export it first
+with `pnpm run lh -- export`, then pass the exported folder as `--data-dir`.
 
 `settings.json`, downloaded models, caches, and provider debug logs are not needed
 to interpret learning history. `auth.json` is normally one directory above data;
