@@ -484,6 +484,15 @@ db.transaction(()=>db.run("INSERT INTO ledger(line_json) VALUES ('child')"));con
 		assert.throws(() => openDoltlite(path.join(sub, "nope.db"), { readOnly: true }), /unable to open/);
 		assert.deepEqual(fs.readdirSync(sub), []);
 	});
+	test("F22 ORDER BY rowid on a TEXT primary key does not return insertion order (so readSources order is unspecified and callers sort)", () => {
+		const db = open();
+		db.exec("CREATE TABLE t (id TEXT PRIMARY KEY, v INTEGER)");
+		const inserted = ["zz", "aa", "mm", "bb"];
+		for (const id of inserted) db.run("INSERT INTO t(id, v) VALUES (?, 1)", id);
+		const got = db.all<{ id: string }>("SELECT id FROM t ORDER BY rowid").map((r) => r.id);
+		assert.notDeepEqual(got, inserted);
+		assert.deepEqual(got, ["mm", "aa", "bb", "zz"], "observed on 0.51.9; the order is the engine's key order, not ours to rely on");
+	});
 });
 
 describe("DoltLite facts", () => {

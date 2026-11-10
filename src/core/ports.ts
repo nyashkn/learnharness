@@ -105,7 +105,7 @@ export interface GraphStore {
 	/** Upsert one imported-notes source record (config.SOURCES_FILE — a
 	 *  JSON map, not a ledger; an upsert keeps the existing usage log). */
 	upsertSource(source: NotesSource): void;
-	/** Every notes source record, by id order-insensitive. */
+	/** Every notes source record. The order is unspecified (DoltLite does not return insertion order); callers sort. */
 	readSources(): NotesSource[];
 	/** Remove imported-source bookkeeping only; the service removes graph traces first. */
 	deleteSources(ids: ReadonlySet<string>): number;

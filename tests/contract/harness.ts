@@ -36,6 +36,8 @@ export interface StoreBundle {
 		stampNewerFormat(): void;
 		/** Undo stampNewerFormat. */
 		clearFormatStamp(): void;
+		/** Versioned back-ends only (capabilities.commits): the commit messages of the store, newest first, read through a separate read-only connection. [] before the store exists. */
+		commitMessages?(): string[];
 	};
 	/** Release handles. The harness removes the folder. */
 	dispose(): void;
@@ -44,7 +46,9 @@ export interface StoreBundle {
 export interface AdapterFactory {
 	name: string;
 	/** Self-declared, then checked against the opened bundle (a wrong `false` would silently skip properties). */
-	capabilities: { revision: boolean; corruptLines: boolean; refusesAtOpen: boolean };
+	capabilities: { revision: boolean; corruptLines: boolean; refusesAtOpen: boolean; /** A versioned back-end: bundles expose hooks.commitMessages. */ commits: boolean };
+	/** Per-property time limit when the engine fsyncs every commit (DoltLite); default PROPERTY_TIMEOUT_MS. Run counts are NOT changed. */
+	propertyTimeoutMs?: number;
 	/** Open a FRESH, EMPTY store whose bytes live under `dir` (an existing empty folder the harness owns and removes). */
 	open(dir: string): Promise<StoreBundle>;
 }

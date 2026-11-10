@@ -23,6 +23,13 @@ describe("standalone JavaScript tracing exclusions and native workaround policy"
 			assert.equal(ignored(file("node_modules/@earendil-works/pi-ai/dist/providers/data/models.json")), true);
 			assert.ok(nextConfig.outputFileTracingIncludes!["*"]!.includes("node_modules/@earendil-works/pi-ai/dist/providers/data/**/*"));
 		});
+		it(`drops every DoltLite prebuild during traversal but not the package entry (${windows ? "Windows" : "POSIX"})`, () => {
+			for (const plat of ["darwin-arm64", "linux-x64", "win32-x64"]) {
+				assert.equal(ignored(file(`node_modules/.pnpm/@dolthub+doltlite@0.51.9/node_modules/@dolthub/doltlite/prebuilds/${plat}/doltlite.node`)), true, plat);
+			}
+			assert.equal(ignored(file("node_modules/.pnpm/@dolthub+doltlite@0.51.9/node_modules/@dolthub/doltlite/prebuilds/darwin-arm64/doltlite")), true, "the CLI");
+			assert.equal(ignored(file("node_modules/@dolthub/doltlite/index.js")), false);
+		});
 		it(`does not confuse dependency suffixes with data directories (${windows ? "Windows" : "POSIX"})`, () => {
 			for (const relative of ["node_modules/gcp-metadata/build/src/index.js", "node_modules/form-data/lib/form_data.js", "node_modules/@swc/helpers/_/_ts_metadata.js", "node_modules/@swc/helpers/_/_ts_metadata/index.js", "node_modules/somedata/runtime.js"]) {
 				assert.equal(ignored(file(relative)), false, relative);
@@ -37,7 +44,7 @@ describe("standalone JavaScript tracing exclusions and native workaround policy"
 		assert.equal(ignore(`${root}/node_modules/gcp-metadata/build/src/index.js`), false);
 	});
 	it("preserves all secret exclusions exactly", () => {
-		assert.deepEqual(patterns, ["**/data/**/*", "auth.json", "chatgpt-credentials.json*", "github-copilot-credentials.json*", "xai-credentials.json*", ".env*"]);
+		assert.deepEqual(patterns, ["**/data/**/*", "auth.json", "chatgpt-credentials.json*", "github-copilot-credentials.json*", "xai-credentials.json*", ".env*", "**/@dolthub/doltlite/prebuilds/**/*"]);
 	});
 	it("retains exactly the narrow native-Turbopack closure workaround and existing runtime includes", () => {
 		assert.deepEqual(nextConfig.outputFileTracingIncludes!["*"], [

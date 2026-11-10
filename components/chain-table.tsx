@@ -882,6 +882,7 @@ export function ChainTableOverlay({
 			{!selectMode && <DeleteSourceDialog open={deleteOpen}
 				sources={deletion?.sources ?? []}
 				folders={deletion?.folders ?? []}
+				keepsHistory={directory?.keepsHistory ?? false}
 				onClose={() => setDeletion(null)}
 				onDelete={(deleteSessions) => {
 					const opening = directoryOpening.current;

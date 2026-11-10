@@ -32,6 +32,8 @@ export interface SourceEntry {
 export interface SourceDirectory {
 	organization: SourceOrganization;
 	sources: SourceEntry[];
+	/** Set by the GET route only: deleted sources stay in a DoltLite store's version history. */
+	keepsHistory?: boolean;
 }
 /** Chains browsing and practice picking share this presentation inventory.
  * Keep the full organization: hidden sessions still own their placements. */

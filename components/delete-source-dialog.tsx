@@ -5,9 +5,9 @@ import { createPortal } from "react-dom";
 import { useBackdropDismiss } from "./backdrop-dismiss";
 import type { SourceEntry, SourceFolder } from "@/src/core";
 
-export function DeleteSourceBody({ sources, folders, deleteSessions, onDeleteSessions, busy, failure, onClose, onRun }: {
+export function DeleteSourceBody({ sources, folders, deleteSessions, onDeleteSessions, busy, failure, onClose, onRun, keepsHistory = false }: {
 	sources: SourceEntry[]; folders: SourceFolder[]; deleteSessions: boolean; onDeleteSessions: (checked: boolean) => void;
-	busy: boolean; failure: string; onClose: () => void; onRun: () => void;
+	busy: boolean; failure: string; onClose: () => void; onRun: () => void; keepsHistory?: boolean;
 }) {
 	const chats = sources.filter((s) => s.kind === "chat");
 	const names = [...sources.map((s) => s.label ?? s.id), ...folders.map((f) => f.name)];
@@ -17,6 +17,9 @@ export function DeleteSourceBody({ sources, folders, deleteSessions, onDeleteSes
 		<p className="mt-1.5 font-mono text-sm" data-testid="source-deletion-names">{names.slice(0, 8).join(", ")}{names.length > 8 ? `, and ${names.length - 8} more` : ""}</p>
 		{sources.length > 0 && <p className="mt-2 text-sm text-muted-foreground" data-testid="source-deletion-contributions">
 			Removes these sources’ contributions to propositions and reasoning chains. Knowledge supported by other sources survives; knowledge supported only by these sources is removed.
+		</p>}
+		{keepsHistory && sources.length > 0 && <p className="mt-2 text-sm text-muted-foreground" data-testid="source-deletion-history">
+			{"Removed from your graph and every view. It stays in this store's version history until you purge history."}
 		</p>}
 		<p className="mt-2 text-xs text-muted-foreground">Imported source records are removed, but original files on disk are never changed. Selected folders are removed only when empty; folders needed by kept sessions remain.</p>
 		{chats.length > 0 && <label className="mt-4 flex cursor-pointer items-start gap-2.5 rounded-lg border border-border/60 px-4 py-3">
@@ -34,8 +37,8 @@ export function DeleteSourceBody({ sources, folders, deleteSessions, onDeleteSes
 	</div>;
 }
 
-export function DeleteSourceDialog({ open, sources, folders, onDelete, onClose }: {
-	open: boolean; sources: SourceEntry[]; folders: SourceFolder[]; onDelete: (deleteSessions: boolean) => Promise<void>; onClose: () => void;
+export function DeleteSourceDialog({ open, sources, folders, onDelete, onClose, keepsHistory }: {
+	open: boolean; sources: SourceEntry[]; folders: SourceFolder[]; onDelete: (deleteSessions: boolean) => Promise<void>; onClose: () => void; keepsHistory?: boolean;
 }) {
 	const [deleteSessions, setDeleteSessions] = useState(false), [busy, setBusy] = useState(false), [failure, setFailure] = useState("");
 	useEffect(() => { if (!open) { setDeleteSessions(false); setBusy(false); setFailure(""); } }, [open]);
@@ -56,6 +59,6 @@ export function DeleteSourceDialog({ open, sources, folders, onDelete, onClose }
 	};
 	return createPortal(<div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80" {...backdrop}>
 		<DeleteSourceBody sources={sources} folders={folders} deleteSessions={deleteSessions} onDeleteSessions={setDeleteSessions}
-			busy={busy} failure={failure} onClose={onClose} onRun={() => { void run(); }} />
+			busy={busy} failure={failure} onClose={onClose} onRun={() => { void run(); }} keepsHistory={keepsHistory} />
 	</div>, document.body);
 }

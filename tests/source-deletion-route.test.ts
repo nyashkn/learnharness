@@ -37,6 +37,10 @@ it("removes zero-proposition imports and nested empty containers, leaving origin
 	assert.equal(fs.readFileSync(original, "utf8"), "original bytes"); assert.equal(typeof result.graphRevision, "number");
 	assert.equal((await remove(["zero"], ["outer", "inner", "empty"])).status, 200, "retry is idempotent");
 });
+it("DELETE carries keepsHistory like GET (false on the file backend)", async () => {
+	book("kh");
+	assert.equal((await (await remove(["kh"])).json()).keepsHistory, false);
+});
 it("purges only selected source contributions; shared identity, foreign aliases and unrelated legacy nodes survive", async () => {
 	book("a"); book("b");
 	stores.graphStore.appendNode(node("shared", ["a"], ["a phrasing"]));

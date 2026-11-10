@@ -24,7 +24,7 @@ import { Value } from "typebox/value";
 import pkg from "../../package.json" with { type: "json" };
 import { writeFileAtomicSync } from "./atomic-write.ts";
 import { assertGraphFormat } from "./graph-format.ts";
-import { BACKENDS, CURRENT_LAYOUT, graphFormatFileIn, markerFile, readMarker, type Backend } from "./marker.ts";
+import { adapterFor, BACKENDS, CURRENT_LAYOUT, graphFormatFileIn, markerFile, NoAdapterError, readMarker, type Backend } from "./marker.ts";
 import { openDoltlite } from "./sql/drivers/doltlite.ts";
 import { openNodeSqlite } from "./sql/drivers/node-sqlite.ts";
 import type { SqlDriver } from "./sql/driver.ts";
@@ -40,7 +40,7 @@ export const MIGRATE_TEXT = {
 	usage: `usage: lh migrate --to <file|sqlite|doltlite> [--data-dir <path>] [--allow-empty-source]\n  An empty source refuses to replace a target that holds data unless --allow-empty-source is passed.\n  ${SOURCE_NOTE}`,
 	exportUsage: `usage: lh export [--out <dir>] [--data-dir <path>]\n  ${SOURCE_NOTE}`,
 	noDataDir: (dir: string) => `the data folder ${dir} does not exist`,
-	doltliteTarget: "this build cannot open a DoltLite data folder yet, so migrating to it would leave the app unable to start; nothing was changed. DoltLite as a source (the exit path) works",
+	doltliteTarget: (host: string) => `DoltLite runs only on macOS arm64 in this build (this machine is ${host}), so the app could not open the folder after migrating; nothing was changed. DoltLite as a source (the exit path) works`,
 	sameBackend: (backend: string) => `the data folder already uses the ${backend} backend; nothing to migrate`,
 	missingStore: (store: string, backend: string) => `the marker names ${backend} but ${store} is missing; restore it before migrating or exporting`,
 	markerChanged: "the storage marker changed while taking the locks; nothing was changed, run again",
@@ -491,8 +491,6 @@ export interface MigrateOptions {
 	now?: () => Date;
 	/** `--allow-empty-source`: let a source with no data replace a target that holds data. */
 	allowEmptySource?: boolean;
-	/** Test only. D3 adds the doltlite adapter, removes the refusal in migrateBackend and removes this option. The CLI never passes it. */
-	allowDoltliteTarget?: boolean;
 }
 export interface MigrateReport {
 	from: Backend;
@@ -683,7 +681,15 @@ export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateO
 
 	// a. refusals: before any write or lock
 	if (!(BACKENDS as readonly string[]).includes(to)) throw new MigrateRefusedError(MIGRATE_TEXT.usage);
-	if (to === "doltlite" && options.allowDoltliteTarget !== true) throw new MigrateRefusedError(MIGRATE_TEXT.doltliteTarget);
+	// The app's own platform rule: where it refuses a DoltLite folder (until D5), migrating there would lock the user out.
+	if (to === "doltlite") {
+		try {
+			adapterFor("doltlite", markerFile(dataDir));
+		} catch (error) {
+			if (!(error instanceof NoAdapterError)) throw error;
+			throw new MigrateRefusedError(MIGRATE_TEXT.doltliteTarget(`${process.platform}-${process.arch}`));
+		}
+	}
 	const { marker, backend: from } = refusals(dataDir);
 	if (from === to) throw new MigrateRefusedError(MIGRATE_TEXT.sameBackend(from));
 	checkpoint("after-refusals");

@@ -31,7 +31,7 @@ function openAsSqlite(dir: string) {
 
 const factory: AdapterFactory = {
 	name: "sqlite-app",
-	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true },
+	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true, commits: false },
 	async open(dir): Promise<StoreBundle> {
 		const s = openAsSqlite(dir);
 		const formatFile = graphPaths(path.join(dir, "graph")).format;

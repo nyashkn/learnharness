@@ -13,7 +13,7 @@ import type { AdapterFactory, Ledger, StoreBundle } from "../harness.ts";
 
 const factory: AdapterFactory = {
 	name: "file",
-	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true },
+	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true, commits: false },
 	async open(dir): Promise<StoreBundle> {
 		const s = createFileStores(dir, path.join(dir, "auth.json")); // opens: refuses a newer folder
 		const g = graphPaths(path.join(dir, "graph"));

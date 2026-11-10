@@ -102,6 +102,15 @@ jobs:
         env:
           NODE_ENV: test
           ELECTRON_RUN_AS_NODE: "1"
+      # The DoltLite app path (marker, open.ts promotion, both locks) runs only where the
+      # app enables DoltLite, so the Ubuntu ci job cannot cover it. Required on mac-arm64.
+      - name: DoltLite app-path contract and backend tests
+        if: matrix.platform == 'mac-arm64'
+        env:
+          NODE_ENV: test
+        run: |
+          pnpm exec tsx --test --test-name-pattern='^doltlite-app' "tests/contract/*.contract.ts"
+          pnpm exec tsx --test tests/doltlite-backend.test.ts
       - run: pnpm run build
       # Check the fresh trace before any static copying/curation.
       - run: node scripts/smoke-provider-runtime.mjs

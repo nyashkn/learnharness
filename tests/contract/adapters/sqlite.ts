@@ -19,7 +19,7 @@ const driversByDir = new Map<string, SqlDriver[]>();
 
 const factory: AdapterFactory = {
 	name: "sqlite",
-	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true },
+	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true, commits: false },
 	async open(dir): Promise<StoreBundle> {
 		const base = await fileFactory.open(dir);
 		const db = openNodeSqlite(path.join(dir, "graph.sqlite"));
