@@ -13,7 +13,7 @@ import argparse
 import json
 import re
 
-from _data import DataError, add_common_arguments, data_root, print_json, read_chat, read_json, safe_path
+from _data import DataError, add_common_arguments, data_root, print_json, read_chat, read_json, read_sqlite, safe_path, store_backend
 
 
 def warn(message):
@@ -46,26 +46,61 @@ def reject_constant(value):
     raise ValueError(f"Non-JSON numeric constant: {value}")
 
 
+def check_lines(lines, chain=False):
+    """Validate (label, text) ledger lines; warn and skip bad ones."""
+    for label, line in lines:
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line, parse_constant=reject_constant)
+        except ValueError:
+            warn(f"{label}: malformed JSON; skipped (results may be incomplete)")
+            continue
+        if not valid_record(value, chain):
+            warn(f"{label}: invalid record shape; skipped (results may be incomplete)")
+            continue
+        yield value
+
+
 def read_ledger(root, relative, chain=False):
     path = safe_path(root, relative)
     try:
         with path.open(encoding="utf-8") as handle:
-            for number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                try:
-                    value = json.loads(line, parse_constant=reject_constant)
-                except ValueError:
-                    warn(f"{relative}:{number}: malformed JSON; skipped (results may be incomplete)")
-                    continue
-                if not valid_record(value, chain):
-                    warn(f"{relative}:{number}: invalid record shape; skipped (results may be incomplete)")
-                    continue
-                yield value
+            yield from check_lines(((f"{relative}:{number}", line) for number, line in enumerate(handle, 1)), chain)
     except FileNotFoundError:
         return
     except (OSError, UnicodeError) as exc:
         raise DataError(f"Cannot read {relative}: {exc}") from exc
+
+
+def format_check(version):
+    if isinstance(version, bool) or not isinstance(version, (int, float)) or version % 1:
+        raise DataError("graph/format.json: invalid graph format version")
+    if version > 1:
+        raise DataError(f"Graph format version {version} is newer than supported version 1; upgrade this skill")
+
+
+def read_sql_snapshot(root):
+    """One connection, one snapshot: ledger texts plus source records."""
+    def read(db):
+        rows = dict(db.execute("SELECT key, value FROM lh_meta WHERE key = 'line_format'").fetchall())
+        version = rows.get("line_format")
+        if version is None:
+            raise DataError("graph.sqlite: lh_meta has no line_format")
+        if not isinstance(version, str) or not re.fullmatch(r"-?[0-9]+", version):
+            raise DataError("graph.sqlite: invalid graph format version in lh_meta.line_format")
+        format_check(int(version))
+        ledgers = [[(f"graph.sqlite:{table}:{seq}", text) for seq, text in db.execute(f"SELECT seq, line_json FROM {table} ORDER BY seq")]
+                   for table in ("ledger_nodes", "ledger_chains")]
+        return ledgers, db.execute("SELECT id, record_json FROM sources ORDER BY rowid").fetchall()
+    (nodes, chains), source_rows = read_sqlite(root, "graph.sqlite", read)
+    sources = {}
+    for identifier, text in source_rows:
+        try:
+            sources[identifier] = json.loads(text, parse_constant=reject_constant)
+        except (ValueError, TypeError):
+            warn(f"graph.sqlite:sources:{identifier}: malformed JSON; skipped (labels may be incomplete)")
+    return nodes, chains, sources
 
 
 def union_points(target, points):
@@ -78,16 +113,24 @@ def union_points(target, points):
 
 
 def load_graph(root):
-    """Merge ledger lines using getGraph's first-identity/union semantics."""
-    stamp = read_json(root, "graph/format.json", missing=None)
-    if stamp is not None:
-        version = stamp.get("version") if isinstance(stamp, dict) else None
-        if isinstance(version, bool) or not isinstance(version, (int, float)) or version % 1:
-            raise DataError("graph/format.json: invalid graph format version")
-        if version > 1:
-            raise DataError(f"Graph format version {version} is newer than supported version 1; upgrade this skill")
+    """Merge ledger lines using getGraph's first-identity/union semantics.
+
+    The result's "sources" is the SQL sources mapping on a sqlite store, else None.
+    """
+    backend = store_backend(root)
+    if backend == "doltlite":
+        raise DataError("This data folder uses the DoltLite backend, which this skill cannot read. To read it, run npm run lh -- export, then pass the exported folder as --data-dir (the export prints its path).")
+    sources = None
+    if backend == "sqlite":
+        node_lines, chain_lines, sources = read_sql_snapshot(root)
+        node_lines, chain_lines = check_lines(node_lines), check_lines(chain_lines, chain=True)
+    else:
+        stamp = read_json(root, "graph/format.json", missing=None)
+        if stamp is not None:
+            format_check(stamp.get("version") if isinstance(stamp, dict) else None)
+        node_lines, chain_lines = read_ledger(root, "graph/nodes.jsonl"), read_ledger(root, "graph/chains.jsonl", chain=True)
     nodes = {}
-    for line in read_ledger(root, "graph/nodes.jsonl"):
+    for line in node_lines:
         existing = nodes.get(line["id"])
         if existing is None:
             nodes[line["id"]] = {**line, "aliases": list(line["aliases"]), "provenance": list(line["provenance"])}
@@ -97,29 +140,34 @@ def load_graph(root):
                 existing["aliases"].append(phrasing)
         union_points(existing["provenance"], line["provenance"])
     chains = {}
-    for line in read_ledger(root, "graph/chains.jsonl", chain=True):
+    for line in chain_lines:
         key = "+".join(sorted(line["premises"])) + ">" + line["conclusion"]
         existing = chains.get(key)
         if existing is None:
             chains[key] = {**line, "premises": list(line["premises"]), "provenance": list(line["provenance"])}
         else:
             union_points(existing["provenance"], line["provenance"])
-    return {"nodes": list(nodes.values()), "chains": list(chains.values())}
+    return {"nodes": list(nodes.values()), "chains": list(chains.values()), "sources": sources}
 
 
 def birth_session(node):
     return node["provenance"][0]["chatId"] if node["provenance"] else None
 
 
-def load_metadata(root):
-    """Read only stored metadata, never the filePath references in sources."""
-    sources = read_json(root, "graph/sources.json", missing={})
+def load_metadata(root, sources=None):
+    """Read only stored metadata, never the filePath references in sources.
+
+    sources comes from the same SQL snapshot as the graph on a sqlite store.
+    """
+    label = "graph/sources.json" if sources is None else "graph.sqlite:sources"
+    if sources is None:
+        sources = read_json(root, "graph/sources.json", missing={})
     if not isinstance(sources, dict):
         raise DataError("graph/sources.json: expected an object keyed by source id")
     metadata = {}
     for source in sources.values():
         if not isinstance(source, dict) or not all(isinstance(source.get(key), str) for key in ("id", "filePath", "importedAt")):
-            warn("graph/sources.json: invalid source metadata; skipped (labels may be incomplete)")
+            warn(f"{label}: invalid source metadata; skipped (labels may be incomplete)")
             continue
         metadata[source["id"]] = {
             "id": source["id"], "name": source["filePath"], "kind": "file",
@@ -261,7 +309,7 @@ def main(argv=None):
     try:
         root = data_root(args.data_dir)
         graph = load_graph(root)
-        metadata = load_metadata(root) if args.command == "sessions" or args.format == "markdown" else {}
+        metadata = load_metadata(root, graph["sources"]) if args.command == "sessions" or args.format == "markdown" else {}
         if args.command == "sessions":
             result = session_index(graph, metadata)
         elif args.command in ("propositions", "find"):

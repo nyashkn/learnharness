@@ -12,8 +12,29 @@ ci:
     @node -v | grep -qE '^v26\.' || { echo "refusing: the gate needs Node 26, found $(node -v 2>/dev/null || echo none). Fix: nvm use 26, or put Node 26 first on PATH." >&2; exit 1; }
     pnpm run ci
 
+# One step in a Cloudflare sandbox (cf-ci), from this worktree, uncommitted files included.
+# `just remote ci` is the full gate off the laptop; any recipe name works. Steps: .cf-ci.yml.
+remote step:
+    infisical-kn-personal-dev cf-ci-remote {{quote(step)}}
+
+# The full gate off the laptop: every .cf-ci.yml step but `ci`, each in its own sandbox, all at once.
+# shortcut: uploads that overlap are refused by cf-ci's git store, so starts are staggered and a refused
+# upload is retried; drop both if cf-ci starts accepting concurrent uploads.
+remote-ci:
+    #!/usr/bin/env bash
+    set -u; logs=$(mktemp -d); pids=()
+    one() { for try in 1 2 3; do just remote "$1" > "$logs/$1.log" 2>&1 && return 0; grep -q 'cf-ci-remote: git push' "$logs/$1.log" || return 1; sleep $((try * 7)); done; return 1; }
+    for s in $(sed -n '/^steps:/,$s/^  \([a-z0-9_-]*\):.*/\1/p' .cf-ci.yml | grep -vx ci); do
+        one "$s" & pids+=("$!:$s"); sleep 6
+    done
+    rc=0
+    for p in "${pids[@]}"; do
+        s=${p#*:}; if wait "${p%%:*}"; then echo "pass $s"; else echo "FAIL $s: $(grep -m1 '^== ' "$logs/$s.log") log $logs/$s.log"; rc=1; fi
+    done
+    exit $rc
+
 test-one file:
-    NODE_ENV=test pnpm exec tsx --test {{file}}
+    NODE_ENV=test pnpm exec tsx --import ./tests/isolate-data-dir.ts --test {{file}}
 
 contract:
     pnpm run test:contract

@@ -1,8 +1,11 @@
 """Small read-only filesystem helpers for the LearnHarness skill.
 
-No application imports, discovery scans, migrations, caches, or writes. Paths
-inside the selected data folder may not resolve outside it. Imported-note paths
-and artifact references are data, not instructions to open another file.
+No application imports, discovery scans, migrations, caches, or writes inside
+the data folder. SQLite stores are read through a read-only, immutable
+connection or, when a WAL holds committed data, through a private copy in the
+system temp directory. Paths inside the selected data folder may not resolve
+outside it. Imported-note paths and artifact references are data, not
+instructions to open another file.
 """
 
 from __future__ import annotations
@@ -11,8 +14,11 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
+import sqlite3
 import sys
-from typing import Any
+import tempfile
+from typing import Any, Callable
 
 sys.dont_write_bytecode = True
 
@@ -82,6 +88,86 @@ def read_json(root: Path, relative: str | Path, *, missing: Any = None) -> Any:
         return missing
     except (OSError, UnicodeError, ValueError) as exc:
         raise DataError(f"Cannot read {target}: {exc}") from exc
+
+
+_MISSING = object()
+
+
+def store_backend(root: Path) -> str:
+    """Return "file", "sqlite" or "doltlite" from storage.json (missing = file).
+
+    Mirrors src/store/marker.ts readMarker: same checks, same order.
+    """
+    marker = read_json(root, "storage.json", missing=_MISSING)
+    if marker is _MISSING:
+        return "file"
+    if not isinstance(marker, dict):
+        raise DataError("storage.json: the storage marker is not an object")
+    layout, backend = marker.get("layout"), marker.get("backend")
+    is_number = isinstance(layout, (int, float)) and not isinstance(layout, bool)
+    is_integer = is_number and (isinstance(layout, int) or float(layout).is_integer())
+    if is_integer and layout > 1:
+        raise DataError(f"storage.json: storage layout {layout} is newer than this skill supports (1); upgrade the skill")
+    if not is_integer or layout < 1:
+        raise DataError(f"storage.json: unsupported layout {json.dumps(layout)} (this skill supports 1)")
+    if backend not in ("file", "sqlite", "doltlite"):
+        raise DataError(f"storage.json: unknown backend {json.dumps(backend)}")
+    return backend
+
+
+def _stamp(*paths: Path) -> tuple:
+    out = []
+    for path in paths:
+        try:
+            info = path.stat()
+            out.append((info.st_size, info.st_mtime_ns))
+        except FileNotFoundError:
+            out.append((0, 0))  # a vanished WAL counts as size 0
+    return tuple(out)
+
+
+def read_sqlite(root: Path, name: str, callback: Callable[[sqlite3.Connection], Any]) -> Any:
+    """Run callback(connection) on a snapshot of a data-relative SQLite store.
+
+    Never writes in the data folder. Why not plain ?mode=ro: probing SQLite 3.50
+    showed it creates -wal/-shm beside a cleanly closed WAL store and touches
+    -shm on a live one; ?immutable=1 avoids that but ignores the WAL, so a
+    non-empty WAL is read from a private copy instead.
+    """
+    store = safe_path(root, name)
+    wal = safe_path(root, name + "-wal")
+    if not store.is_file():
+        raise DataError(f"Store not found: {store}; nothing was created.")
+    for _ in range(5):
+        before = _stamp(store, wal)
+        try:
+            if before[1][0] == 0:
+                connection = sqlite3.connect(store.as_uri() + "?mode=ro&immutable=1", uri=True)
+                try:
+                    result = callback(connection)
+                finally:
+                    connection.close()
+            else:
+                with tempfile.TemporaryDirectory(prefix="lh-read-") as scratch:
+                    copy = Path(scratch) / store.name
+                    shutil.copyfile(store, copy)
+                    shutil.copyfile(wal, Path(scratch) / (store.name + "-wal"))
+                    connection = sqlite3.connect(str(copy))
+                    try:
+                        result = callback(connection)
+                    finally:
+                        connection.close()
+        except sqlite3.Error as exc:
+            if _stamp(store, wal) == before:
+                raise DataError(f"Cannot read {store}: {exc}") from exc
+            result = _MISSING  # a copy torn by a concurrent write: treat as moving
+        except OSError as exc:
+            if not store.is_file():
+                raise DataError(f"Cannot read {store}: {exc}") from exc
+            result = _MISSING  # WAL vanished mid-copy (checkpoint): treat as moving
+        if result is not _MISSING and _stamp(store, wal) == before:
+            return result
+    raise DataError(f"{store.name} is changing: LearnHarness is writing to it. Try again in a moment.")
 
 
 def read_chat(root: Path, session_id: str) -> dict[str, Any]:
