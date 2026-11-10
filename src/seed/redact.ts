@@ -289,5 +289,7 @@ export function redact(text: string): string {
 	out = out.replace(SPLIT_RUN, redactSplitRun);
 	out = redactEmails(out);
 	for (const re of HOME_PATHS) out = out.replace(re, "~");
+	// Again: a slug's "-Users-name" head can hold a run below MIN_ENTROPY that the "~" cut leaves above it (idempotence, lh-9hg).
+	out = out.replace(SPLIT_RUN, redactSplitRun);
 	return out;
 }

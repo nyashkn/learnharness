@@ -35,4 +35,6 @@ steps:
   test-seed: pnpm run test:seed
   contract: mkdir -p /mnt/lh-tmp && mount -t tmpfs -o size=6g tmpfs /mnt/lh-tmp && export TMPDIR=/mnt/lh-tmp; pnpm run test:contract
   checks: pnpm run check:schemas && pnpm run check:pins
+  # The Python skill's own tests (stdlib only; the skill needs 3.10+). Not part of `just ci`.
+  test-skills: python3 -c 'import sys; assert sys.version_info >= (3, 10), sys.version' && python3 -B -m unittest discover -s tests/skills
   ci: mkdir -p /mnt/lh-tmp && mount -t tmpfs -o size=6g tmpfs /mnt/lh-tmp && export TMPDIR=/mnt/lh-tmp; ulimit -n 65536; tini -s -- just ci
