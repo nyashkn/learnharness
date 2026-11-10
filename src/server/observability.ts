@@ -61,8 +61,8 @@ export interface ActivityExtraction {
  *  the blob disappears when the process ends. Costs are joined here through
  *  the server-side Pi pricing adapter; clients never reconstruct rates. */
 /** The dock's whole world + the graph's version stamp (wave 6 session
- *  deletion): the payload carries graphRevision (max mtime across the
- *  graph data files — see server/graph.ts) so any view can detect "the
+ *  deletion): the payload carries graphRevision (GraphStore.revision(),
+ *  see server/graph.ts) so any view can detect "the
  *  graph changed underneath me" (a merge landed, a deletion purged) and
  *  refetch clusters/layout. Reads never move it; the DELETE response
  *  returns the same stamp. */
