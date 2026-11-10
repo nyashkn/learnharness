@@ -26,7 +26,7 @@ import { openNodeSqlite } from "./drivers/node-sqlite";
 import { assertStoreNotNewer, openGraphStore, type OpenedGraph } from "./graph-store";
 import type { StoreLock } from "./lock";
 import { migrate, needsMigration } from "./migrate";
-import { graphMigration, graphRungs } from "./migrations/graph/index";
+import { graphMigration } from "./migrations/graph/index";
 import { createSourceOrganizationStore } from "./source-organization-store";
 
 export const GRAPH_DB_NAME = "graph.sqlite";
@@ -134,7 +134,7 @@ export function createSqlGraphStores(
 		const probe = openDoltlite(file, { readOnly: true });
 		try {
 			assertStoreNotNewer(probe, file);
-			return { upgrade: needsMigration(probe, graphRungs) };
+			return { upgrade: needsMigration(probe, graphMigration) };
 		} finally {
 			probe.close();
 		}
@@ -175,7 +175,8 @@ export function createSqlGraphStores(
 		if (known) return known.opened;
 		const db = openNodeSqlite(file);
 		try {
-			if (needsMigration(db, graphRungs)) beforeWrite(abs); // an upgrade writes: lock first. A newer or malformed store is not "needs", so it is refused below without a lock.
+			assertStoreNotNewer(db, file); // StorageVersionError first, as migrate does
+			if (needsMigration(db, graphMigration)) beforeWrite(abs); // an upgrade writes: lock first. A store migrate would refuse throws here, before any lock.
 			const opened = openGraphStore({ db, file, lhVersion: pkg.version, positions: delegate, backupPath: backupPathIn(abs) });
 			handles().set(file, { db, opened });
 			return opened;

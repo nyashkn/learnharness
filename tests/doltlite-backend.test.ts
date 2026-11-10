@@ -198,6 +198,25 @@ describe("doltlite backend", { skip: !MAC_ARM }, () => {
 		letGo(dir);
 	});
 
+	describe("lh-6lx: a store migrate refuses is refused before any lock", () => {
+		const breaks: [string, string][] = [
+			["wrong store_kind", "UPDATE lh_meta SET value = 'chat' WHERE key = 'store_kind'"],
+			["malformed revision", "UPDATE lh_meta SET value = 'x' WHERE key = 'revision'"],
+		];
+		for (const [name, sql] of breaks) {
+			it(`${name} one rung below the top: MigrationRefusedError, no writable open, no lock file`, () => {
+				const dir = cleanStore();
+				viaConnection(dir, (db) => { db.run("UPDATE lh_meta SET value = '1' WHERE key = 'schema_version'"); db.run(sql); });
+				const before = markerOf(dir);
+				const mark = opens.length;
+				assert.throws(() => createFileStores(dir, auth(dir)).graphStore.readNodes(), (e: unknown) => (e as Error).name === "MigrationRefusedError");
+				assert.equal(writableSince(mark), 0, "no writable open");
+				assert.deepEqual(lockFiles(dir), []);
+				assert.deepEqual(markerOf(dir), before);
+			});
+		}
+	});
+
 	describe("a newer store is refused before any writable open", () => {
 		const stamps: [string, (dir: string, dirty: boolean) => void][] = [
 			["schema_version=999", (dir, dirty) => viaConnection(dir, (db) => { db.run("UPDATE lh_meta SET value = '999' WHERE key = 'schema_version'"); }, !dirty)],

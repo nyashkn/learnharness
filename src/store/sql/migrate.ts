@@ -66,7 +66,7 @@ function parseInt1(value: string | undefined, what: string): number {
 }
 
 /** Validates what is stored; never writes. */
-function checkStore(db: SqlDriver, opts: MigrateOptions, top: number): number {
+function checkStore(db: SqlDriver, opts: Pick<MigrateOptions, "kind" | "lineFormat">, top: number): number {
 	if (!hasMeta(db)) return 0;
 	const meta = readMeta(db);
 	const version = parseInt1(meta.get("schema_version"), "schema_version");
@@ -110,11 +110,9 @@ function checkRungs(rungs: readonly Rung[]): void {
 	});
 }
 
-/** True when `migrate` would write: no lh_meta yet, or a stored version below the top rung. A newer or malformed store is false (migrate refuses it). Never writes. */
-export function needsMigration(db: SqlDriver, rungs: readonly Rung[]): boolean {
-	if (!hasMeta(db)) return true;
-	const version = Number(readMeta(db).get("schema_version"));
-	return version < rungs.length;
+/** True when `migrate` would write: no lh_meta yet, or a stored version below the top rung. Throws MigrationRefusedError for a store `migrate` would refuse (same read-only checks), so callers can refuse before taking a lock. Never writes. */
+export function needsMigration(db: SqlDriver, opts: Pick<MigrateOptions, "rungs" | "kind" | "lineFormat">): boolean {
+	return checkStore(db, opts, opts.rungs.length) < opts.rungs.length;
 }
 
 /** Brings the store to the top rung. Refusals (R3) happen before any write. */

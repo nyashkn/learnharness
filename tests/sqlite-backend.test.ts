@@ -352,3 +352,42 @@ describe("createSqlGraphStores: when beforeWrite runs", () => {
 		letGo(dir);
 	});
 });
+
+describe("lh-6lx: a store migrate refuses is refused before any lock, and a script prints it", () => {
+	const breaks: [string, string][] = [
+		["wrong store_kind", "UPDATE lh_meta SET value = 'chat' WHERE key = 'store_kind'"],
+		["malformed revision", "UPDATE lh_meta SET value = 'x' WHERE key = 'revision'"],
+	];
+	/** A store one rung below the top (so needsMigration would say yes), with its meta broken. */
+	const broken = (sql: string): string => {
+		const dir = fresh();
+		createFileStores(dir, auth(dir)).graphStore.appendNode(NODE("a"));
+		letGo(dir);
+		const db = openNodeSqlite(path.join(dir, "graph.sqlite"));
+		db.run("UPDATE lh_meta SET value = '1' WHERE key = 'schema_version'");
+		db.run(sql);
+		db.close();
+		return dir;
+	};
+	for (const [name, sql] of breaks) {
+		it(`${name}: runStoreScript prints [store] refused and exits 1`, async () => {
+			const dir = broken(sql);
+			const err = mock.method(console, "error", () => {});
+			const code = process.exitCode;
+			try {
+				await runStoreScript(dir, auth(dir), (s) => { s.graphStore.readNodes(); });
+				assert.equal(process.exitCode, 1);
+				assert.match(String(err.mock.calls[0]?.arguments[0]), /^\[store\] refused: /);
+			} finally { err.mock.restore(); process.exitCode = code; letGo(dir); }
+			assert.equal(fs.existsSync(path.join(dir, "storage.json.lock")), false);
+		});
+		it(`${name}: an app-style open throws MigrationRefusedError, takes no lock, writes no marker`, () => {
+			const dir = broken(sql);
+			const before = fs.readFileSync(path.join(dir, "storage.json"), "utf8");
+			assert.throws(() => createFileStores(dir, auth(dir)).graphStore.readNodes(), (e: unknown) => (e as Error).name === "MigrationRefusedError");
+			assert.equal(fs.existsSync(path.join(dir, "storage.json.lock")), false);
+			assert.equal(fs.readFileSync(path.join(dir, "storage.json"), "utf8"), before);
+			letGo(dir);
+		});
+	}
+});
