@@ -31,7 +31,8 @@ import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
  *                    the R6 hash covers only the rung's own source, so a value
  *                    import would let a rung change behaviour unhashed
  *
- * tests/ and scripts/ are internal — unrestricted.
+ * tests/ are internal — unrestricted. scripts/ and electron/ (internal, plain
+ * Node) get the driver ban only: no Next rules, no import zones.
  */
 
 const leakedFiles = [...new Set(leakAllowlist.map((leak) => leak.file))];
@@ -79,11 +80,10 @@ const rungSyntax = [
 ].map((selector) => ({ selector, message: rungMessage }));
 
 export default defineConfig([
-	// electron/** — the desktop shell: plain Node, no framework, outside the
-// import law (same rationale as scripts/).
-	globalIgnores([".worktrees/**", ".next/**", "node_modules/**", "data/**", "next-env.d.ts", "scripts/**", "electron/**", "dist/**"]),
+	globalIgnores([".worktrees/**", ".next/**", "node_modules/**", "data/**", "next-env.d.ts", "dist/**"]),
 	{
 		files: ["**/*.{js,mjs,ts,tsx}"],
+		ignores: ["scripts/**", "electron/**"], // driver ban only, see the block below
 		languageOptions: {
 			parser: tsParser,
 			parserOptions: { ecmaVersion: "latest", sourceType: "module" },
@@ -143,6 +143,18 @@ export default defineConfig([
 				},
 			],
 		},
+	},
+	{
+		files: ["scripts/**/*.{js,mjs,cjs,ts}", "electron/**/*.{js,mjs,cjs,ts}"],
+		languageOptions: { parser: tsParser, parserOptions: { ecmaVersion: "latest", sourceType: "module" } },
+		rules: {
+			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }] }],
+			"no-restricted-syntax": ["error", ...driverSyntax],
+		},
+	},
+	{
+		files: ["scripts/**/*.cjs", "electron/**/*.cjs"],
+		languageOptions: { parserOptions: { sourceType: "commonjs" } },
 	},
 	{
 		files: ["src/core/**"],
