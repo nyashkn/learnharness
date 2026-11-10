@@ -17,6 +17,7 @@ import { leakAllowlist } from "./eslint/leak-allowlist.mjs";
  *                    the storage ports, the composition — arrive via
  *                    factories/closures from the chat-handler)
  *
+ *   src/core/**    →  imports no node:* except node:crypto (core is pure; the one allowed builtin)
  *   node:sqlite, @dolthub/doltlite → only src/store/sql/drivers/** may import
  *                    them (static, dynamic import() and require() forms);
  *                    src/seed gets a driver injected by scripts/seed.ts
@@ -54,6 +55,7 @@ const serverStoreRule = (except) => ({
 
 const driverMessage = "Only src/store/sql/drivers may import node:sqlite or @dolthub/doltlite; src/seed gets a driver injected by scripts/seed.ts.";
 const driverModule = "node:sqlite|@dolthub/doltlite";
+const coreMessage = "src/core is pure: it imports no node:* builtin except node:crypto.";
 // esquery regexes cannot contain "/", so "." stands for it and the subpath boundary is dropped.
 const driverSource = "/^(node:sqlite|@dolthub.doltlite)/";
 // Selectors cover what no-restricted-imports cannot see: import("x"), import(`x`), require("x").
@@ -141,6 +143,11 @@ export default defineConfig([
 				},
 			],
 		},
+	},
+	{
+		files: ["src/core/**"],
+		// replaces the base patterns, so the driver pattern repeats
+		rules: { "no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, { regex: "^node:(?!crypto$)", message: coreMessage }] }] },
 	},
 	{
 		files: ["src/store/sql/drivers/**"],
