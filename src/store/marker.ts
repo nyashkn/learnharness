@@ -197,10 +197,10 @@ export function releaseStoreLock(dataDir: string): void {
 	registry().delete(abs);
 }
 
-/** Held = we registered it AND every lock file it names is still there (a test may have removed the folder). */
+/** Held = we registered it AND every lock file still holds OUR lock (a test may have removed the folder, another process may have taken the file). */
 export function holdsStoreLock(dataDir: string): boolean {
 	const held = registry().get(path.resolve(dataDir));
-	return held !== undefined && fs.existsSync(held.lock.lockFile) && (held.store === undefined || fs.existsSync(held.store.lockFile));
+	return held !== undefined && held.lock.held() && (held.store?.held() ?? true);
 }
 
 /** The marker lock, then (doltlite only) the store file's lock, so the driver can be handed a real held lock. A refusal on the second leaves the first released. */

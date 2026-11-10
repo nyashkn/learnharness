@@ -113,6 +113,20 @@ describe("holding, releasing, losing", () => {
 		);
 	});
 
+	it("another process's lock file (a different token) in place of either of ours means not held", () => {
+		for (const which of [MARKER_LOCK, STORE_LOCK]) {
+			const dir = fresh();
+			const held = takeFolderLocks(dir, "doltlite");
+			register(dir, held);
+			assert.equal(holdsStoreLock(dir), true);
+			const file = path.join(dir, which);
+			fs.writeFileSync(file, JSON.stringify({ pid: 1, host: "another-machine", startedAt: "2020-01-01T00:00:00.000Z" })); // same shape, not our text
+			assert.equal(holdsStoreLock(dir), false, `${which} held by another token still counted as ours`);
+			fs.rmSync(file);
+			releaseStoreLock(dir);
+		}
+	});
+
 	it("lockDataFolder: held() is true while both are held, release drops the registry entry", () => {
 		const dir = fresh();
 		const lock = lockDataFolder(dir);

@@ -73,3 +73,35 @@ describe("call-site wrappers roll back when the last step throws", () => {
 		assert.deepEqual(snapshot(), before);
 	});
 });
+
+// Item 13 (lh-3d3): positions stay OUTSIDE the transaction. A rollback restores the ledgers but cannot restore a positions
+// write made inside it, so the write happens after the commit and never when the transaction throws.
+describe("deletion writes positions after the commit, never inside, never on a throw", () => {
+	const START = { n_a: { x: 1, y: 1 }, n_b: { x: 2, y: 2 }, n_keep: { x: 3, y: 3 }, arg_1: { x: 4, y: 4 } };
+	const cases: [string, (g: GraphStore) => unknown][] = [
+		["deleteSourcesTraces", (g) => deleteSourcesTraces(g, new Set(["chatA"]), "delete-nodes")],
+		["deleteNodeTraces (node)", (g) => deleteNodeTraces(g, "n_a")],
+		["deleteNodeTraces (argument)", (g) => deleteNodeTraces(g, "arg_1")],
+	];
+	for (const [name, run] of cases) {
+		it(`${name}: a throw at the end of the transaction leaves positions untouched`, () => {
+			graphStore.writePositions(START);
+			const store: GraphStore = { ...graphStore, transact: (label, fn) => graphStore.transact(label, () => { fn(); throw new Error("boom:late"); }) };
+			assert.throws(() => run(store), /boom:late/);
+			assert.deepEqual(graphStore.readPositions(), START);
+		});
+		it(`${name}: positions are written only once the transaction has committed`, () => {
+			graphStore.writePositions(START);
+			let committed = false;
+			const writes: boolean[] = [];
+			const store: GraphStore = {
+				...graphStore,
+				transact: (label, fn) => { const out = graphStore.transact(label, fn); committed = true; return out; },
+				writePositions: (p) => { writes.push(committed); graphStore.writePositions(p); },
+			};
+			run(store);
+			assert.deepEqual(writes, [true], "writePositions ran inside the transaction, or not exactly once");
+			assert.notDeepEqual(graphStore.readPositions(), START, "dead positions were not pruned");
+		});
+	}
+});
