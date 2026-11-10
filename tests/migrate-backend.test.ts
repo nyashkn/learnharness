@@ -102,18 +102,22 @@ interface Raw {
 	chains: string;
 	sessions: string;
 	coverage: string;
+	reviews?: string;
+	remaps?: string;
 	sources?: string;
 	org?: string;
 	format?: string;
 	positions?: string;
 }
-const GRAPH_FILES: Record<keyof Raw, string> = { nodes: "nodes.jsonl", chains: "chains.jsonl", sessions: "sessions.jsonl", coverage: "coverage.jsonl", sources: "sources.json", org: "source-organization.json", format: "format.json", positions: "positions.json" };
+const GRAPH_FILES: Record<keyof Raw, string> = { nodes: "nodes.jsonl", chains: "chains.jsonl", sessions: "sessions.jsonl", coverage: "coverage.jsonl", reviews: "review/reviews.jsonl", remaps: "review/remaps.jsonl", sources: "sources.json", org: "source-organization.json", format: "format.json", positions: "positions.json" };
 
 function writeFolder(dir: string, raw: Raw): void {
 	fs.mkdirSync(path.join(dir, "graph"), { recursive: true });
 	for (const k of Object.keys(GRAPH_FILES) as (keyof Raw)[]) {
 		const text = raw[k];
-		if (text !== undefined) fs.writeFileSync(path.join(dir, "graph", GRAPH_FILES[k]), text, "utf8");
+		if (text === undefined) continue;
+		fs.mkdirSync(path.dirname(path.join(dir, "graph", GRAPH_FILES[k])), { recursive: true });
+		fs.writeFileSync(path.join(dir, "graph", GRAPH_FILES[k]), text, "utf8");
 	}
 }
 
@@ -128,6 +132,8 @@ const DIRTY: Raw = {
 	chains: `{"c":1}\n{"c":2}\n{"c":`,
 	sessions: `{"s":1}\r\n`,
 	coverage: "",
+	reviews: `{"id":"c1:k1","targets":["n1"]}\r\n{"id":"c1:k2","targets":["n2","é"]}\n not json \n{"id":"c1:k3"} `,
+	remaps: `{"from":"n1","to":"n2"}\n{"from":"n2","to":"n3"}\n`,
 	sources: JSON.stringify({ b: { id: "b", filePath: "/b", importedAt: "t" }, a: { id: "a", filePath: "/a", importedAt: "t", extras: [1, { x: null }] }, odd: 5 }, null, 2),
 	org: JSON.stringify({ version: 1, folders: [] }),
 	format: JSON.stringify({ version: 1 }),
@@ -140,6 +146,8 @@ interface Rows {
 	chains: string[];
 	checkpoints: string[];
 	coverage: string[];
+	reviews?: string[];
+	reviewRemaps?: string[];
 	sources: [string, string][];
 	org?: string;
 }
@@ -148,11 +156,13 @@ const ROWS: Rows = {
 	chains: ['{"c":1}', '{"c":2}'],
 	checkpoints: ['{"s":1}'],
 	coverage: ['{"v":1}'],
+	reviews: ['{"id":"c1:k1","targets":["n1"]}', ' not json ', '{"id":"c1:k2"}'],
+	reviewRemaps: ['{"from":"n1","to":"n2"}', '{"from":"n2","to":"n3"}'],
 	sources: [["a", '{"id":"a","filePath":"/a","importedAt":"t"}'], ["b", '{"id":"b","filePath":"/b","importedAt":"t"}']],
 	org: '{"version":1,"folders":[]}',
 };
 const STALE: Rows = { nodes: ['{"id":"old"}'], chains: [], checkpoints: [], coverage: [], sources: [] };
-const TABLE = { nodes: "ledger_nodes", chains: "ledger_chains", checkpoints: "ledger_checkpoints", coverage: "ledger_coverage" } as const;
+const TABLE = { nodes: "ledger_nodes", chains: "ledger_chains", checkpoints: "ledger_checkpoints", coverage: "ledger_coverage", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" } as const;
 
 const writeMarker = (dir: string, backend: Backend): void => fs.writeFileSync(markerFile(dir), `${JSON.stringify({ backend, layout: 1 }, null, "\t")}\n`);
 
@@ -165,7 +175,7 @@ function seedSql(dir: string, b: "sqlite" | "doltlite", rows: Rows, marker: bool
 	try {
 		openGraphStore({ db, file, lhVersion: "test", positions: { read: () => ({}), write: () => {} }, log: () => {} });
 		db.transaction(() => {
-			for (const k of ["nodes", "chains", "checkpoints", "coverage"] as const) rows[k].forEach((l, i) => db.run(`INSERT INTO ${TABLE[k]} (seq, line_json) VALUES (?, ?)`, i + 1, l));
+			for (const k of ["nodes", "chains", "checkpoints", "coverage", "reviews", "reviewRemaps"] as const) (rows[k] ?? []).forEach((l, i) => db.run(`INSERT INTO ${TABLE[k]} (seq, line_json) VALUES (?, ?)`, i + 1, l));
 			for (const [id, json] of rows.sources) db.run("INSERT INTO sources (id, record_json) VALUES (?, ?)", id, json);
 			if (rows.org !== undefined) db.run("INSERT INTO documents (key, json) VALUES ('source-organization', ?)", rows.org);
 		});
@@ -190,7 +200,7 @@ const DIRS: [Backend, Backend][] = [["file", "sqlite"], ["file", "doltlite"], ["
 /** The files that make up a source, with content hash and mtime. */
 function sourceState(dir: string, from: Backend): Record<string, string> {
 	const out: Record<string, string> = {};
-	const files = from === "file" ? fs.readdirSync(path.join(dir, "graph")).map((n) => path.join(dir, "graph", n)) : [path.join(dir, storeName(from)), path.join(dir, `${storeName(from)}-wal`)];
+	const files = from === "file" ? (fs.readdirSync(path.join(dir, "graph"), { recursive: true, withFileTypes: true }) as fs.Dirent[]).filter((e) => e.isFile()).map((e) => path.join(e.parentPath, e.name)) : [path.join(dir, storeName(from)), path.join(dir, `${storeName(from)}-wal`)];
 	for (const f of files) {
 		const st = fs.statSync(f, { throwIfNoEntry: false });
 		if (st && !(f.endsWith("-wal") && st.size === 0)) out[path.relative(dir, f)] = `${sha(fs.readFileSync(f))}@${st.mtimeMs}`;
@@ -296,6 +306,8 @@ const rawArb: fc.Arbitrary<Raw> = fc.record(
 		chains: ledgerText,
 		sessions: ledgerText,
 		coverage: ledgerText,
+		reviews: ledgerText,
+		remaps: ledgerText,
 		sources: sourcesText,
 		org: fc.jsonValue().map((v) => JSON.stringify(v)),
 		format: fc.constant('{"version":1}'),
@@ -622,7 +634,7 @@ describe("M marker last and verify", () => {
 		test(`M5 verify on ${to}: an expected id that cannot be encoded unchanged never matches what the driver stored for it`, () => {
 			const dir = mk();
 			seedSql(dir, to, { nodes: [], chains: [], checkpoints: [], coverage: [], sources: [["a\ud800b", '{"id":"x"}']] }, false);
-			const snap: Snapshot = { lineFormat: 1, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [] }, sources: [["a\ud800b", { id: "x" }]], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
+			const snap: Snapshot = { lineFormat: 1, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [], reviews: [], reviewRemaps: [] }, sources: [["a\ud800b", { id: "x" }]], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
 			assert.equal(sqlDifference(path.join(dir, storeName(to)), to, snap), "sources");
 		});
 	}
@@ -693,7 +705,7 @@ describe("L line_format", () => {
 		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "graph", "format.json"), "utf8")), { version: 1 });
 	});
 	test("L2 renderExport copies whatever the snapshot says (a hard-coded constant fails here: the build's constant is 1, so 7 cannot be it)", () => {
-		const snap: Snapshot = { lineFormat: 7, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [] }, sources: [], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
+		const snap: Snapshot = { lineFormat: 7, ledgers: { nodes: [], chains: [], coverage: [], checkpoints: [], reviews: [], reviewRemaps: [] }, sources: [], organization: undefined, dropped: { crlf: 0, blank: 0, torn: 0 } };
 		assert.equal(renderExport(snap).get("graph/format.json"), '{\n\t"version": 7\n}\n');
 	});
 	test("L3 FACT: no valid stamp other than 1 can reach a build whose constant is 1, so a hard-coded value cannot be told apart end to end", () => {
@@ -1168,4 +1180,70 @@ describe("B CLI", () => {
 	test("B12 every backend name the CLI accepts is one the marker knows", () => {
 		assert.deepEqual([...BACKENDS], ["file", "sqlite", "doltlite"]);
 	});
+});
+
+// ─── V rung-1 source (before the review ledgers existed) ─────────────────────
+
+const V1_SQL = fs.readFileSync(path.join(import.meta.dirname, "../src/store/sql/migrations/graph/shapes/v1.sql"), "utf8");
+const V1_ROWS = { nodes: '{"id":"n1"}', chains: '{"c":1}', checkpoints: '{"s":1}', coverage: '{"v":1}' };
+
+/** A store at rung 1, built straight from the frozen v1 shape: openGraphStore would upgrade it to the top rung and hide the bug. */
+function seedV1(dir: string, b: "sqlite" | "doltlite"): void {
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, storeName(b));
+	const lock = b === "doltlite" ? acquireStoreLock(file) : undefined;
+	const db = openRW(file, b, lock);
+	try {
+		db.exec(V1_SQL);
+		db.transaction(() => {
+			for (const [k, v] of Object.entries({ store_kind: "graph", schema_version: "1", line_format: "1" })) db.run("INSERT INTO lh_meta (key, value) VALUES (?, ?)", k, v);
+			db.run("INSERT INTO ledger_nodes (seq, line_json) VALUES (1, ?)", V1_ROWS.nodes);
+			db.run("INSERT INTO ledger_chains (seq, line_json) VALUES (1, ?)", V1_ROWS.chains);
+			db.run("INSERT INTO ledger_checkpoints (seq, line_json) VALUES (1, ?)", V1_ROWS.checkpoints);
+			db.run("INSERT INTO ledger_coverage (seq, line_json) VALUES (1, ?)", V1_ROWS.coverage);
+			db.run("INSERT INTO sources (id, record_json) VALUES ('a', ?)", '{"id":"a","filePath":"/a","importedAt":"t"}');
+			db.run("INSERT INTO documents (key, json) VALUES ('source-organization', ?)", '{"version":1,"folders":[]}');
+		});
+		db.seal("seed");
+	} finally {
+		db.close();
+		lock?.release();
+	}
+	writeMarker(dir, b);
+}
+
+/** exportTree maps paths to sha256 of the bytes. */
+function assertV1Arrived(tree: Record<string, string>): void {
+	assert.equal(tree["graph/nodes.jsonl"], sha(`${V1_ROWS.nodes}\n`));
+	assert.equal(tree["graph/chains.jsonl"], sha(`${V1_ROWS.chains}\n`));
+	assert.equal(tree["graph/sessions.jsonl"], sha(`${V1_ROWS.checkpoints}\n`));
+	assert.equal(tree["graph/coverage.jsonl"], sha(`${V1_ROWS.coverage}\n`));
+	assert.equal(tree["graph/sources.json"], sha(JSON.stringify({ a: { id: "a", filePath: "/a", importedAt: "t" } }, null, "\t")));
+	assert.equal(tree["graph/review/reviews.jsonl"], sha(""));
+	assert.equal(tree["graph/review/remaps.jsonl"], sha(""));
+}
+
+describe("V a source still at rung 1 (no review tables)", () => {
+	for (const from of ["sqlite", "doltlite"] as const) {
+		for (const to of ["file", "sqlite", "doltlite"] as const) {
+			if (to === from) continue;
+			test(`V ${from} -> ${to}: migrates, v1 rows arrive, reviews empty, source unchanged`, () => {
+				const dir = mk();
+				seedV1(dir, from);
+				const before = sourceState(dir, from);
+				mig(dir, to, { now });
+				assert.deepEqual(sourceState(dir, from), before);
+				assertV1Arrived(exportOf(dir));
+			});
+		}
+		test(`V ${from}: exportStore reads it, v1 rows arrive, reviews empty, source unchanged`, () => {
+			const dir = mk();
+			seedV1(dir, from);
+			const before = sourceState(dir, from);
+			const out = path.join(mk(), "e");
+			exportStore(dir, out, { now });
+			assert.deepEqual(sourceState(dir, from), before);
+			assertV1Arrived(exportTree(out));
+		});
+	}
 });

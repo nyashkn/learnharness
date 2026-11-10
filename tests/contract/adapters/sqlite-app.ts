@@ -13,9 +13,9 @@ import { beforeWrite, releaseStoreLock } from "../../../src/store/marker.ts";
 import type { SqlDriver } from "../../../src/store/sql/driver.ts";
 import { openNodeSqlite } from "../../../src/store/sql/drivers/node-sqlite.ts";
 import { graphDbFile, releaseGraphDb } from "../../../src/store/sql/open.ts";
-import type { AdapterFactory, Ledger, StoreBundle } from "../harness.ts";
+import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
 
-const TABLES: Record<Ledger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints" };
+const TABLES: Record<AnyLedger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" };
 
 /** LH_STORAGE only for the open: the other adapters share this process, and the open's decision is what later writes use. */
 function openAsSqlite(dir: string) {

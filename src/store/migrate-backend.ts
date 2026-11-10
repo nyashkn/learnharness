@@ -29,6 +29,7 @@ import { openDoltlite } from "./sql/drivers/doltlite.ts";
 import { openNodeSqlite } from "./sql/drivers/node-sqlite.ts";
 import type { SqlDriver } from "./sql/driver.ts";
 import { assertStoreNotNewer, openGraphStore, type GraphCore } from "./sql/graph-store.ts";
+import { graphRungs } from "./sql/migrations/graph/index.ts";
 import { acquireStoreLock, type StoreLock } from "./sql/lock.ts";
 
 // ─── text ────────────────────────────────────────────────────────────────────
@@ -60,7 +61,7 @@ export const MIGRATE_TEXT = {
 	outNotEmpty: (out: string) => `${out} already exists and is not empty; an export never overwrites`,
 	verifyFailed: (path: string) => `verification failed: the target differs from the source at ${path}; the marker was NOT written, the source is untouched, and the backup is kept; run again to restart from a fresh backup`,
 	migrated: (from: string, to: string, resumed: boolean) => `migrated ${from} -> ${to}${resumed ? " (resumed an interrupted run)" : ""}`,
-	counts: (c: Counts) => `  nodes ${c.nodes}, chains ${c.chains}, sessions ${c.checkpoints}, coverage ${c.coverage}, sources ${c.sources}`,
+	counts: (c: Counts) => `  nodes ${c.nodes}, chains ${c.chains}, sessions ${c.checkpoints}, coverage ${c.coverage}, reviews ${c.reviews}, review remaps ${c.reviewRemaps}, sources ${c.sources}`,
 	dropped: (d: Dropped) => `  normalised: ${d.crlf} CRLF line ends, ${d.blank} blank lines dropped, ${d.torn} torn tail lines dropped`,
 	backup: (dir: string) => `  backup of the previous state: ${dir}`,
 	exported: (out: string) => `exported to ${out}`,
@@ -112,16 +113,18 @@ export function normaliseLedger(text: string): Dropped & { lines: string[] } {
 
 // ─── snapshot and export rendering ───────────────────────────────────────────
 
-type Ledger = "nodes" | "chains" | "coverage" | "checkpoints";
+type Ledger = "nodes" | "chains" | "coverage" | "checkpoints" | "reviews" | "reviewRemaps";
 /** The one table of ledgers: entity name, file under graph/, table in the SQL stores. */
 const LEDGERS: readonly { entity: Ledger; file: string; table: string }[] = [
 	{ entity: "nodes", file: "nodes.jsonl", table: "ledger_nodes" },
 	{ entity: "chains", file: "chains.jsonl", table: "ledger_chains" },
 	{ entity: "checkpoints", file: "sessions.jsonl", table: "ledger_checkpoints" },
 	{ entity: "coverage", file: "coverage.jsonl", table: "ledger_coverage" },
+	{ entity: "reviews", file: "review/reviews.jsonl", table: "ledger_reviews" },
+	{ entity: "reviewRemaps", file: "review/remaps.jsonl", table: "ledger_review_remaps" },
 ];
 /** Order of the entity transactions. */
-const ENTITIES = ["meta", "nodes", "chains", "coverage", "checkpoints", "sources", "organization"] as const;
+const ENTITIES = ["meta", "nodes", "chains", "coverage", "checkpoints", "reviews", "reviewRemaps", "sources", "organization"] as const;
 type Entity = (typeof ENTITIES)[number];
 const ORG_KEY = "source-organization";
 /** Files of the graph family that stay files on every backend: copied by export, never migrated. */
@@ -133,6 +136,8 @@ export interface Counts {
 	chains: number;
 	checkpoints: number;
 	coverage: number;
+	reviews: number;
+	reviewRemaps: number;
 	sources: number;
 }
 export interface Snapshot {
@@ -293,7 +298,13 @@ export function snapshotSql(file: string, backend: "sqlite" | "doltlite"): Snaps
 		if (format === undefined || !/^[1-9]\d{0,9}$/.test(format)) throw new MigrateRefusedError(MIGRATE_TEXT.badMeta(file, "line_format", format));
 		const dropped: Dropped = { crlf: 0, blank: 0, torn: 0 };
 		const ledgers = {} as Record<Ledger, string[]>;
+		// A ledger table added by a later rung is absent below it: that is an empty ledger. The source is read-only, so it is never upgraded. Absent at the top rung stays an error.
+		const rung = Number(db.get<{ value: string }>("SELECT value FROM lh_meta WHERE key = 'schema_version'")?.value);
 		for (const l of LEDGERS) {
+			if (!tables.includes(l.table) && rung < graphRungs.length) {
+				ledgers[l.entity] = [];
+				continue;
+			}
 			const rows = textRows(db, file, l.table, ["line_json"], "ORDER BY seq").map(([line], i) => {
 				if ((line as string).includes("\n")) throw new MigrateRefusedError(MIGRATE_TEXT.multiline(file, `${l.table}.line_json row ${i + 1}`));
 				return line as string;
@@ -325,7 +336,7 @@ export function snapshotSql(file: string, backend: "sqlite" | "doltlite"): Snaps
 }
 
 const holdsData = (s: Snapshot): boolean => s.sources.length > 0 || s.organization !== undefined || LEDGERS.some((l) => s.ledgers[l.entity].length > 0);
-const countsOf = (s: Snapshot): Counts => ({ nodes: s.ledgers.nodes.length, chains: s.ledgers.chains.length, checkpoints: s.ledgers.checkpoints.length, coverage: s.ledgers.coverage.length, sources: s.sources.length });
+const countsOf = (s: Snapshot): Counts => ({ nodes: s.ledgers.nodes.length, chains: s.ledgers.chains.length, checkpoints: s.ledgers.checkpoints.length, coverage: s.ledgers.coverage.length, reviews: s.ledgers.reviews.length, reviewRemaps: s.ledgers.reviewRemaps.length, sources: s.sources.length });
 
 /** relative path -> exact text of a file-backend folder, in path order. No marker. positions and render settings are not in it (copied bytes). */
 export function renderExport(s: Snapshot): Map<string, string> {
@@ -605,6 +616,8 @@ const FILE_OF: Record<Entity, string> = {
 	nodes: "graph/nodes.jsonl",
 	chains: "graph/chains.jsonl",
 	coverage: "graph/coverage.jsonl",
+	reviews: "graph/review/reviews.jsonl",
+	reviewRemaps: "graph/review/remaps.jsonl",
 	checkpoints: "graph/sessions.jsonl",
 	sources: "graph/sources.json",
 	organization: "graph/source-organization.json",

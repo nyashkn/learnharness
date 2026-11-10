@@ -7,13 +7,15 @@ import fc from "fast-check";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { CoverageEntry, GraphChain, GraphNode, ProvenancePoint, SessionCheckpoint } from "../../src/core/contracts.ts";
+import type { ReviewLine, CoverageEntry, GraphChain, GraphNode, ProvenancePoint, SessionCheckpoint } from "../../src/core/contracts.ts";
 import type {
 	AuthStore, ChatStore, GraphStore, JobStore, PromptOverrideStore,
 	SettingsStore, SourceOrganizationStore,
 } from "../../src/core/ports.ts";
 
 export type Ledger = "nodes" | "chains" | "coverage" | "checkpoints";
+/** Every ledger a corruption hook can reach: the four rewritable ones plus the review ledger (never rewritten). */
+export type AnyLedger = Ledger | "reviews" | "reviewRemaps";
 
 export interface StoreBundle {
 	graph: GraphStore;
@@ -29,9 +31,9 @@ export interface StoreBundle {
 	events: { subscribe(listener: (event: { type: string }) => void): () => void };
 	hooks: {
 		/** Put an unreadable-shaped record line into a ledger (appended, newline-terminated). */
-		injectCorruptLine(ledger: Ledger, text: string): void;
+		injectCorruptLine(ledger: AnyLedger, text: string): void;
 		/** Simulate a torn append (no terminating newline). Omit if the back-end cannot tear. */
-		injectTornTail?(ledger: Ledger, text: string): void;
+		injectTornTail?(ledger: AnyLedger, text: string): void;
 		/** Make the data folder claim a NEWER graph format than this build knows. */
 		stampNewerFormat(): void;
 		/** Undo stampNewerFormat. */
@@ -127,6 +129,19 @@ export const checkpointLine: fc.Arbitrary<SessionCheckpoint> = fc.record({
 	chatId: fc.constantFrom("c1", "c2", "src_1"),
 	foldedAt: stamp,
 });
+/** Synthetic review lines: id = chatId:problemCallId, so a collision means a duplicate problem. Optional fields vary on purpose. */
+export const reviewLine: fc.Arbitrary<ReviewLine> = fc.tuple(
+	fc.constantFrom("c1", "c2"), fc.constantFrom("call_1", "call_2", "call_3"), stamp,
+	fc.uniqueArray(nodeId, { minLength: 1, maxLength: 3 }),
+	fc.constantFrom("solved", "solvedWithHints", "movedOn", "surrendered", "dismissed" as const),
+	fc.constantFrom("R0", "R1", "R5", null),
+	fc.record({
+		mode: fc.constantFrom("recall", "discrimination", "composition"),
+		missClass: fc.constantFrom("cue", "careless", null),
+		surface: fc.constantFrom("s1", "uni é中"),
+		confidence: fc.oneof(fc.integer({ min: 0, max: 100 }), fc.double({ min: 0, max: 100, noNaN: true })),
+	}, { requiredKeys: [] }),
+).map(([chatId, problemCallId, at, targets, outcome, rung, opt]) => ({ id: `${chatId}:${problemCallId}`, chatId, problemCallId, at, targets, outcome, rung, ...opt }) as ReviewLine);
 /** Valid-JSON-or-not lines that every strict reader must skip. */
 export const garbage = fc.constantFrom("{", "not json", "{\"id\":1}", "[]", "null", "42", "{\"id\":\"x\"}", "\"str\"", "{\"chatId\":1}");
 
@@ -144,6 +159,7 @@ const verbatim = <T extends object>(base: fc.Arbitrary<T>): fc.Arbitrary<T> =>
 export const verbatimNode: fc.Arbitrary<GraphNode> = verbatim(fc.tuple(nodeLine, edgeText, edgeText).map(([n, name, statement]) => ({ ...n, name, statement })));
 export const verbatimChain: fc.Arbitrary<GraphChain> = verbatim(chainLine);
 export const verbatimCoverage: fc.Arbitrary<CoverageEntry> = verbatim(coverageLine);
+export const verbatimReview: fc.Arbitrary<ReviewLine> = verbatim(reviewLine);
 export const verbatimCheckpoint: fc.Arbitrary<SessionCheckpoint> = verbatim(checkpointLine);
 
 /** Per-property time limit: a hang while shrinking fails the property instead of stalling the gate. */

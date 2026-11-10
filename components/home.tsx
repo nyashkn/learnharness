@@ -17,6 +17,7 @@ import { PathInput } from "@/components/path-input";
 import { AttachFilesButton } from "@/components/attach-files-button";
 import { SessionStarter } from "@/components/start-session";
 import { ProposedSessions } from "@/components/proposed-sessions";
+import { ReviewPill, useReviewQueue, type ReviewPick } from "@/components/review-pill";
 import type { TurnUsage } from "@/src/core";
 
 /**
@@ -164,6 +165,31 @@ export function Home({
 		}
 	};
 
+	/* SCHEDULED PRACTICE: the review pill starts a practice session over the queue's picks in one click, the same
+	 *  creation contract as a practice send with picks; the title is the opening prompt. Its own starter, so a
+	 *  retry never reuses the topic draft's created session. */
+	const reviewQueue = useReviewQueue();
+	const reviewStarterRef = useRef(new SessionStarter());
+	const beginReview = async (picks: ReviewPick[]) => {
+		if (startingRef.current || picks.length === 0) return;
+		if (!guardStart()) return;
+		startingRef.current = true;
+		setBusy(true);
+		setStartError(false);
+		try {
+			const target = await reviewStarterRef.current.start({
+				title: `Review: ${picks.length} ${picks.length === 1 ? "proposition" : "propositions"}`,
+				kind: "practice",
+				graphContext: { propositions: picks },
+			}, fetch, JSON.stringify(catalog?.slots.strong));
+			router.push(target);
+		} catch {
+			startingRef.current = false;
+			setBusy(false);
+			setStartError(true);
+		}
+	};
+
 	return (
 		<div className="relative h-dvh">
 			{/* Window-drag strip (merged chrome, owner 2026-09-17): a dedicated
@@ -231,12 +257,17 @@ export function Home({
 					    shows the pick HINT so the affordance is discoverable;
 					    teaching mode with nothing picked renders nothing. */}
 					<ComposerActions
-						picker={(practiceProps.length > 0 || mode === "practice") && (
-							<NodePickerControl
-								count={practiceProps.length}
-								onOpen={() => setChainSelectOpen(true)}
-								onClear={() => setPracticeProps([])}
-							/>
+						picker={((practiceProps.length > 0 || mode === "practice") || (reviewQueue?.picks.length ?? 0) > 0) && (
+							<>
+								<ReviewPill queue={reviewQueue} busy={busy} onStart={(picks) => void beginReview(picks)} />
+								{(practiceProps.length > 0 || mode === "practice") && (
+									<NodePickerControl
+										count={practiceProps.length}
+										onOpen={() => setChainSelectOpen(true)}
+										onClear={() => setPracticeProps([])}
+									/>
+								)}
+							</>
 						)}
 						setup={zeroKeys ? (
 							<ZeroKeysPill inline onOpen={() => setSetupOpen(true)} />

@@ -20,6 +20,8 @@ graph/sources.json        Imported-note source metadata, keyed by source ID
 graph/format.json         Graph-family format stamp: {"version": 1}
 graph/sessions.jsonl       Extraction checkpoints, NOT the session index
 graph/coverage.jsonl       Extraction fingerprints, NOT learner assessment
+graph/review/reviews.jsonl One line per concluded practice problem: outcome facts, NOT a mastery score
+graph/review/remaps.jsonl  Append-only {from,to} node-merge redirects for review targets
 graph/positions.json      Canvas layout, not semantic relationships
 graph/render-settings.json  Presentation preferences, not learning evidence
 jobs/<job-id>.json        Background work records; delivered artifacts also appear in sessions
@@ -237,6 +239,15 @@ Graph `sessions.jsonl` records extraction checkpoints, and `coverage.jsonl` reco
 fingerprints of extracted teacher text. Neither is a session catalog, quiz-event
 ledger, mastery scale, or record of every idea the learner personally endorsed.
 Practice does not itself write new propositions to the graph.
+
+`review/reviews.jsonl` has one line per concluded, targeted practice problem
+(`id` = `chatId:problemCallId`, `targets`, `outcome`, `rung`, optional `mode`,
+`missClass`, `surface`, `confidence`). Review lines keep their original
+targets. `review/remaps.jsonl` records `{from, to}` when a node merge replaces
+a proposition; readers resolve a review's targets through the remaps (follow
+`from` to `to` until no remap applies) instead of rewriting the reviews.
+Both files are absent until the first review or merge. Neither holds a
+mastery score or memory state.
 
 ## Reader limits
 

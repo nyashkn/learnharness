@@ -13,6 +13,8 @@
  *                                      another line; readers merge)
  *   sessions.jsonl  SessionCheckpoint— emission checkpoints (foldedAt)
  *   coverage.jsonl  CoverageEntry    — per-message extraction coverage
+ *   review/reviews.jsonl ReviewLine  — the review ledger
+ *   review/remaps.jsonl  ReviewRemap — append-only node-merge remaps, resolved on read
  *
  * CHAINS-PRIMARY (owner, 2026-09-30): there is NO edges ledger — the edge
  * view (implication nodes + untyped arrows) is derived in core/graph.ts on
@@ -35,7 +37,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { TSchema } from "typebox";
-import { Value } from "typebox/value";
+import { lineCheck } from "./line-check.ts";
 import { PATHS } from "../../config.ts";
 import { assertGraphFormat, ensureGraphFormat } from "./graph-format.ts";
 import { beforeWrite } from "./marker.ts";
@@ -47,12 +49,16 @@ import type {
 	NotesSource,
 	Position,
 		CoverageEntry,
+		ReviewLine,
+		ReviewRemap,
 	SessionCheckpoint,
 } from "../core/contracts.ts";
 import type { GraphStore } from "../core/ports.ts";
 import { ChainLineSchema } from "../core/contracts/schemas/chain-line.ts";
 import { CheckpointLineSchema } from "../core/contracts/schemas/checkpoint-line.ts";
 import { CoverageLineSchema } from "../core/contracts/schemas/coverage-line.ts";
+import { applyReviewRemaps, assertNoRemapCycle } from "../core/review-remap.ts";
+import { ReviewLineSchema, ReviewRemapLineSchema } from "../core/contracts/schemas/review-line.ts";
 import { NodeLineSchema } from "../core/contracts/schemas/node-line.ts";
 
 // ─── JSONL primitives ────────────────────────────────────────────────────────
@@ -77,6 +83,8 @@ export function graphPaths(graphDir: string) {
 		chains: path.join(graphDir, "chains.jsonl"),
 		sessions: path.join(graphDir, "sessions.jsonl"),
 		coverage: path.join(graphDir, "coverage.jsonl"),
+		reviews: path.join(graphDir, "review", "reviews.jsonl"),
+		reviewRemaps: path.join(graphDir, "review", "remaps.jsonl"),
 		sources: path.join(graphDir, "sources.json"),
 		sourceOrganization: path.join(graphDir, "source-organization.json"),
 		positions: path.join(graphDir, "positions.json"),
@@ -198,7 +206,7 @@ function appendLine<T>(c: Ctx, file: string, record: T): void {
  *  keeps a rolled-back transact from moving it, and SQL revisions cannot see them. */
 function revisionNow(c: Ctx): number {
 	let revision = 0;
-	for (const file of [c.files.nodes, c.files.chains, c.files.sessions, c.files.coverage, c.files.sources, c.files.sourceOrganization]) {
+	for (const file of [c.files.nodes, c.files.chains, c.files.sessions, c.files.coverage, c.files.reviews, c.files.reviewRemaps, c.files.sources, c.files.sourceOrganization]) {
 		try {
 			revision = Math.max(revision, fs.statSync(file).mtimeMs);
 		} catch {
@@ -262,7 +270,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 const isString = (v: unknown): v is string => typeof v === "string";
 
-/** Strict shape guards: the S4 line schemas, `Value.Check` ONLY. Never Convert/Clean: lines are verbatim (CB5).
+/** Strict shape guards: the S4 line schemas, compiled `Check` ONLY (line-check.ts). Never Convert/Clean: lines are verbatim (CB5).
  *  Anything not matching a ledger shape is skipped (and counted by corruptLines). */
 function readValid<T>(c: Ctx, file: string, schema: TSchema): T[] {
 	assertGraphFormat(c.files.format); // honest refusal on a newer-stamped data dir
@@ -273,16 +281,16 @@ function readValid<T>(c: Ctx, file: string, schema: TSchema): T[] {
 			else if (op.t === "rewrite" && op.file === file) records = op.records.map(viaDisk);
 		}
 	}
-	return records.filter((r): r is T => Value.Check(schema, r));
+	return records.filter((r): r is T => lineCheck(schema, r));
 }
 
 /** Lines that are not records across the four ledgers, from disk only (pending transact ops are not lines yet). Stateless. */
 function corruptLinesOf(c: Ctx): number {
 	assertGraphFormat(c.files.format);
 	let bad = 0;
-	for (const [file, schema] of [[c.files.nodes, NodeLineSchema], [c.files.chains, ChainLineSchema], [c.files.sessions, CheckpointLineSchema], [c.files.coverage, CoverageLineSchema]] as const) {
+	for (const [file, schema] of [[c.files.nodes, NodeLineSchema], [c.files.chains, ChainLineSchema], [c.files.sessions, CheckpointLineSchema], [c.files.coverage, CoverageLineSchema], [c.files.reviews, ReviewLineSchema], [c.files.reviewRemaps, ReviewRemapLineSchema]] as const) {
 		const { parsed, unparsable } = scanLines(file);
-		bad += unparsable + parsed.filter((r) => !Value.Check(schema, r)).length;
+		bad += unparsable + parsed.filter((r) => !lineCheck(schema, r)).length;
 	}
 	return bad;
 }
@@ -322,6 +330,18 @@ function build(c: Ctx): GraphStore & { corruptLines(): number } {
 		},
 		readCoverage(): CoverageEntry[] {
 			return readValid<CoverageEntry>(c, c.files.coverage, CoverageLineSchema);
+		},
+
+		appendReview(line: ReviewLine): void {
+			appendLine(c, c.files.reviews, line);
+		},
+		readReviews(): ReviewLine[] {
+			return applyReviewRemaps(readValid<ReviewLine>(c, c.files.reviews, ReviewLineSchema), readValid<ReviewRemap>(c, c.files.reviewRemaps, ReviewRemapLineSchema));
+		},
+		remapReviewTargets(from: string, to: string): void {
+			// the refusal comes before any write and, like a validation error, does not poison an enclosing transact
+			assertNoRemapCycle(readValid<ReviewRemap>(c, c.files.reviewRemaps, ReviewRemapLineSchema), from, to);
+			appendLine(c, c.files.reviewRemaps, { from, to });
 		},
 
 		// ── imported-notes bookkeeping (config.SOURCES_FILE — a JSON map) ──

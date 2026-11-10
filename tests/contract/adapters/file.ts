@@ -9,7 +9,7 @@ import { subscribe } from "../../../src/core/events.ts";
 import { createFileStores } from "../../../src/store/file-stores.ts";
 import { graphPaths } from "../../../src/store/graph.ts";
 import { releaseStoreLock } from "../../../src/store/marker.ts";
-import type { AdapterFactory, Ledger, StoreBundle } from "../harness.ts";
+import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
 
 const factory: AdapterFactory = {
 	name: "file",
@@ -17,8 +17,8 @@ const factory: AdapterFactory = {
 	async open(dir): Promise<StoreBundle> {
 		const s = createFileStores(dir, path.join(dir, "auth.json")); // opens: refuses a newer folder
 		const g = graphPaths(path.join(dir, "graph"));
-		const files: Record<Ledger, string> = { nodes: g.nodes, chains: g.chains, coverage: g.coverage, checkpoints: g.sessions };
-		const append = (l: Ledger, text: string) => { fs.mkdirSync(path.dirname(files[l]), { recursive: true }); fs.appendFileSync(files[l], text); };
+		const files: Record<AnyLedger, string> = { nodes: g.nodes, chains: g.chains, coverage: g.coverage, checkpoints: g.sessions, reviews: g.reviews, reviewRemaps: g.reviewRemaps };
+		const append = (l: AnyLedger, text: string) => { fs.mkdirSync(path.dirname(files[l]), { recursive: true }); fs.appendFileSync(files[l], text); };
 		return {
 			graph: s.graphStore, chats: s.chatStore, jobs: s.jobStore, settings: s.settingsStore,
 			sourceOrg: s.sourceOrganizationStore, prompts: s.promptOverrides, auth: s.authStore,

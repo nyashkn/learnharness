@@ -12,10 +12,10 @@ import { describe, it, test } from "node:test";
 import fc from "fast-check";
 import * as A from "./harness.ts";
 import { discoverAdapters, openFresh, reopen } from "./harness.ts";
-import type { AdapterFactory, Ledger, StoreBundle } from "./harness.ts";
+import type { AdapterFactory, AnyLedger, Ledger, StoreBundle } from "./harness.ts";
 import { getGraph, mergeFindings, simplifyChains } from "../../src/core/graph.ts";
 import { coveredSet } from "../../src/core/coverage.ts";
-import type { CoverageEntry, GraphChain, GraphNode, SessionCheckpoint } from "../../src/core/contracts.ts";
+import type { CoverageEntry, GraphChain, GraphNode, ReviewLine, SessionCheckpoint } from "../../src/core/contracts.ts";
 import type { GraphStore } from "../../src/core/ports.ts";
 
 /** adapter name -> test id -> owning bead. Runs as node:test `todo` for THAT adapter only: the test executes and reports but does not fail the run. A different adapter gets no allowance. */
@@ -141,9 +141,10 @@ export function registerContract(f: AdapterFactory): void {
 	});
 
 	describe(`${f.name}: B append/read round-trip`, () => {
-		const ledgers: { l: Ledger; arb: fc.Arbitrary<unknown>; app: (b: StoreBundle, v: any) => void; rd: (b: StoreBundle) => unknown[] }[] = [
+		const ledgers: { l: AnyLedger; arb: fc.Arbitrary<unknown>; app: (b: StoreBundle, v: any) => void; rd: (b: StoreBundle) => unknown[] }[] = [
 			{ l: "nodes", arb: A.verbatimNode, app: (b, v) => b.graph.appendNode(v), rd: (b) => b.graph.readNodes() },
 			{ l: "chains", arb: A.verbatimChain, app: (b, v) => b.graph.appendChain(v), rd: (b) => b.graph.readChains() },
+			{ l: "reviews", arb: A.verbatimReview, app: (b, v) => b.graph.appendReview(v), rd: (b) => b.graph.readReviews() },
 			{ l: "checkpoints", arb: A.verbatimCheckpoint, app: (b, v) => b.graph.appendCheckpoint(v), rd: (b) => b.graph.readCheckpoints() },
 		];
 		for (const L of ledgers) {
@@ -401,10 +402,122 @@ export function registerContract(f: AdapterFactory): void {
 		});
 	});
 
+	describe(`${f.name}: R review ledger (R2)`, () => {
+		const rvs = fc.array(A.reviewLine, { maxLength: 8 });
+		// Valid JSON, wrong shape: each breaks exactly one rule of the line contract. Hand-written, so the expectation never comes from the guard.
+		const base = { id: "c1:k1", chatId: "c1", problemCallId: "k1", at: "2026-01-01T00:00:00.000Z", targets: ["n1"], outcome: "solved", rung: null };
+		const invalid = [
+			{ ...base, targets: [] }, { ...base, targets: "n1" }, { ...base, targets: [1] }, { ...base, outcome: "won" }, { ...base, rung: "R9" }, { ...base, rung: undefined },
+			{ ...base, mode: "speed" }, { ...base, missClass: "oops" }, { ...base, confidence: 101 }, { ...base, confidence: -1 }, { ...base, confidence: "90" }, { ...base, id: 7 },
+			{ ...base, chatId: undefined }, { ...base, at: 5 },
+		];
+		P("R1", "an invalid-shape review line (empty targets, unknown outcome/rung/mode/missClass, confidence out of 0-100, missing or mistyped field) is skipped, never guessed at; valid lines keep order", fc.array(fc.oneof(A.reviewLine.map((v) => ({ v })), fc.constantFrom(...invalid).map((bad) => ({ bad }))), { maxLength: 10 }), (b, items) => {
+			for (const it2 of items) "v" in it2 ? b.graph.appendReview(it2.v) : b.hooks.injectCorruptLine("reviews", JSON.stringify(it2.bad));
+			eq(b.graph.readReviews(), items.flatMap((x) => ("v" in x ? [x.v] : [])));
+		});
+		P("R2", "reviews are NOT part of rewriteLedgers: rewriting any/all other ledgers leaves every review line, in order", fc.tuple(rvs, fc.array(A.nodeLine, { maxLength: 3 })), (b, [rs, ns]) => {
+			rs.forEach((r) => b.graph.appendReview(r)); putAll(b, ns);
+			b.graph.rewriteLedgers({ nodes: [], chains: [], coverage: [], checkpoints: [] });
+			eq(b.graph.readReviews(), rs); eq(b.graph.readNodes(), []);
+		});
+		P("R3", "inside transact: appends are read-your-writes in call order and, on commit, persist in that order after earlier lines", fc.tuple(rvs, rvs), (b, [before, inside]) => {
+			before.forEach((r) => b.graph.appendReview(r));
+			b.graph.transact("rv", () => {
+				inside.forEach((r, i) => { b.graph.appendReview(r); eq(b.graph.readReviews(), [...before, ...inside.slice(0, i + 1)]); });
+			});
+			eq(b.graph.readReviews(), [...before, ...inside]);
+		});
+		P("R4", "a transact that throws after appendReview (or whose nested transact threw and was caught) leaves no review behind", fc.tuple(rvs, rvs, fc.boolean()), (b, [before, inside, nested]) => {
+			before.forEach((r) => b.graph.appendReview(r));
+			assert.throws(() => b.graph.transact("rv", () => {
+				inside.forEach((r) => b.graph.appendReview(r));
+				if (nested) { try { b.graph.transact("in", () => { throw new Error("inner"); }); } catch { /* caught on purpose: still poisons the outer */ } return; }
+				throw new Error("boom");
+			}), /./);
+			eq(b.graph.readReviews(), before);
+		});
+		P("R5", "a review append moves the revision; a rolled-back one does not (SQL: reviews bump lh_meta.revision like the other ledgers)", rvs.filter((x) => x.length > 0), (b, rs) => {
+			const rev = (b.graph as unknown as { revision?: () => number }).revision;
+			if (!f.capabilities.revision || !rev) return;
+			const r0 = rev.call(b.graph);
+			assert.throws(() => b.graph.transact("rv", () => { b.graph.appendReview(rs[0]!); throw new Error("boom"); }), /boom/);
+			eq(rev.call(b.graph), r0);
+			b.graph.appendReview(rs[0]!);
+			assert.ok(rev.call(b.graph) > r0, "revision did not move");
+		});
+		P("R6", "corruptLines() counts invalid review lines and valid ones are not counted", fc.tuple(rvs, fc.array(fc.constantFrom(...invalid), { maxLength: 4 })), (b, [rs, bad]) => {
+			const cl = (b.graph as unknown as { corruptLines?: () => number }).corruptLines;
+			if (!cl) return;
+			rs.forEach((r) => b.graph.appendReview(r)); bad.forEach((x) => b.hooks.injectCorruptLine("reviews", JSON.stringify(x)));
+			eq(cl.call(b.graph), bad.length);
+		}, f.capabilities.corruptLines ? {} : { todo: "lh-bhc" });
+	});
+
+	describe(`${f.name}: M review remaps (a merged node's reviews follow it)`, () => {
+		const ids = ["n1", "n2", "n3", "n4", "n5"];
+		// Acyclic by construction (always towards a higher index), so every sequence is accepted and the oracle is a plain fixed-point loop.
+		const upward = fc.array(fc.tuple(fc.integer({ min: 0, max: 3 }), fc.integer({ min: 1, max: 4 })).filter(([a, d]) => a + d <= 4).map(([a, d]) => ({ from: ids[a]!, to: ids[a + d]! })), { maxLength: 6 });
+		const oracle = (rs: ReviewLine[], remaps: { from: string; to: string }[]): ReviewLine[] => {
+			const last = new Map(remaps.map((r) => [r.from, r.to]));
+			const fin = (t: string): string => { let c = t; while (last.has(c)) c = last.get(c)!; return c; };
+			return rs.map((r) => ({ ...r, targets: r.targets.map(fin).filter((t, i, all) => all.indexOf(t) === i) }));
+		};
+		const rvs = fc.array(A.reviewLine, { maxLength: 6 });
+		P("M1", "readReviews resolves every target through the remap chain (a->b, b->c reads c; the last remap of a `from` wins; targets dedupe), keeping line order and every other field", fc.tuple(rvs, upward), (b, [rs, remaps]) => {
+			rs.forEach((r) => b.graph.appendReview(r));
+			remaps.forEach((m) => b.graph.remapReviewTargets(m.from, m.to));
+			eq(b.graph.readReviews(), oracle(rs, remaps));
+		});
+		P("M2", "remaps are append-only history: a review appended AFTER a remap of its target is resolved too, and a remap to an id no review mentions changes nothing", fc.tuple(rvs, rvs), (b, [before, after]) => {
+			before.forEach((r) => b.graph.appendReview(r));
+			b.graph.remapReviewTargets("n1", "n2"); b.graph.remapReviewTargets("n2", "n3");
+			b.graph.remapReviewTargets("unreviewed", "n9"); // no line mentions it
+			after.forEach((r) => b.graph.appendReview(r));
+			const want = oracle([...before, ...after], [{ from: "n1", to: "n2" }, { from: "n2", to: "n3" }]);
+			eq(b.graph.readReviews(), want);
+		});
+		P("M3", "a remap that would make a cycle (self, a->b->a, a->b->c->a) throws, writes nothing, and does not poison an enclosing transact", fc.tuple(rvs, fc.constantFrom("self", "two", "three")), (b, [rs, kind]) => {
+			rs.forEach((r) => b.graph.appendReview(r));
+			b.graph.remapReviewTargets("n3", "n4"); // an unrelated, valid remap stays
+			const cycle = { self: [["n1", "n1"]], two: [["n1", "n2"], ["n2", "n1"]], three: [["n1", "n2"], ["n2", "n5"], ["n5", "n1"]] }[kind]!;
+			b.graph.transact("c", () => {
+				for (const [from, to] of cycle.slice(0, -1)) b.graph.remapReviewTargets(from!, to!);
+				const [from, to] = cycle[cycle.length - 1]!;
+				assert.throws(() => b.graph.remapReviewTargets(from!, to!), /cycle/);
+				if (kind === "self") assert.throws(() => b.graph.remapReviewTargets("n1", "n1"), /cycle/);
+			});
+			// the acyclic prefix committed; the refused edge did not: reads must terminate and equal the oracle over the prefix only
+			eq(b.graph.readReviews(), oracle(rs, [{ from: "n3", to: "n4" }, ...cycle.slice(0, -1).map(([from, to]) => ({ from: from!, to: to! }))]));
+		});
+		P("M4", "a cycle that is already on disk is refused on read with a clear error, not looped on", rvs, (b, rs) => {
+			rs.forEach((r) => b.graph.appendReview(r));
+			b.hooks.injectCorruptLine("reviewRemaps", JSON.stringify({ from: "n1", to: "n2" }));
+			b.hooks.injectCorruptLine("reviewRemaps", JSON.stringify({ from: "n2", to: "n1" }));
+			assert.throws(() => b.graph.readReviews(), /cycle/);
+		});
+		P("M5", "remap inside transact: read-your-writes, and a throw (or caught nested throw) after it leaves no remap; a commit keeps it", fc.tuple(rvs, fc.constantFrom("commit", "throw", "caught")), (b, [rs, how]) => {
+			rs.forEach((r) => b.graph.appendReview(r));
+			const plain = oracle(rs, []);
+			const run = () => b.graph.transact("m", () => {
+				b.graph.remapReviewTargets("n1", "n2");
+				eq(b.graph.readReviews(), oracle(rs, [{ from: "n1", to: "n2" }]));
+				if (how === "throw") throw new Error("boom");
+				if (how === "caught") { try { b.graph.transact("in", () => { throw new Error("inner"); }); } catch { /* caught on purpose */ } }
+			});
+			if (how === "commit") { run(); eq(b.graph.readReviews(), oracle(rs, [{ from: "n1", to: "n2" }])); }
+			else { assert.throws(run, /./); eq(b.graph.readReviews(), plain); }
+		});
+		P("M6", "invalid remap lines (missing/mistyped from or to) are skipped, never guessed at", rvs, (b, rs) => {
+			rs.forEach((r) => b.graph.appendReview(r));
+			for (const bad of [{ from: "n1" }, { to: "n2" }, { from: 1, to: "n2" }, { from: "n1", to: null }]) b.hooks.injectCorruptLine("reviewRemaps", JSON.stringify(bad));
+			eq(b.graph.readReviews(), oracle(rs, []));
+		});
+	});
+
 	describe(`${f.name}: G format-version guard`, () => {
 		const reads = (b: StoreBundle): [string, () => unknown][] => [
 			["readNodes", () => b.graph.readNodes()], ["readChains", () => b.graph.readChains()], ["readCheckpoints", () => b.graph.readCheckpoints()],
-			["readCoverage", () => b.graph.readCoverage()], ["readSources", () => b.graph.readSources()], ["sourceOrg.read", () => b.sourceOrg.read()], ["render.read", () => b.render.read()],
+			["readCoverage", () => b.graph.readCoverage()], ["readReviews", () => b.graph.readReviews()], ["readSources", () => b.graph.readSources()], ["sourceOrg.read", () => b.sourceOrg.read()], ["render.read", () => b.render.read()],
 		];
 		P("G1", "a newer-stamped data folder makes EVERY graph-family read throw (never silently skip)", fc.array(A.nodeLine, { maxLength: 3 }), (b, ns) => {
 			putAll(b, ns); b.hooks.stampNewerFormat();
@@ -415,6 +528,8 @@ export function registerContract(f: AdapterFactory): void {
 			["appendChain", () => b.graph.appendChain({ id: "arg_1", premises: ["n1"], conclusion: "n2", createdAt: "t", provenance: [] })],
 			["appendCoverage", () => b.graph.appendCoverage({ chatId: "c1", fp: "f", tokens: 1, foldedAt: "t" })],
 			["appendCheckpoint", () => b.graph.appendCheckpoint({ chatId: "c1", foldedAt: "t" })],
+			["remapReviewTargets", () => b.graph.remapReviewTargets("n1", "n2")],
+			["appendReview", () => b.graph.appendReview({ id: "c1:k1", chatId: "c1", problemCallId: "k1", at: "t", targets: ["n1"], outcome: "solved", rung: null })],
 			["rewriteLedgers", () => b.graph.rewriteLedgers({ nodes: [] })],
 			["upsertSource", () => b.graph.upsertSource({ id: "src_1", filePath: "/x", importedAt: "t" })],
 			["sourceOrg.write", () => b.sourceOrg.write({ version: 1, folders: [], placements: {} } as never)],

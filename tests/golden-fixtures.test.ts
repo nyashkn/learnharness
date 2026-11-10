@@ -169,6 +169,20 @@ test("graph: the real ledgers parse through their shape guards", () => {
 	assert.ok(graphStore.readSources().length >= 1, "imported-notes sources parse");
 });
 
+// review/ was written by the app's R3 backfill over the practice chat below. Expected outcomes are read from the chat's own conclude calls.
+test("graph: the review ledger matches the practice chat's conclude records", () => {
+	const chatId = "chat_mv293wv5_10656952";
+	const chat = JSON.parse(fs.readFileSync(path.join(GOLDEN, "chats", `${chatId}.json`), "utf8")) as { messages: { role: string; content?: unknown }[] };
+	const concluded = chat.messages.flatMap((m) =>
+		m.role === "assistant" && Array.isArray(m.content) ? (m.content as { type: string; name?: string; arguments?: { outcome?: string } }[]).filter((p) => p.type === "toolCall" && p.name === "conclude").map((p) => p.arguments!.outcome) : [],
+	);
+	assert.deepEqual(concluded, ["solved", "dismissed"], "the chat itself records one solve and one dismissal");
+	const reviews = graphStore.readReviews();
+	assert.equal(reviews.length, concluded.length, "one review per concluded problem");
+	assert.deepEqual(reviews.map((r) => r.outcome), concluded);
+	assert.ok(reviews.every((r) => r.chatId === chatId && r.targets.length > 0));
+});
+
 test("graph: getGraph + deriveView build the snapshot end-to-end", () => {
 	const derived = getGraph(graphStore);
 	assert.ok(derived.nodes.length >= 250, "merged nodes");
