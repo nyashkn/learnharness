@@ -2443,6 +2443,24 @@ describe("chain simplification (the merger's maintenance pass, owner 2026-09-30 
 		assert.deepEqual(kept.map((c) => c.id).sort(), ["arg_1", "arg_2", "arg_3"]);
 	});
 
+	it("derivability, not ancestry: [A,B]=>X + [X,C]=>Y do NOT make [A,C]=>Y redundant (B is missing)", () => {
+		const kept = simplifyChains([
+			chain("arg_1", ["n_a", "n_b"], "n_x", "2026-09-30T01:00:00.000Z"),
+			chain("arg_2", ["n_x", "n_c"], "n_y", "2026-09-30T02:00:00.000Z"),
+			chain("arg_3", ["n_a", "n_c"], "n_y", "2026-09-30T03:00:00.000Z"),
+		]);
+		assert.deepEqual(kept.map((c) => c.id).sort(), ["arg_1", "arg_2", "arg_3"]);
+	});
+
+	it("lh-1hl F5 counterexample: [n4,n2]=>n5 is not derivable from the others, so all three stand", () => {
+		const kept = simplifyChains([
+			chain("arg_1", ["n2", "n1"], "n4", "2026-01-01T00:00:00.000Z"),
+			chain("arg_2", ["n4", "n1"], "n5", "2026-01-01T00:00:00.000Z"),
+			chain("arg_3", ["n4", "n2"], "n5", "2026-01-01T00:00:00.000Z"),
+		]);
+		assert.deepEqual(kept.map((c) => c.id), ["arg_1", "arg_2", "arg_3"]);
+	});
+
 	it("same-key provenance lines drop TOGETHER (a key is kept or dropped as a whole)", () => {
 		const kept = simplifyChains([
 			chain("arg_1", ["n_a"], "n_z", "2026-09-30T01:00:00.000Z"),

@@ -21,19 +21,19 @@ import type { GraphStore } from "../../src/core/ports.ts";
 /** adapter name -> test id -> owning bead. Runs as node:test `todo` for THAT adapter only: the test executes and reports but does not fail the run. A different adapter gets no allowance. */
 const KNOWN_GAPS: Record<string, Record<string, string>> = {
 	file: {
-		"F5": "lh-1hl", "F3c": "lh-45r",
+		"F3c": "lh-45r",
 	},
 	sqlite: {
-		"F5": "lh-1hl", "F3c": "lh-45r",
+		"F3c": "lh-45r",
 	},
 	"sqlite-app": {
-		"F5": "lh-1hl", "F3c": "lh-45r",
+		"F3c": "lh-45r",
 	},
 	doltlite: {
-		"F5": "lh-1hl", "F3c": "lh-45r",
+		"F3c": "lh-45r",
 	},
 	"doltlite-app": {
-		"F5": "lh-1hl", "F3c": "lh-45r",
+		"F3c": "lh-45r",
 	},
 };
 
