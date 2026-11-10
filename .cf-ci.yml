@@ -9,8 +9,8 @@
 #   the GTK/NSS/ALSA libraries it links even under ELECTRON_RUN_AS_NODE.
 # - origin pointed at GitHub: the snapshot's origin is cf-ci's own store, which needs credentials, and the
 #   released-rung guard fetches origin/main itself (public repo, no credentials).
-# Test steps (they run as root) also put /tmp in memory, since temp-folder stores on the sandbox disk were
-# slow enough to run the N1 property past its time budget, and raise the open-file limit, which is lower
+# Test steps (they run as root) also put their temp folders in memory (TMPDIR on a tmpfs; not over /tmp,
+# where cf-ci keeps the step log), since temp-folder stores on the sandbox disk ran N1 past its time budget, and raise the open-file limit, which is lower
 # than GitHub's while the migrate tests hold many files open.
 # `just remote-ci` runs every step below except `ci` at once, each in its own sandbox (about 5 min);
 # `just remote ci` is the same gate in one sandbox, about 10 min against the 15 min step cap.
@@ -30,9 +30,9 @@ install: >-
 steps:
   typecheck: pnpm run typecheck
   lint: pnpm run lint
-  test: mount -t tmpfs -o size=6g tmpfs /tmp; ulimit -n 65536; tini -s -- pnpm run test
-  test-sql: mount -t tmpfs -o size=6g tmpfs /tmp; pnpm run test:sql
+  test: mkdir -p /mnt/lh-tmp && mount -t tmpfs -o size=6g tmpfs /mnt/lh-tmp && export TMPDIR=/mnt/lh-tmp; ulimit -n 65536; tini -s -- pnpm run test
+  test-sql: mkdir -p /mnt/lh-tmp && mount -t tmpfs -o size=6g tmpfs /mnt/lh-tmp && export TMPDIR=/mnt/lh-tmp; pnpm run test:sql
   test-seed: pnpm run test:seed
-  contract: mount -t tmpfs -o size=6g tmpfs /tmp; pnpm run test:contract
+  contract: mkdir -p /mnt/lh-tmp && mount -t tmpfs -o size=6g tmpfs /mnt/lh-tmp && export TMPDIR=/mnt/lh-tmp; pnpm run test:contract
   checks: pnpm run check:schemas && pnpm run check:pins
-  ci: mount -t tmpfs -o size=6g tmpfs /tmp; ulimit -n 65536; tini -s -- just ci
+  ci: mkdir -p /mnt/lh-tmp && mount -t tmpfs -o size=6g tmpfs /mnt/lh-tmp && export TMPDIR=/mnt/lh-tmp; ulimit -n 65536; tini -s -- just ci
