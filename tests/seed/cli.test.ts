@@ -259,9 +259,11 @@ describe("a project that redaction swallowed counts as no provenance (lh-3p3)", 
 		assert.ok(redact(SLUG).includes("[redacted:"), "precondition: the raw slug is swallowed");
 		assert.equal(composeAllowEgress(["unrelated"])(SLUG), false);
 		assert.equal(composeAllowEgress([])(SLUG), true);
-		// the store keeps redact(raw): clean here, and swallowed by the second redaction egress runs on it
-		const stored = redact("-Users-alice-EK-Mobile-Shared-Documents-Initech-api-2025-dev");
-		assert.ok(!stored.includes("[redacted:") && redact(stored).includes("[redacted:"), "precondition: clean, then swallowed");
+		// redact is idempotent since lh-9hg: the raw slug is swallowed on the first pass
+		assert.ok(redact("-Users-alice-EK-Mobile-Shared-Documents-Initech-api-2025-dev").includes("[redacted:"), "first pass swallows the raw slug (lh-9hg)");
+		// a legacy row: what redact(raw) stored before lh-9hg, clean, and swallowed by the second redaction egress runs on it
+		const stored = "~-EK-Mobile-Shared-Documents-Initech-api-2025-dev";
+		assert.ok(redact(stored).includes("[redacted:"), "precondition: the legacy row is swallowed by a second redaction");
 		assert.equal(composeAllowEgress(["unrelated"])(stored), false);
 		assert.equal(composeAllowEgress([])(stored), true);
 	});
