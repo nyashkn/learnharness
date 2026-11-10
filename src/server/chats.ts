@@ -8,7 +8,7 @@ import { stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
 import { clearTurnFailure } from "./turn-runs.ts";
 import { discardChatDeliveries } from "./jobs.ts";
-import { syncChatReviewsSafely } from "./review.ts";
+import { syncChatReviews } from "./review.ts";
 
 /**
  * Server-side chat entries for the transport layer (app/api/chats*,
@@ -37,7 +37,7 @@ const WIND_DOWN_POLL_MS = 50;
 export type ChatDeleteOutcome =
 	| { ok: false; status: 404; code: "not_found"; error: string }
 	| { ok: false; status: 409; code: "turn_in_flight" | "jobs_running"; error: string; jobIds: string[] }
-	| { ok: false; status: 503; code: "extraction_winding_down"; error: string }
+	| { ok: false; status: 503; code: "extraction_winding_down" | "review_sync_failed"; error: string }
 	| {
 			ok: true;
 			mode: ChatDeleteMode;
@@ -133,6 +133,8 @@ export function deleteIdleChatRecord(chatId: string): Extract<ChatDeleteOutcome,
 	const blocker = runningWorkBlocker(chatId);
 	if (blocker) return blocker;
 	if (extractionStatuses().some((run) => run.chatId === chatId)) return { ok: false, status: 503, code: "extraction_winding_down", error: "The session's extraction is still winding down — try again in a moment" };
+	const refused = syncReviewsBeforeDelete(chatId);
+	if (refused) return refused;
 	finishChatRecordDeletion(chatId);
 	// ChatStore can swallow unlink failures. Do not tell source deletion to
 	// discard placement/folders while the conversation still exists.
@@ -140,17 +142,29 @@ export function deleteIdleChatRecord(chatId: string): Extract<ChatDeleteOutcome,
 	return { ok: true };
 }
 
-function finishChatDeletion(chatId: string, mode: ChatDeleteMode): Extract<ChatDeleteOutcome, { ok: true }> {
+/** The review ledger outlives the chat: fold not-yet-logged reviews in BEFORE anything is purged.
+ *  A failed sync refuses the delete (503) with everything untouched; the caller retries. */
+function syncReviewsBeforeDelete(chatId: string): Extract<ChatDeleteOutcome, { status: 503 }> | null {
+	try {
+		syncChatReviews(chatId);
+		return null;
+	} catch (err) {
+		console.error(`[chat ${chatId}] review sync failed; delete refused:`, err);
+		return { ok: false, status: 503, code: "review_sync_failed", error: "Could not save this session's practice reviews — try again in a moment" };
+	}
+}
+
+function finishChatDeletion(chatId: string, mode: ChatDeleteMode): Extract<ChatDeleteOutcome, { ok: true } | { status: 503 }> {
 	// THE SYNC BLOCK — no awaits below (see the doc comment). Order:
-	// ledgers → jobs → the chat record.
+	// reviews → ledgers → jobs → the chat record.
+	const refused = syncReviewsBeforeDelete(chatId);
+	if (refused) return refused;
 	const stats = deleteChatTraces(stores.graphStore, chatId, mode);
 	const jobsRemoved = finishChatRecordDeletion(chatId);
 	return { ok: true, mode, stats, jobsRemoved, graphRevision: graphRevision() };
 }
 
 function finishChatRecordDeletion(chatId: string): number {
-	// The review ledger outlives the chat: fold any not-yet-logged reviews in before the record goes.
-	syncChatReviewsSafely(chatId);
 	const jobsRemoved = stores.jobStore.deleteJobsForChat(chatId);
 	if (stores.chatStore.deleteChat(chatId)) {
 		discardChatDeliveries(chatId);
