@@ -3,6 +3,8 @@ import { Value } from "typebox/value";
 import { clipSnippet } from "./egress";
 import { extractDraft, type ProposalDraft } from "./extract";
 import type { JudgeOutcome, JudgePort, JudgeRequest, Question } from "./judge/port";
+import { topoOrder, type Edge } from "./order";
+import { firstMessage } from "./panel";
 import { mergeDrafts, type Aligner } from "./proposals";
 import { rankProposal } from "./rank";
 import { redact } from "./redact";
@@ -146,12 +148,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
 
 // ---- pure helpers -----------------------------------------------------------------------------------------------
 
-export interface Edge {
-	from: string;
-	to: string;
-	/** P(from must come before to). */
-	p: number;
-}
+export { topoOrder, type Edge };
 
 const edgeKey = (e: Edge) => `${e.from}\u0000${e.to}`;
 
@@ -196,22 +193,6 @@ export function breakCycles(edges: readonly Edge[]): Edge[] {
 		const drop = cycle.reduce((m, e) => (e.p < m.p || (e.p === m.p && edgeKey(e) < edgeKey(m)) ? e : m));
 		live = live.filter((e) => e !== drop);
 	}
-}
-
-/** from-before-to order. Among ready nodes the higher priority goes first. Nodes stuck in a leftover cycle still come out, by priority. */
-export function topoOrder(ids: readonly string[], edges: readonly Edge[], priority: ReadonlyMap<string, number>): string[] {
-	const remaining = new Set(ids);
-	const live = edges.filter((e) => remaining.has(e.from) && remaining.has(e.to) && e.from !== e.to);
-	const rank = (id: string) => priority.get(id) ?? Number.NEGATIVE_INFINITY;
-	const best = (pool: string[]) => pool.reduce((m, id) => (rank(id) > rank(m) || (rank(id) === rank(m) && id < m) ? id : m));
-	const order: string[] = [];
-	while (remaining.size > 0) {
-		const ready = [...remaining].filter((id) => !live.some((e) => e.to === id && remaining.has(e.from)));
-		const next = best(ready.length > 0 ? ready : [...remaining]);
-		remaining.delete(next);
-		order.push(next);
-	}
-	return order;
 }
 
 export interface LabelledRow {
@@ -638,19 +619,15 @@ async function propose(deps: CliDeps): Promise<number> {
 	let failed = 0;
 	let created = 0;
 	for (const p of todo) {
-		const all = p.evidenceIds.flatMap((id) => items.get(id) ?? []);
-		// runJudge needs every project allowed, so the title is held to the same rule: it was written from all the evidence.
-		const evidence = all.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
-		const first = evidence[0];
-		if (!first) {
+		const opening = firstMessage(p, items, allowEgress);
+		if (opening.kind === "no-evidence") {
 			out(`skipped ${p.id}: it has no evidence items, so nothing was posted`);
 			continue;
 		}
-		if (!evidence.every((i) => allowEgress(i.project))) {
+		if (opening.kind === "opted-out") {
 			out(`skipped ${p.id}: some of its evidence is opted out (egress), so nothing was posted`);
 			continue;
 		}
-		const firstMessage = `I keep running into ${p.title} (for example: ${clipSnippet(first.textRedacted)}). Teach me it from first principles, then check my understanding.`;
 		// shortcut: a crash between a good POST and the accept write makes a re-run create a second chat; add a client request id to POST /api/chats if that ever happens.
 		let res: Response;
 		try {
@@ -671,7 +648,7 @@ async function propose(deps: CliDeps): Promise<number> {
 			failed++;
 			continue;
 		}
-		store.saveAccept({ proposalId: p.id, chatId: body.id, firstMessage, at: deps.now() });
+		store.saveAccept({ proposalId: p.id, chatId: body.id, firstMessage: opening.text, at: deps.now() });
 		created++;
 		out(`started chat ${body.id} for ${p.title}`);
 	}

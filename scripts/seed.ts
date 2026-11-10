@@ -13,7 +13,7 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { PATHS } from "../config.ts";
 import { HELP, parseCommand, runCli, type SeedPolicy } from "../src/seed/cli.ts";
-import { canonProject, createAllowEgress, matchableProject } from "../src/seed/egress.ts";
+import { composeAllowEgress, parseOptOut, readOptOut as readOptOutWith } from "../src/seed/egress.ts";
 import { createConfiguredLlmJudge } from "../src/seed/judge/configured-llm.ts";
 import { createJevApiJudge, PROFILES, type ProfileName } from "../src/seed/judge/jev-api.ts";
 import type { JudgePort } from "../src/seed/judge/port.ts";
@@ -21,7 +21,7 @@ import { claudeHistorySource } from "../src/seed/sources/claude-history.ts";
 import { ompHistorySource, ompMemorySource, ompRecapSource } from "../src/seed/sources/omp.ts";
 import { signetSummarySource } from "../src/seed/sources/signet.ts";
 import { createSeedStore } from "../src/seed/store.ts";
-import type { AllowEgress, LlmPort, ReadOnlyDb, ReadOnlyFiles, SessionSource } from "../src/seed/types.ts";
+import type { LlmPort, ReadOnlyDb, ReadOnlyFiles, SessionSource } from "../src/seed/types.ts";
 import type { SqlDriver } from "../src/store/sql/driver.ts";
 import { openNodeSqlite } from "../src/store/sql/drivers/node-sqlite.ts";
 import { MigrationRefusedError, migrate } from "../src/store/sql/migrate.ts";
@@ -58,31 +58,11 @@ export function loadSeedConfig(file: string, read: (file: string) => string = (f
 	return json;
 }
 
-/**
- * Default-on egress holds with an empty opt-out list. With any entry, a project with no usable provenance is refused:
- * Signet entities, cwd-less rows and slugs that redaction swallowed cannot be proven not to be opted-out work.
- */
-export function composeAllowEgress(optOut: readonly string[]): AllowEgress {
-	const inner = createAllowEgress(optOut);
-	const listed = optOut.some((entry) => canonProject(entry) !== "");
-	return (project) => (matchableProject(project) === null ? !listed : inner(project));
-}
+// The home panel's route reads the same list, so the rule lives in src/seed.
+export { composeAllowEgress, parseOptOut };
 
-export function parseOptOut(text: string): string[] {
-	return text
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line !== "" && !line.startsWith("#"));
-}
-
-/** ENOENT is an empty list; any other failure propagates, because a list we could not read must not mean "allow all". */
-export async function readOptOut(file: string, read: (file: string) => Promise<string> = (f) => readFile(f, "utf8")): Promise<string[]> {
-	try {
-		return parseOptOut(await read(file));
-	} catch (error) {
-		if ((error as { code?: string }).code === "ENOENT") return [];
-		throw error;
-	}
+export function readOptOut(file: string, read: (file: string) => Promise<string> = (f) => readFile(f, "utf8")): Promise<string[]> {
+	return readOptOutWith(file, read);
 }
 
 const JUDGES: readonly string[] = ["clef", "typesafe", "openrouter", "configured-llm"];
