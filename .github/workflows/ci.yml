@@ -123,10 +123,8 @@ jobs:
       # Check the fresh trace before any static copying/curation.
       - run: node scripts/smoke-provider-runtime.mjs
       - run: node scripts/build-server.mjs
-      # DoltLite open/write/commit/reopen in the packaged payload. Required on
-      # mac-arm64 only; win/linux are advisory until D5. Step-level, not job-level:
-      # the required checks must still fail on the build steps.
+      # DoltLite open/write/commit/reopen in the packaged payload. Required on all
+      # three platforms (D5).
       - name: Smoke DoltLite in the standalone payload
-        continue-on-error: ${{ matrix.platform != 'mac-arm64' }}
         run: pnpm exec tsx scripts/smoke-doltlite.ts
       - run: node scripts/smoke-server.mjs --electron
