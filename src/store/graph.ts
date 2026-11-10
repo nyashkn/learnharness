@@ -350,9 +350,9 @@ function build(c: Ctx): GraphStore & { corruptLines(): number } {
 		upsertSource(source: NotesSource): void {
 			transact(c, "auto:upsertSource", () => {
 				const all = readSourceMap(c);
-				const prev = all[source.id];
-				all[source.id] = prev ? { ...source, extractions: prev.extractions } : source;
-				writeSourceMap(c, all);
+				const prev = Object.hasOwn(all, source.id) ? all[source.id] : undefined; // all["__proto__"] would be Object.prototype
+				// computed key in a spread: defines an own property, unlike `all[id] = …`, which would set __proto__
+				writeSourceMap(c, { ...all, [source.id]: prev ? { ...source, extractions: prev.extractions } : source });
 			});
 		},
 		readSources(): NotesSource[] {
@@ -373,7 +373,7 @@ function build(c: Ctx): GraphStore & { corruptLines(): number } {
 		appendSourceUsage(id: string, entry: ExtractionRunUsage): void {
 			transact(c, "auto:appendSourceUsage", () => {
 				const all = readSourceMap(c);
-				const source = all[id];
+				const source = Object.hasOwn(all, id) ? all[id] : undefined; // all["__proto__"] would be Object.prototype, and this writes into it
 				if (!source) return; // no such source — nothing to bill against
 				source.extractions = source.extractions?.some((r) => r.startedAt === entry.startedAt)
 					? source.extractions
@@ -454,11 +454,11 @@ function readPositionMap(c: Ctx): Record<string, Position> {
 	try {
 		const parsed: unknown = JSON.parse(raw);
 		if (!isRecord(parsed) || !isRecord(parsed.positions)) return {};
-		const out: Record<string, Position> = {};
+		const entries: [string, Position][] = [];
 		for (const [id, value] of Object.entries(parsed.positions)) {
-			if (isPosition(value)) out[id] = { x: value.x, y: value.y };
+			if (isPosition(value)) entries.push([id, { x: value.x, y: value.y }]);
 		}
-		return out;
+		return Object.fromEntries(entries); // own keys, so an id of "__proto__" survives (a plain assignment would set the prototype)
 	} catch {
 		return {};
 	}
@@ -492,11 +492,11 @@ function readSourceMap(c: Ctx): Record<string, NotesSource> {
 	try {
 		const parsed: unknown = JSON.parse(raw);
 		if (!isRecord(parsed)) return {};
-		const out: Record<string, NotesSource> = {};
+		const entries: [string, NotesSource][] = [];
 		for (const [id, value] of Object.entries(parsed)) {
-			if (isNotesSource(value)) out[id] = value;
+			if (isNotesSource(value)) entries.push([id, value]);
 		}
-		return out;
+		return Object.fromEntries(entries); // own keys: see readPositionMap
 	} catch {
 		return {};
 	}
