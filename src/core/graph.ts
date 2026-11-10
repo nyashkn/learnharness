@@ -271,7 +271,7 @@ function mergeFindingsInTransaction(
 	//     the serialized audit section, so the rewrite is race-free). One
 	//     rule: a chain goes when its conclusion is derivable from its
 	//     premises through the other kept chains, worst-first (most
-	//     premises, latest) — so "prefer-fewest-premises" and
+	//     premises, latest; ties by ledger position, since ids are minted randomly) — so "prefer-fewest-premises" and
 	//     "ancestry-cover" are just special cases.
 	//     Dropped keys take every provenance line with them (the rewrite is
 	//     atomic); stats count APPENDS only — simplification is maintenance.
@@ -299,8 +299,9 @@ function mergeFindingsInTransaction(
 /** The deterministic chain-simplification pass (owner, 2026-09-30
  *  evening): drops a chain whose conclusion is still derivable from its
  *  premises through the OTHER kept chains. Worst-first (most premises,
- *  latest) so the leanest, earliest derivation stands; "strict superset"
- *  and "[A,B]=>X plus [X,C]=>Y makes [A,B,C]=>Y redundant" are special
+ *  latest; ties by ledger position, since ids are minted randomly) so the
+ *  leanest, earliest derivation stands; "strict superset" and
+ *  "[A,B]=>X plus [X,C]=>Y makes [A,B,C]=>Y redundant" are special
  *  cases. Removal never changes any closure, so the result is sound and
  *  idempotent. Pure over the input list; the caller owns the ledger
  *  rewrite. Exported for tests.
@@ -311,15 +312,16 @@ function mergeFindingsInTransaction(
 export function simplifyChains(lines: GraphChain[]): GraphChain[] {
 	if (lines.length < 2) return lines;
 
-	const heads = new Map<string, GraphChain>(); // key -> representative (first line)
-	for (const line of lines) {
+	const heads = new Map<string, { line: GraphChain; at: number }>(); // key -> representative (first line) + its ledger index
+	lines.forEach((line, at) => {
 		const key = chainKey(line.premises, line.conclusion);
-		if (!heads.has(key)) heads.set(key, line);
-	}
-	// Worst-first: premise count desc, createdAt desc, key desc.
-	// shortcut: key tie-break stays until lh-okr replaces it.
-	const chains = [...heads].map(([key, h]) => ({
+		if (!heads.has(key)) heads.set(key, { line, at });
+	});
+	// Worst-first: premise count desc, createdAt desc, first ledger index desc
+	// (ids are minted randomly, ledger order is not — the earliest line stands).
+	const chains = [...heads].map(([key, { line: h, at }]) => ({
 		key,
+		at,
 		premises: [...new Set(h.premises)],
 		conclusion: h.conclusion,
 		createdAt: h.createdAt,
@@ -329,7 +331,7 @@ export function simplifyChains(lines: GraphChain[]): GraphChain[] {
 		(a, b) =>
 			b.premises.length - a.premises.length ||
 			b.createdAt.localeCompare(a.createdAt) ||
-			b.key.localeCompare(a.key),
+			b.at - a.at,
 	);
 	const byPremise = new Map<string, number[]>();
 	const surviving = new Map<string, number>(); // conclusion -> live chain count

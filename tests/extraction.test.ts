@@ -2403,6 +2403,21 @@ describe("chain simplification (the merger's maintenance pass, owner 2026-09-30 
 		provenance: [{ chatId: "src_1", messageId: "" }],
 	});
 
+	it("lh-okr: the same chains under two id namings keep the same chains (ledger order, not minted ids, breaks ties)", () => {
+		// arg_3 and arg_4 are each derivable from the other (through arg_1/arg_2): a cycle with equal premise counts and createdAt.
+		const T = "2026-09-30T01:00:00.000Z";
+		const ledger = (a: string, b: string, c: string, d: string) => [
+			chain("arg_1", [a, b], c, T),
+			chain("arg_2", [a, c], b, T),
+			chain("arg_3", [a, b], d, T),
+			chain("arg_4", [a, c], d, T),
+		];
+		// The earliest line stands: arg_3 is kept under both namings.
+		const expected = ["arg_1", "arg_2", "arg_3"];
+		assert.deepEqual(simplifyChains(ledger("n_1", "n_2", "n_3", "n_4")).map((c) => c.id), expected);
+		assert.deepEqual(simplifyChains(ledger("n_4", "n_3", "n_2", "n_1")).map((c) => c.id), expected);
+	});
+
 	it("the owner example: [A,B]⇒X + [X,C]⇒Y make [A,B,C]⇒Y redundant (ancestry-cover)", () => {
 		const kept = simplifyChains([
 			chain("arg_3", ["n_a", "n_b", "n_c"], "n_y", "2026-09-30T03:00:00.000Z"),
