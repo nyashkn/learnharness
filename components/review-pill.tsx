@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { RotateCcwIcon } from "lucide-react";
 import { useServerEvent, useServerResync } from "@/components/server-events";
+import { useSettingsSaved } from "@/components/settings-signal";
 
 /** One pick of the review queue, the graph-context marker's shape. */
 export type ReviewPick = { id: string; name: string; statement: string };
@@ -16,7 +17,7 @@ function isReviewQueueView(v: unknown): v is ReviewQueueView {
 }
 
 /** The scheduled-practice queue (GET /api/review), refetched when a turn settles (a practice conclude may have
- *  logged reviews), when the chat list changes (deletions) and on every channel resync. Null until the first read
+ *  logged reviews), when the chat list changes (deletions), when the review setting saves and on every channel resync. Null until the first read
  *  lands, or when it fails: the pill then simply stays away. */
 export function useReviewQueue(): ReviewQueueView | null {
 	const [queue, setQueue] = useState<ReviewQueueView | null>(null);
@@ -30,6 +31,9 @@ export function useReviewQueue(): ReviewQueueView | null {
 	useServerEvent("turn-settled", refresh);
 	useServerEvent("chats-changed", refresh);
 	useServerResync(refresh);
+	useSettingsSaved((section) => {
+		if (section === "review") refresh();
+	});
 	return queue;
 }
 

@@ -19,7 +19,8 @@ import {
 	type LhMessage,
 } from "../src/core/native-messages.ts";
 import { CONCLUDE_ACK_TEXT } from "../src/core/contracts/chat.ts";
-import { concludeInputObject, concludeTool, createPracticeGate, problemTool, practiceTools } from "../src/agent/tools/practice.ts";
+import { Value } from "typebox/value";
+import { concludeInputObject, concludeTool, createPracticeGate, problemInputObject, problemTool, practiceTools } from "../src/agent/tools/practice.ts";
 import { composeInstructions, createPracticeAgent } from "../src/agent/teacher-agent.ts";
 import { allSegmentPaths } from "../src/agent/prompt-segments.ts";
 
@@ -76,6 +77,7 @@ const ctxOf = (messages: LhMessage[]) => ({ chatId: "c1", chatStore: recordStore
 const PROBLEM_INPUT = {
 	statement: "Prove the sum is even.",
 	mode: "recall",
+	surface: "sum of paired integers, prove parity",
 	target: ["parity-sum"],
 	modelSolution: "Pair them; each pair is even.",
 } as const;
@@ -190,6 +192,31 @@ describe("target validation — names normalize to ids, unknowns reject", () => 
 	it("NO node source (the legacy/test wiring) = no validation, free strings ack", async () => {
 		const result = await problemTool(createPracticeGate(ctxOf([]))).execute("call_x", PROBLEM_INPUT as never);
 		assert.equal(result.isError, undefined);
+	});
+
+	it("surface is REQUIRED on the problem schema (later sessions pose fresh surfaces off it)", () => {
+		assert.equal(Value.Check(problemInputObject, PROBLEM_INPUT), true);
+		const { surface: _omit, ...without } = PROBLEM_INPUT;
+		assert.equal(Value.Check(problemInputObject, without), false);
+	});
+
+	it("ONE-TARGET RECALL (owner, 2026-11-03): recall with two targets rejects and frees the slot; other modes may tag several", async () => {
+		const tool = problemTool(createPracticeGate(ctxOf([])), graphNodes);
+		const rejected = await tool.execute("call_r", { ...PROBLEM_INPUT, target: ["n_parity", "n_pairing"] } as never);
+		assert.equal(rejected.isError, true);
+		assert.deepEqual((rejected.details as { problems: string[] }).problems, [
+			"a recall problem exercises exactly one target — tag one proposition, or pose discrimination or composition for several",
+		]);
+		const single = await tool.execute("call_s", { ...PROBLEM_INPUT, target: ["n_parity"] } as never);
+		assert.equal(single.isError, undefined, "the rejection did not arm the gate");
+		for (const mode of ["discrimination", "composition"]) {
+			const pose = await problemTool(createPracticeGate(ctxOf([])), graphNodes).execute("call_m", {
+				...PROBLEM_INPUT,
+				mode,
+				target: ["n_parity", "n_pairing"],
+			} as never);
+			assert.equal(pose.isError, undefined, `${mode} may tag several targets`);
+		}
 	});
 });
 

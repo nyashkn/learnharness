@@ -8,6 +8,7 @@
  */
 
 import assert from "node:assert/strict";
+import fc from "fast-check";
 import { describe, it } from "node:test";
 
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
@@ -21,6 +22,7 @@ import {
 	needsContinuation,
 	newUserMessage,
 	pendingProblemDismissalOf,
+	practiceTallyOf,
 	toLlmMessages,
 	PRACTICE_CONCLUDE_TOOL,
 	PRACTICE_PROBLEM_TOOL,
@@ -424,5 +426,69 @@ describe("projectView renders the move-on signal", () => {
 			parts.some((p) => p.type === "data-practice-next"),
 			"the data-practice-next part rides the view",
 		);
+	});
+});
+
+// ── the problem counter ──────────────────────────────────────────────────────
+
+describe("practiceTallyOf (the problem counter)", () => {
+	const concluded = (callId: string, outcome: string, isError = false): LhMessage[] => {
+		const [call, ack] = concludeCall(outcome) as [LhMessage & AssistantMessage, LhMessage & ToolResultMessage];
+		return [
+			{ ...call, id: `msg_${callId}`, content: [{ type: "toolCall", id: callId, name: PRACTICE_CONCLUDE_TOOL, arguments: { outcome } }] },
+			{ ...ack, id: `msg_r_${callId}`, toolCallId: callId, isError },
+		];
+	};
+
+	it("a fresh session counts nothing", () => {
+		assert.deepEqual(practiceTallyOf([]), { solved: 0, hinted: 0, unsolved: 0 });
+	});
+
+	it("buckets clean concludes by outcome: solved, with hints, everything else", () => {
+		const messages: LhMessage[] = [
+			...problemPose("call_p1"),
+			...concluded("call_c1", "solved"),
+			...problemPose("call_p2"),
+			...concluded("call_c2", "solvedWithHints"),
+			...problemPose("call_p3"),
+			...concluded("call_c3", "movedOn"),
+			...problemPose("call_p4"),
+			...concluded("call_c4", "surrendered"),
+			...problemPose("call_p5"),
+			...concluded("call_c5", "solved"),
+		];
+		assert.deepEqual(practiceTallyOf(messages), { solved: 2, hinted: 1, unsolved: 2 });
+	});
+
+	it("an errored conclude never counts", () => {
+		const messages = [...problemPose("call_p1"), ...concluded("call_c1", "solved", true)];
+		assert.deepEqual(practiceTallyOf(messages), { solved: 0, hinted: 0, unsolved: 0 });
+	});
+
+	it("a dismissal counts from its marker, and once after the synthesized conclude lands", () => {
+		const dismissedOnly: LhMessage[] = [...problemPose("call_p1"), newProblemDismissedMarker("call_p1")];
+		assert.deepEqual(practiceTallyOf(dismissedOnly), { solved: 0, hinted: 0, unsolved: 1 });
+		const withPair: LhMessage[] = [...dismissedOnly, ...concludedByDismissalPair("call_p1")];
+		assert.deepEqual(practiceTallyOf(withPair), { solved: 0, hinted: 0, unsolved: 1 });
+	});
+
+	it("buckets match an independent count over any mix of outcomes, errors and dismissals (property)", () => {
+		const kind = fc.constantFrom("solved", "solvedWithHints", "movedOn", "surrendered", "errored", "dismissed", "dismissedPaired", "open");
+		fc.assert(fc.property(fc.array(kind, { maxLength: 10 }), (kinds) => {
+			const messages: LhMessage[] = [];
+			kinds.forEach((k, i) => {
+				messages.push(...problemPose(`call_p${i}`));
+				if (k === "errored") messages.push(...concluded(`call_c${i}`, "solved", true));
+				else if (k === "dismissed" || k === "dismissedPaired") messages.push(newProblemDismissedMarker(`call_p${i}`));
+				else if (k !== "open") messages.push(...concluded(`call_c${i}`, k));
+				if (k === "dismissedPaired") messages.push(...concludedByDismissalPair(`call_p${i}`));
+			});
+			const n = (...ks: string[]) => kinds.filter((k) => ks.includes(k)).length;
+			assert.deepEqual(practiceTallyOf(messages), {
+				solved: n("solved"),
+				hinted: n("solvedWithHints"),
+				unsolved: n("movedOn", "surrendered", "dismissed", "dismissedPaired"),
+			});
+		}));
 	});
 });

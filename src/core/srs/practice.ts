@@ -3,7 +3,7 @@
  *  conclude the transcript lost). Calls count only through clean results; a conclude attaches to the
  *  newest cleanly-posed problem before it; a dismissal marker concludes its problem as "dismissed" and the
  *  synthesized conclude that follows is the same problem (identity dedupes it). Untagged problems are no review.
- *  Lines carry no `confidence` (R1's demotion stays inert) and no `surface` (doctrine, bead R3b). */
+ *  Lines carry no `confidence` (R1's demotion stays inert); `surface` is the problem's trimmed one-liner, absent on old transcripts. */
 
 import type { ReviewLine, ReviewMissClass, ReviewMode, ReviewOutcome, ReviewRung } from "../contracts/review.ts";
 import { PRACTICE_CONCLUDE_TOOL, PRACTICE_PROBLEM_TOOL, type LhMarkerMessage, type LhMessage } from "../native-messages.ts";
@@ -42,6 +42,8 @@ export function practiceReviewsOf(chatId: string, messages: readonly LhMessage[]
 		if (targets.length === 0) return;
 		seen.add(problemCallId);
 		const mode = (args as { mode?: unknown } | undefined)?.mode;
+		const rawSurface = (args as { surface?: unknown } | undefined)?.surface;
+		const surface = typeof rawSurface === "string" ? rawSurface.trim() : "";
 		reviews.push({
 			id: `${chatId}:${problemCallId}`,
 			chatId,
@@ -51,6 +53,7 @@ export function practiceReviewsOf(chatId: string, messages: readonly LhMessage[]
 			outcome: outcome as ReviewOutcome,
 			rung: outcome === "dismissed" ? null : rungOf(rung),
 			...(MODES.includes(mode as ReviewMode) ? { mode: mode as ReviewMode } : {}),
+			...(surface ? { surface } : {}),
 			...(outcome === "dismissed" ? {} : missClassOf(missClass)),
 		});
 	};

@@ -41,6 +41,7 @@ const { jobStore } = await import("../src/store/jobs.ts");
 const { settingsStore } = await import("../src/store/settings.ts");
 const { readRenderSettings } = await import("../src/store/render-settings.ts");
 const { getGraph, deriveView } = await import("../src/core/graph.ts");
+const { reviewScheduleView, reviewSummary } = await import("../src/server/review.ts");
 const { sanitizeRenderSettings } = await import("../src/core/render-settings.ts");
 const { toLlmMessages } = await import("../src/core/native-messages.ts");
 const { phaseAt3Lh } = await import("../src/core/phases.ts");
@@ -181,6 +182,25 @@ test("graph: the review ledger matches the practice chat's conclude records", ()
 	assert.equal(reviews.length, concluded.length, "one review per concluded problem");
 	assert.deepEqual(reviews.map((r) => r.outcome), concluded);
 	assert.ok(reviews.every((r) => r.chatId === chatId && r.targets.length > 0));
+});
+
+test("review: the queue and the schedule heatmap build from the real log", () => {
+	const practiced = ["n_9b19474daaf7", "n_ed4b233efa54"]; // the record's two targets: solved, then dismissed
+	const now = new Date("2026-10-20T12:00:00Z"); // ten days after both reviews
+	const summary = reviewSummary(now, graphStore);
+	assert.equal(summary.dueCount, 2, "both practiced propositions are due");
+	assert.deepEqual(summary.picks.slice(0, 2).map((p) => p.id).sort(), practiced, "due picks come first");
+
+	const view = reviewScheduleView(now, graphStore);
+	assert.equal(view.past.reduce((n, day) => n + day.reviews, 0), 2, "both reviews land on past days");
+	assert.deepEqual(view.future.flatMap((day) => day.due.map((card) => card.id)).sort(), practiced, "overdue cards sit on today");
+	assert.deepEqual(view.future.map((day) => day.date), [view.today]);
+
+	const backlog = view.newBacklog.flatMap((topic) => topic.problems);
+	assert.ok(backlog.length > 0, "the fixture graph has never-practiced propositions");
+	assert.equal(new Set(backlog.map((p) => p.id)).size, backlog.length, "each new problem appears once");
+	assert.ok(!backlog.some((p) => practiced.includes(p.id)), "practiced propositions are not new");
+	assert.deepEqual(backlog.filter((p) => p.today).map((p) => p.id).sort(), view.newToday.map((p) => p.id).sort(), "today badges match today's allowance");
 });
 
 test("graph: getGraph + deriveView build the snapshot end-to-end", () => {

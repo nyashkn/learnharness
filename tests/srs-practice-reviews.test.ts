@@ -74,4 +74,21 @@ describe("practiceReviewsOf", () => {
 		assert.equal("mode" in l!, false);
 		assert.equal("missClass" in l!, false);
 	});
+
+	it("P9 records the brief's facts: mode and trimmed surface from the pose, miss class from the conclude", () => {
+		const [l] = practiceReviewsOf("c", [
+			...pose("p1", ["n_a"], 1_000, { mode: "composition", surface: "  ladder against a wall, find the angle  " }),
+			...conclude("c1", "surrendered", "R4", 5_000, false, "discrimination"),
+		]);
+		assert.equal(l!.mode, "composition");
+		assert.equal(l!.surface, "ladder against a wall, find the angle");
+		assert.equal(l!.missClass, "discrimination");
+	});
+
+	it("P10 a blank or non-string surface stays absent — never guessed", () => {
+		for (const surface of ["   ", 7, null]) {
+			const [l] = practiceReviewsOf("c", [...pose("p1", ["n_a"], 1_000, { surface: surface as never }), ...conclude("c1", "solved", null)]);
+			assert.equal("surface" in l!, false);
+		}
+	});
 });

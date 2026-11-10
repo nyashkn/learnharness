@@ -46,7 +46,7 @@ export function reviewDayStart(now: Date, dayStartHour = REVIEW_DAY_START_HOUR):
 
 /** The first `limit` never-practiced propositions in introduction order: premises before the conclusions
  *  they feed (chain edges among the new set), ties and cycles broken by creation date, then id. */
-function introductionOrder(
+export function introductionOrder(
 	fresh: readonly Pick<GraphNode, "id" | "createdAt">[],
 	chains: readonly Pick<GraphChain, "premises" | "conclusion">[],
 	limit: number,
@@ -82,15 +82,10 @@ function introductionOrder(
 	return order;
 }
 
-export function reviewQueue(input: ReviewQueueInput): ReviewQueue {
-	const dayStartHour = input.dayStartHour ?? REVIEW_DAY_START_HOUR;
-	const sessionSize = input.sessionSize ?? REVIEW_SESSION_SIZE;
-	const newPerDay = input.newPerDay ?? FACTORY_NEW_PER_DAY;
-	const live = new Set(input.nodes.map((n) => n.id));
-
-	// Each live target's lines, in LEDGER order (never sorted by time). An unparseable time is skipped.
+/** Each live target's lines, in LEDGER order (never sorted by time). An unparseable time is skipped. */
+export function historiesOf(reviews: readonly ReviewLine[], live: ReadonlySet<string>): Map<string, ReviewLine[]> {
 	const history = new Map<string, ReviewLine[]>();
-	for (const line of input.reviews) {
+	for (const line of reviews) {
 		if (Number.isNaN(new Date(line.at).getTime())) continue;
 		for (const target of new Set(line.targets)) {
 			if (!live.has(target)) continue;
@@ -99,6 +94,16 @@ export function reviewQueue(input: ReviewQueueInput): ReviewQueue {
 			else history.set(target, [line]);
 		}
 	}
+	return history;
+}
+
+export function reviewQueue(input: ReviewQueueInput): ReviewQueue {
+	const dayStartHour = input.dayStartHour ?? REVIEW_DAY_START_HOUR;
+	const sessionSize = input.sessionSize ?? REVIEW_SESSION_SIZE;
+	const newPerDay = input.newPerDay ?? FACTORY_NEW_PER_DAY;
+	const live = new Set(input.nodes.map((n) => n.id));
+
+	const history = historiesOf(input.reviews, live);
 
 	const dayStart = reviewDayStart(input.now, dayStartHour).getTime();
 	const now = input.now.getTime();
