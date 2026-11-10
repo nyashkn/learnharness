@@ -14,6 +14,7 @@ import { openNodeSqlite } from "../../src/store/sql/drivers/node-sqlite";
 import { MigrationRefusedError, migrate } from "../../src/store/sql/migrate";
 import { seedMigration } from "../../src/store/sql/migrations/seeds/index";
 import { composeAllowEgress, LlmUnavailableError, loadSeedConfig, main, parseOptOut, readOptOut, realLlm } from "../../scripts/seed";
+import { blocksNothing, createAllowEgress } from "../../src/seed/egress";
 import { redact } from "../../src/seed/redact";
 
 const NOW = "2026-11-08T00:00:00.000Z";
@@ -209,6 +210,28 @@ describe("opt-out entries meet redacted projects (lh-an0)", () => {
 		assert.equal(composeAllowEgress(["/Users/alice"])("~/work/app"), true);
 		assert.equal(composeAllowEgress(["/Users/alice"])(null), true);
 	});
+	it("blocksNothing agrees with the allow function it feeds (lh-aei)", () => {
+		const word = fc.constantFrom("acme", "client_x", "Pivot", "dockblocks", "a b", "x.y");
+		const home = fc.constantFrom("/Users/alice", "C:\\Users\\bob", "/home/carol", "~", "/");
+		const sep = fc.constantFrom("/", "-", "_", " ", ".", "\\");
+		const entropy = fc.stringMatching(/^[A-Za-z0-9_-]{24,48}$/);
+		const entry = fc.array(fc.oneof(word, home, sep, entropy), { minLength: 1, maxLength: 4 }).map((a) => a.join(""));
+		fc.assert(
+			fc.property(entry, (e) => {
+				const allow = createAllowEgress([e]);
+				if (blocksNothing(e)) return [`~/work/${e}`, `~-work-${e.replace(/[^A-Za-z0-9]+/g, "-")}`, e].every((p) => allow(p));
+				return allow(e) === false;
+			}),
+			{ numRuns: 500 },
+		);
+	});
+	it("an all-ignored list: home-path entries leave no-project rows allowed, swallowed entries still refuse them (lh-aei; lh-6tw decides)", () => {
+		const swallowed = ["Qz7-x9K", "mP2v-R8tL", "w4Yb-N6s", "Jd3h-u5Fq", "cE1"].join("");
+		assert.ok(blocksNothing("/Users/alice") && blocksNothing(swallowed), "precondition: both entries block nothing, so the CLI counts 0");
+		assert.equal(composeAllowEgress(["/Users/alice"])(null), true);
+		assert.equal(composeAllowEgress([swallowed])(null), false);
+		assert.equal(composeAllowEgress([swallowed])("~/work/app"), true);
+	});
 });
 
 describe("a project that redaction swallowed counts as no provenance (lh-3p3)", () => {
@@ -231,6 +254,16 @@ describe("a project that redaction swallowed counts as no provenance (lh-3p3)", 
 		assert.equal(composeAllowEgress(["acme"])("~-[redacted:secret]"), false);
 		assert.equal(composeAllowEgress(["acme"])("~/work/[redacted:email]/app"), false);
 		assert.equal(composeAllowEgress([])("~-[redacted:secret]"), true);
+	});
+	it("direct calls: a raw slug redaction swallows, and a stored slug a second redaction swallows, are refused once a list exists (lh-09r)", () => {
+		assert.ok(redact(SLUG).includes("[redacted:"), "precondition: the raw slug is swallowed");
+		assert.equal(composeAllowEgress(["unrelated"])(SLUG), false);
+		assert.equal(composeAllowEgress([])(SLUG), true);
+		// the store keeps redact(raw): clean here, and swallowed by the second redaction egress runs on it
+		const stored = redact("-Users-alice-EK-Mobile-Shared-Documents-Initech-api-2025-dev");
+		assert.ok(!stored.includes("[redacted:") && redact(stored).includes("[redacted:"), "precondition: clean, then swallowed");
+		assert.equal(composeAllowEgress(["unrelated"])(stored), false);
+		assert.equal(composeAllowEgress([])(stored), true);
 	});
 });
 
@@ -475,6 +508,27 @@ describe("model text is redacted and clipped before it reaches the judge (lh-8o7
 		}
 		const all = r.wire.join("\n");
 		assert.equal(all.includes("ZZZZ1111YYYY2222XXXX3333"), false);
+		assert.equal(all.includes("/Users/bob"), false);
+	});
+});
+
+describe("align and prereq judge steps never carry raw model title or why (lh-w21)", () => {
+	const leaves = (v: unknown): string[] => (typeof v === "string" ? [v] : v && typeof v === "object" ? Object.values(v).flatMap(leaves) : []);
+	it("a planted token and home path in the draft title and why reach no judge body, and the align and prereq steps ran", async () => {
+		const body = "QQQQ9999RRRR8888SSSS7777";
+		const token = `sk-ant-api03-${body}`; // built at runtime, not a literal token
+		const r = rig({ items: [...ALPHA, ...BETA] });
+		const real = r.deps.llm;
+		// every draft carries planted text: the first scan makes two new proposals (goal, decision, prereq), the second aligns against them
+		r.deps.llm = { complete: async (prompt, schema) => { const d = (await real.complete(prompt, schema)) as { title?: string; why?: string }; return "title" in d ? ({ ...d, title: `${d.title} ${token} /Users/bob/x`, why: `see /Users/bob/notes ${token}` } as never) : (d as never); } };
+		assert.equal(await r.run("scan", "--goals", "learn rust"), 0);
+		assert.equal(await r.run("scan", "--goals", "learn rust"), 0);
+		// each step must have carried the planted title, redacted, so a skipped or clean-titled step cannot pass this test
+		for (const id of ["same", "goal", "decision", "ab"]) assert.ok(r.wire.some((w) => w.includes(`"${id}"`) && w.includes("[redacted:secret] ~/x")), `the ${id} step carried the redacted title`);
+		for (const id of ["goal", "decision"]) assert.ok(r.wire.some((w) => w.includes(`"${id}"`) && w.includes("see ~/notes [redacted:secret]")), `the ${id} step carried the redacted why`);
+		for (const leaf of r.wire.flatMap((w) => leaves(JSON.parse(w) as unknown))) assert.equal(redact(leaf), leaf);
+		const all = r.wire.join("\n");
+		assert.equal(all.includes(body), false);
 		assert.equal(all.includes("/Users/bob"), false);
 	});
 });
@@ -745,6 +799,13 @@ describe("scripts/seed main", () => {
 		assert.deepEqual(parseOptOut("# client\n\nPivot\n  dockblocks  \n"), ["Pivot", "dockblocks"]);
 		await assert.rejects(readOptOut("/x", async () => Promise.reject(Object.assign(new Error("n"), { code: "EACCES" }))));
 	});
+	it("opt-out file: whitespace then # starts an inline comment, a # inside an entry stays (lh-09r)", () => {
+		assert.deepEqual(parseOptOut("acme  # client\nc#-tools\nfoo\t#bar\n  # note\n#x\n"), ["acme", "c#-tools", "foo"]);
+		const entry = fc.stringMatching(/^[a-z0-9_.-][a-z0-9#_.-]{0,10}$/);
+		fc.assert(fc.property(entry, fc.constantFrom(" ", "  ", "\t"), fc.string().filter((s) => !s.includes("\n")), (e, sep, note) => {
+			assert.deepEqual(parseOptOut(`${e}${sep}# ${note}`), [e]);
+		}));
+	});
 	describe("opt-out line (lh-h9y)", () => {
 		const NOTE = "opt-out:";
 		// real file reads in a temp dir; the store is in memory; the first outbound call snapshots what was printed so far
@@ -801,6 +862,15 @@ describe("scripts/seed main", () => {
 				assert.deepEqual(optLines(r.atFirstCall[0]!), [`opt-out: 0 entries from ${join(r.dir, "seed-optout.txt")}`]);
 			});
 		}
+		it("counts only entries that block something and names each ignored one, redacted (lh-aei)", async () => {
+			const swallowed = ["aB3xK9", "mQ7zT2pL", "vR8nW4yC", "5hJ6dF1s", "Gq0eU"].join("");
+			assert.ok(redact(swallowed).includes("[redacted:"), "the slug really is swallowed");
+			const r = await ordering("scan", `acme\n/Users/alice\nC:\\Users\\bob\n${swallowed}\n`);
+			const file = join(r.dir, "seed-optout.txt");
+			const ignoring = (e: string) => `opt-out: ignoring entry ${JSON.stringify(redact(e))}: after redaction it names no project, so it blocks nothing`;
+			assert.deepEqual(optLines(r.lines), [`opt-out: 1 entries from ${file}`, ignoring("/Users/alice"), ignoring("C:\\Users\\bob"), ignoring(swallowed)]);
+			assert.ok(!r.lines.join("\n").includes(swallowed), "the raw slug is never printed");
+		});
 		it("scan with the configured-llm judge prints it before the model is built", async () => {
 			const r = await ordering("scan", "x\n", ["--judge", "configured-llm"]);
 			assert.ok(r.atFirstCall.length >= 1, "the model was built");

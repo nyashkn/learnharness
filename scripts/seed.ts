@@ -13,10 +13,11 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { PATHS } from "../config.ts";
 import { HELP, parseCommand, runCli, type SeedPolicy } from "../src/seed/cli.ts";
-import { composeAllowEgress, parseOptOut, readOptOut as readOptOutWith } from "../src/seed/egress.ts";
+import { blocksNothing, composeAllowEgress, parseOptOut, readOptOut as readOptOutWith } from "../src/seed/egress.ts";
 import { createConfiguredLlmJudge } from "../src/seed/judge/configured-llm.ts";
 import { createJevApiJudge, PROFILES, type ProfileName } from "../src/seed/judge/jev-api.ts";
 import type { JudgePort } from "../src/seed/judge/port.ts";
+import { redact } from "../src/seed/redact.ts";
 import { claudeHistorySource } from "../src/seed/sources/claude-history.ts";
 import { ompHistorySource, ompMemorySource, ompRecapSource } from "../src/seed/sources/omp.ts";
 import { signetSummarySource } from "../src/seed/sources/signet.ts";
@@ -134,7 +135,13 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 	if (parsed.kind === "scan" || parsed.kind === "propose") {
 		// data/ is per-worktree, so a list kept elsewhere reads as "allow all": say which file was used before anything leaves.
 		const file = path.resolve(f.dataDir, "seed-optout.txt");
-		f.out(optOut.length === 0 && !existsSync(file) ? `opt-out: 0 entries, file not found at ${file}` : `opt-out: ${optOut.length} entries from ${file}`);
+		if (optOut.length === 0 && !existsSync(file)) f.out(`opt-out: 0 entries, file not found at ${file}`);
+		else {
+			const ignored = optOut.filter(blocksNothing);
+			f.out(`opt-out: ${optOut.length - ignored.length} entries from ${file}`);
+			// the redacted form only: seed output can land in agent transcripts
+			for (const e of ignored) f.out(`opt-out: ignoring entry ${JSON.stringify(redact(e))}: after redaction it names no project, so it blocks nothing`);
+		}
 	}
 	if (parsed.kind === "scan") {
 		f.out(policy.extractor ? `extractor: ${policy.extractor.provider}/${policy.extractor.id} from seed-config.json` : "extractor: the app's extractor role from settings");

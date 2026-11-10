@@ -26,9 +26,14 @@ export function matchableProject(project: string | null): string | null {
 	return canon === "" ? null : canon;
 }
 
+/** True when an opt-out entry can never match a project: nothing is left after flattening, or redaction swallowed it (see matchableProject). */
+export function blocksNothing(entry: string): boolean {
+	return canonProject(entry) === "" || redact(entry).includes("[redacted:");
+}
+
 /** Substring on purpose: a project has many worktree and path variants, so over-blocking is the safe side. No provenance counts as null. */
 export function createAllowEgress(optOut: readonly string[]): AllowEgress {
-	const blocked = optOut.map(canonProject).filter((entry) => entry !== "");
+	const blocked = optOut.filter((entry) => !blocksNothing(entry)).map(canonProject);
 	return (project) => {
 		const canon = matchableProject(project);
 		return canon === null || !blocked.some((entry) => canon.includes(entry));
@@ -48,7 +53,8 @@ export function composeAllowEgress(optOut: readonly string[]): AllowEgress {
 export function parseOptOut(text: string): string[] {
 	return text
 		.split("\n")
-		.map((line) => line.trim())
+		// whitespace then "#" starts a comment; a "#" inside an entry (c#-tools) stays
+		.map((line) => line.replace(/\s#.*/s, "").trim())
 		.filter((line) => line !== "" && !line.startsWith("#"));
 }
 
