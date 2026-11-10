@@ -855,13 +855,13 @@ export function registerContract(f: AdapterFactory): void {
 			const off = b.events.subscribe((e) => { if (e.type === "chats-changed") seen.push(b.chats.listChats().length); });
 			try { b.chats.createChat("a"); } finally { off(); }
 			assert.deepEqual(seen, [1]);
-		});
+		}, { runs: 1 }); // constant input: one run is enough (lh-1oo)
 		T("N18", "events after the write (item 10): jobs-changed fires once, and a listener already sees the new job", (b) => {
 			const seen: number[] = [];
 			const off = b.events.subscribe((e) => { if (e.type === "jobs-changed") seen.push(b.jobs.listJobs("c1").length); });
 			try { b.jobs.createJob({ kind: "probe", chatId: "c1", toolCallId: "t1" } as never); } finally { off(); }
 			assert.deepEqual(seen, [1]);
-		});
+		}, { runs: 1 }); // constant input: one run is enough (lh-1oo)
 
 		T("N11", "positions and render settings stay OUTSIDE the transaction (item 13): they survive a rollback", (b) => {
 			const raw = b.render.read();
@@ -871,7 +871,7 @@ export function registerContract(f: AdapterFactory): void {
 			eq(b.graph.readPositions(), { n1: { x: 1, y: 2 } });
 			eq(b.render.read(), written);
 			eq(b.graph.readNodes(), []);
-		});
+		}, { runs: 1 }); // constant input: one run is enough (lh-1oo)
 
 		P("N12", "bare writes (item 16): upsertSource, appendSourceUsage, deleteSources and the organization write are each atomic and idempotent where documented", fc.array(fc.constantFrom("a", "b", "c"), { minLength: 1, maxLength: 5 }), (b, ids) => {
 			const ev = events(b);
@@ -894,7 +894,7 @@ export function registerContract(f: AdapterFactory): void {
 			const before = everything(b);
 			assert.throws(() => b.graph.transact("async", (() => { b.graph.appendNode(nodeAt(0)); return Promise.resolve(1); }) as never), TypeError);
 			assert.equal(everything(b), before);
-		});
+		}, { runs: 1 }); // constant input: one run is enough (lh-1oo)
 
 
 		P("N15", "round trip with defined normalisation (item 12): CRLF becomes LF, blank lines and a torn tail are dropped; unknown fields, whitespace and key order are kept", fc.tuple(fc.array(fc.tuple(A.verbatimNode, fc.constantFrom("lf", "crlf", "blank-before")), { maxLength: 8 }), fc.constantFrom('{"id":"n9","na', '{', '[1,')), (b, [items, torn]) => {
