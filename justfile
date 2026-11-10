@@ -36,6 +36,10 @@ remote-ci:
 test-one file:
     NODE_ENV=test pnpm exec tsx --import ./tests/isolate-data-dir.ts --test {{file}}
 
+# Times the due-queue read at 10k propositions x 3 reviews on the file and sqlite backends (prints ms; no assertion).
+bench-review:
+    pnpm exec tsx scripts/bench-review.ts
+
 contract:
     pnpm run test:contract
 

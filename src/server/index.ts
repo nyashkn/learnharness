@@ -47,3 +47,4 @@ export { claudeCodeInstallationResponse } from "./claude-code.ts";
 // No import side effects here; the custom-endpoint boot sync lives at the bottom of keys.ts.
 export * from "./custom-provider.ts";
 export { customProviderGet, customProviderMutation } from "./custom-provider-http.ts";
+export * from "./review.ts";
