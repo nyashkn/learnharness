@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { describe, it, test } from "node:test";
+import { describe, it, mock, test } from "node:test";
 import fc from "fast-check";
 import * as A from "./harness.ts";
 import { discoverAdapters, openFresh, reopen } from "./harness.ts";
@@ -19,23 +19,7 @@ import type { CoverageEntry, GraphChain, GraphNode, ReviewLine, SessionCheckpoin
 import type { GraphStore } from "../../src/core/ports.ts";
 
 /** adapter name -> test id -> owning bead. Runs as node:test `todo` for THAT adapter only: the test executes and reports but does not fail the run. A different adapter gets no allowance. */
-const KNOWN_GAPS: Record<string, Record<string, string>> = {
-	file: {
-		"F5": "lh-1hl", "F3c": "lh-45r",
-	},
-	sqlite: {
-		"F5": "lh-1hl", "F3c": "lh-45r",
-	},
-	"sqlite-app": {
-		"F5": "lh-1hl", "F3c": "lh-45r",
-	},
-	doltlite: {
-		"F5": "lh-1hl", "F3c": "lh-45r",
-	},
-	"doltlite-app": {
-		"F5": "lh-1hl", "F3c": "lh-45r",
-	},
-};
+const KNOWN_GAPS: Record<string, Record<string, string>> = {};
 
 
 // ── tiny oracle pieces (deliberately written differently from graph.ts) ──────
@@ -268,15 +252,24 @@ export function registerContract(f: AdapterFactory): void {
 				}
 			}
 		});
-		P("D3", "mergeFindings run inside transact is atomic under a fault at every write position (incl. the simplify rewrite and coverage appends), and commits when no fault fires", fc.tuple(stepArb(), stepArb(), fc.integer({ min: 1, max: 14 })), (b, [s1, s2, k]) => {
-			runStep({ chatStore: b.chats, graphStore: b.graph }, s1);
-			const before = state(b.graph);
-			const hit = { fired: false };
-			let threw = false;
-			try { b.graph.transact("merge", () => runStep({ chatStore: b.chats, graphStore: fault(b.graph, k, hit) }, s2)); } catch { threw = true; }
-			if (hit.fired) { assert.ok(threw, "an injected fault was swallowed by transact"); eq(state(b.graph), before); return; }
-			// no fault: the merge must commit. shortcut: no comparison with a plain run, because mergeFindings itself is not deterministic across runs (minted ids change which chain simplify keeps; lh-okr).
-			assert.ok(!threw, "transact threw without a fault");
+		// ids are minted randomly: name each n_/arg_ id by its order of first appearance so two runs compare.
+		const canon = (g: GraphStore) => { const seen = new Map<string, string>(); return state(g).replace(/\b(?:n|arg)_\w+/g, (m) => { if (!seen.has(m)) seen.set(m, `#${seen.size}`); return seen.get(m)!; }); };
+		P("D3", "mergeFindings run inside transact is atomic under a fault at every write position (incl. the simplify rewrite and coverage appends), and commits when no fault fires (same state as a plain run, modulo minted ids)", fc.tuple(stepArb(), stepArb(), fc.integer({ min: 1, max: 14 })), async (b, [s1, s2, k]) => {
+			mock.timers.enable({ apis: ["Date"], now: 0 }); // one fixed clock for both runs, so createdAt is equal on both sides
+			let p: StoreBundle | undefined;
+			try {
+				runStep({ chatStore: b.chats, graphStore: b.graph }, s1);
+				const before = state(b.graph);
+				const hit = { fired: false };
+				let threw = false;
+				try { b.graph.transact("merge", () => runStep({ chatStore: b.chats, graphStore: fault(b.graph, k, hit) }, s2)); } catch { threw = true; }
+				if (hit.fired) { assert.ok(threw, "an injected fault was swallowed by transact"); eq(state(b.graph), before); return; }
+				assert.ok(!threw, "transact threw without a fault");
+				p = await fresh();
+				runStep({ chatStore: p.chats, graphStore: p.graph }, s1);
+				runStep({ chatStore: p.chats, graphStore: p.graph }, s2);
+				eq(canon(b.graph), canon(p.graph));
+			} finally { mock.timers.reset(); p?.dispose(); }
 		});
 		// D4: expected commits come from the operation spec, never from the store.
 		type D4Op =
@@ -366,6 +359,17 @@ export function registerContract(f: AdapterFactory): void {
 			eq([...closure(leaves, simplifyChains(ls))].sort(), [...closure(leaves, ls)].sort());
 		});
 		P("F3c", "simplifyChains is idempotent on CYCLIC input too (extractor refuses cycles, but nothing at the store seam does)", lines, (_b, ls) => { const once = simplifyChains(ls); eq(simplifyChains(once), once); });
+		// One createdAt for every line: the id-dependent tie-break is only reached on equal count AND equal createdAt (at 3 stamps, 100 runs missed it).
+		const tied = fc.array(A.saneChainLine.map((c) => ({ ...c, createdAt: "2026-01-01T00:00:00.000Z" })), { minLength: 4, maxLength: 10 });
+		P("F11", "simplifyChains commutes with renaming node ids (ids are minted randomly; the kept set must not depend on them)", fc.tuple(tied, fc.infiniteStream(fc.nat())), (_b, [ls, rnd]) => {
+			const ids = [...new Set(ls.flatMap((l) => [...l.premises, l.conclusion]))];
+			const it = rnd[Symbol.iterator]();
+			const perm = [...ids]; // Fisher-Yates over the same pool: reorders the key strings
+			for (let i = perm.length - 1; i > 0; i--) { const j = it.next().value % (i + 1); [perm[i], perm[j]] = [perm[j]!, perm[i]!]; }
+			const m = new Map(ids.map((id, i) => [id, perm[i]!]));
+			const rename = (xs: GraphChain[]) => xs.map((l) => ({ ...l, premises: l.premises.map((p) => m.get(p) ?? p), conclusion: m.get(l.conclusion) ?? l.conclusion }));
+			eq(simplifyChains(rename(ls)), rename(simplifyChains(ls)));
+		});
 		const steps = fc.array(stepArb(), { minLength: 1, maxLength: 4 });
 		P("F7", "after every mergeFindings: no dangling chain endpoint, premises non-empty/unique/!= conclusion", steps, (b, ss) => {
 			const deps = { chatStore: b.chats, graphStore: b.graph };
