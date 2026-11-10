@@ -1,0 +1,38 @@
+# Linux checks in a Cloudflare sandbox (nyashkn/cf-ci). From a worktree: `just remote <step>`;
+# `just remote ci` runs the full gate (`just ci`) there instead of on the laptop.
+# The base image is Debian slim with git, just and Python, so install adds what GitHub's runner has:
+# - Node 26 (fetched with Python; it needs libatomic1) and pnpm, pinned.
+# - fontconfig plus the Microsoft core fonts (contrib, EULA preseeded as on GitHub's runner): the SVG
+#   text test asks for Helvetica/Arial by name and the renderer finds fonts through fontconfig.
+# - tini: PID 1 here is `sleep`, which never reaps orphans, so a process-group test sees zombies as alive.
+# - procps (`ps`, for the lock-holder tests), and the Electron binary (pnpm skips its postinstall) with
+#   the GTK/NSS/ALSA libraries it links even under ELECTRON_RUN_AS_NODE.
+# - origin pointed at GitHub: the snapshot's origin is cf-ci's own store, which needs credentials, and the
+#   released-rung guard fetches origin/main itself (public repo, no credentials).
+# Test steps (they run as root) also put /tmp in memory, since temp-folder stores on the sandbox disk were
+# slow enough to run the N1 property past its time budget, and raise the open-file limit, which is lower
+# than GitHub's while the migrate tests hold many files open.
+# `just remote-ci` runs every step below except `ci` at once, each in its own sandbox (about 5 min);
+# `just remote ci` is the same gate in one sandbox, about 10 min against the 15 min step cap.
+image: base
+size: standard-4
+install: >-
+  sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources
+  && echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections
+  && apt-get update -qq && apt-get install -y -qq --no-install-recommends libatomic1 tini procps fontconfig ttf-mscorefonts-installer libgtk-3-0t64 libnss3 libgbm1 libasound2t64
+  && arch=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')
+  && python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/tmp/node.tgz')" "https://nodejs.org/dist/v26.12.1/node-v26.12.1-linux-$arch.tar.gz"
+  && tar -xzf /tmp/node.tgz -C /usr/local --strip-components=1
+  && npm install -g --silent pnpm@11.20.0
+  && pnpm install --frozen-lockfile
+  && node node_modules/electron/install.js
+  && git remote set-url origin https://github.com/nyashkn/learnharness.git
+steps:
+  typecheck: pnpm run typecheck
+  lint: pnpm run lint
+  test: mount -t tmpfs -o size=6g tmpfs /tmp; ulimit -n 65536; tini -s -- pnpm run test
+  test-sql: mount -t tmpfs -o size=6g tmpfs /tmp; pnpm run test:sql
+  test-seed: pnpm run test:seed
+  contract: mount -t tmpfs -o size=6g tmpfs /tmp; pnpm run test:contract
+  checks: pnpm run check:schemas && pnpm run check:pins
+  ci: mount -t tmpfs -o size=6g tmpfs /tmp; ulimit -n 65536; tini -s -- just ci
