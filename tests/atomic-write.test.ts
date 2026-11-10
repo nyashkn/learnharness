@@ -153,24 +153,41 @@ describe("writeFileAtomicSync", () => {
 		assert.equal(fs.readFileSync(path.join(path.dirname(file), kept[0]!), "utf-8"), "new");
 	});
 
-	it("Windows: read-only files fail at once, like in-place writes", onWindows, () => {
+	it("Windows: read-only files fail at once, like in-place writes", onWindows, (t) => {
 		const file = target("record.json", "old");
 		fs.chmodSync(file, 0o444);
-		const started = Date.now();
+		const rename = t.mock.method(fs, "renameSync");
 		assert.throws(() => writeFileAtomicSync(file, "new"), { code: "EPERM" });
-		assert.ok(Date.now() - started < 50, "no waiting on read-only files");
+		assert.equal(rename.mock.callCount(), 1, "no retry on read-only files");
 		fs.chmodSync(file, 0o666);
 		assert.equal(fs.readFileSync(file, "utf-8"), "old");
 		assert.deepEqual(temps(file), []);
 	});
 
-	it("folders in the way fail at once", () => {
+	it("folders in the way fail at once", (t) => {
 		const file = target("record.json");
 		fs.mkdirSync(file);
-		const started = Date.now();
+		const rename = t.mock.method(fs, "renameSync");
 		assert.throws(() => writeFileAtomicSync(file, "new"));
-		assert.ok(Date.now() - started < 50, "no waiting on folders");
+		assert.equal(rename.mock.callCount(), 1, "no retry on folders");
 		assert.deepEqual(temps(file), []);
+	});
+
+	it("modeled Windows: read-only files and folders in the way fail at once, without retry", (t) => {
+		modelWindows(t);
+		const folder = target("record.json");
+		fs.mkdirSync(folder);
+		const readOnly = target("record.json", "old");
+		fs.chmodSync(readOnly, 0o444);
+		for (const file of [folder, readOnly]) {
+			const rename = t.mock.method(fs, "renameSync", () => { throw fail("EPERM"); });
+			assert.throws(() => writeFileAtomicSync(file, "new"), { code: "EPERM" });
+			assert.equal(rename.mock.callCount(), 1, "no retry on folders or read-only files");
+			assert.deepEqual(temps(file), []);
+			rename.mock.restore();
+		}
+		fs.chmodSync(readOnly, 0o666);
+		assert.equal(fs.readFileSync(readOnly, "utf-8"), "old");
 	});
 
 	it("rename replaces a symlink without changing its referent", (t) => {
