@@ -66,14 +66,14 @@ export function registerContract(f: AdapterFactory): void {
 	const fresh = (): Promise<StoreBundle> => openFresh(f);
 	const gaps = KNOWN_GAPS[f.name] ?? {};
 	/** `todo`: bead id while the API under test is absent (the body still runs and reports). Known gaps of this adapter get the same treatment. */
-	const P = <T>(id: string, title: string, arb: fc.Arbitrary<T>, fn: (b: StoreBundle, v: T) => void | Promise<void>, opts: { skip?: string; todo?: string } = {}) => {
+	const P = <T>(id: string, title: string, arb: fc.Arbitrary<T>, fn: (b: StoreBundle, v: T) => void | Promise<void>, opts: { skip?: string; todo?: string; runs?: number } = {}) => {
 		const name = `${id} ${title}`;
 		const bead = opts.todo ?? gaps[id];
 		const limit = f.propertyTimeoutMs ?? A.PROPERTY_TIMEOUT_MS; // shortcut: one limit per adapter, not per test; split it if a second slow test appears
 		const o = { timeout: limit, ...(opts.skip ? { skip: opts.skip } : bead ? { todo: bead } : {}) };
-		it(name, o, () => fc.assert(fc.asyncProperty(arb, async (v) => { const b = await fresh(); try { await fn(b, v); } finally { b.dispose(); } }), { ...A.cfg, interruptAfterTimeLimit: limit - 20_000 }));
+		it(name, o, () => fc.assert(fc.asyncProperty(arb, async (v) => { const b = await fresh(); try { await fn(b, v); } finally { b.dispose(); } }), { ...A.cfg, numRuns: opts.runs ?? A.cfg.numRuns, interruptAfterTimeLimit: limit - 20_000 }));
 	};
-	const T = (id: string, title: string, fn: (b: StoreBundle) => void) => P(id, title, fc.constant(0), (b) => fn(b));
+	const T = (id: string, title: string, fn: (b: StoreBundle) => void, opts?: { runs?: number }) => P(id, title, fc.constant(0), (b) => fn(b), opts);
 
 	const putAll = (b: StoreBundle, nodes: GraphNode[] = [], chains: GraphChain[] = []) => {
 		nodes.forEach((n) => b.graph.appendNode(n));
@@ -755,7 +755,7 @@ export function registerContract(f: AdapterFactory): void {
 			const g = getGraph(b.graph);
 			eq(g.nodes.map((n) => [n.id, n.aliases, n.provenance]), oracleNodes(nodes).map((n) => [n.id, n.aliases, n.provenance]));
 			eq(g.chains, oracleChains(chains));
-		});
+		}, { runs: 1 }); // constant input: extra runs only repeat the same fixture load (lh-jg9)
 
 		P("N2", "corrupt lines are skipped AND counted by corruptLines() (item 2)", fc.array(fc.oneof(A.nodeLine.map((v) => ({ v })), A.garbage.map((g) => ({ g }))), { maxLength: 10 }), (b, items) => {
 			for (const it2 of items) "v" in it2 ? b.graph.appendNode(it2.v) : b.hooks.injectCorruptLine("nodes", it2.g);
