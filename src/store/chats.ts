@@ -20,10 +20,17 @@ import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts"
 import { phaseAt3Lh } from "../core/phases.ts";
 import { removeLeftoverTemps, writeFileAtomicSync } from "./atomic-write.ts";
 import { beforeWrite } from "./marker.ts";
+import { createBlobStore, type BlobStore } from "./cas/blob-store.ts";
+
+/** On disk an image snapshot is `{ mimeType, width, height }`; its bytes live in blobs.sqlite under the key. A legacy record still holds inline `data`. */
+type StoredSnapshot = Omit<ImageSnapshot, "data"> & { data?: string };
+type StoredChat = Omit<ChatRecord, "imageSnapshots"> & { imageSnapshots?: Record<string, StoredSnapshot> };
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 /** A file ChatStore over `chatsDir` (one JSON file per chat). `dataDir` (default: the parent) holds the marker and lock. */
-export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {}): ChatStore {
+export function createChatStore(chatsDir: string, opts: { dataDir?: string; blobs?: BlobStore } = {}): ChatStore {
 	const dataDir = opts.dataDir ?? path.dirname(path.resolve(chatsDir));
+	const blobs = opts.blobs ?? createBlobStore(path.join(dataDir, "blobs.sqlite")); // opens per call, so building the store touches no disk
 	function chatFile(id: string): string {
 		if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Invalid chat id: ${id}`);
 		return path.join(chatsDir, `${id}.json`);
@@ -59,13 +66,28 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 	 *  record persist goes through here and carries the CURRENT version stamp —
 	 *  lazy migration means existing files only get stamped on their next write.
 	 *  A future-version guard lives on the read side (getChat). */
-	function writeChat(record: ChatRecord): void {
+	function writeChat(record: StoredChat): void {
 		beforeWrite(dataDir); // marker + store lock on the first write
 		fs.mkdirSync(chatsDir, { recursive: true });
-		writeFileAtomicSync(chatFile(record.id), JSON.stringify({ ...record, version: CURRENT_CHAT_VERSION }, null, "\t"), { allowInPlaceFallback: true });
+		// Lazy move: inline bytes whose hash equals their key go to the CAS (committed) BEFORE the JSON that drops them is written.
+		// An inline entry whose hash does not match its key stays inline, untouched (no data loss).
+		let imageSnapshots = record.imageSnapshots;
+		if (imageSnapshots) {
+			imageSnapshots = Object.fromEntries(
+				Object.entries(imageSnapshots).map(([hash, { data, ...rest }]) => {
+					if (data === undefined) return [hash, rest];
+					const bytes = Buffer.from(data, "base64");
+					if (sha256(bytes) !== hash) return [hash, { ...rest, data }];
+					blobs.put(bytes);
+					return [hash, rest];
+				}),
+			);
+		}
+		writeFileAtomicSync(chatFile(record.id), JSON.stringify({ ...record, ...(imageSnapshots ? { imageSnapshots } : {}), version: CURRENT_CHAT_VERSION }, null, "\t"), { allowInPlaceFallback: true });
 	}
 
-	function getChat(id: string): ChatRecord | null {
+	/** The record as stored (no image bytes loaded). Every read-modify-write path and listChats use this. */
+	function readRaw(id: string): StoredChat | null {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(fs.readFileSync(chatFile(id), "utf-8"));
@@ -80,7 +102,32 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 			console.error(`[chat ${id}] record stamped with schema version ${v} > ${CURRENT_CHAT_VERSION} — this app build is older; refusing to read it`);
 			return null;
 		}
-		return parsed as ChatRecord;
+		return parsed as StoredChat;
+	}
+
+	/** Fill each by-hash snapshot's `data` from the CAS. Bytes gone: the entry is dropped (the image route then 404s). Legacy inline entries pass through. */
+	function hydrate(record: StoredChat): ChatRecord {
+		if (!record.imageSnapshots) return record as ChatRecord;
+		const imageSnapshots: Record<string, ImageSnapshot> = {};
+		for (const [hash, snap] of Object.entries(record.imageSnapshots)) {
+			if (snap.data !== undefined) {
+				imageSnapshots[hash] = snap as ImageSnapshot;
+				continue;
+			}
+			const blob = blobs.get(hash);
+			if (!blob) {
+				console.error(`[chat ${record.id}] image snapshot ${hash} has no bytes in blobs.sqlite — omitted`);
+				continue;
+			}
+			imageSnapshots[hash] = { ...snap, data: Buffer.from(blob.bytes).toString("base64") };
+		}
+		return { ...record, imageSnapshots };
+	}
+
+	// shortcut: getChat hydrates every snapshot, upgrade: a per-snapshot port method when chats get many images.
+	function getChat(id: string): ChatRecord | null {
+		const record = readRaw(id);
+		return record && hydrate(record);
 	}
 
 	function listChats(): ChatSummary[] {
@@ -88,8 +135,8 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 			return fs
 				.readdirSync(chatsDir)
 				.filter((f) => f.endsWith(".json"))
-				.map((f) => getChat(f.slice(0, -5)))
-				.filter((r): r is ChatRecord => r !== null)
+				.map((f) => readRaw(f.slice(0, -5)))
+				.filter((r): r is StoredChat => r !== null)
 				.map(({ messages, tree, turns, extractions, imageSnapshots: _imageSnapshots, ...summary }) => {
 					// Per-record isolation (Wave B): a record whose messages fail the
 					// projection (e.g. pre-Wave-B UIMessage-format scratch — the
@@ -134,7 +181,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 	 *  Wave B: replay is state.messages = record.messages). SILENT by the
 	 *  events law — see the SILENCE LAW comment at createChat. */
 	function saveMessages(id: string, messages: LhMessage[]): void {
-		const record = getChat(id);
+		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
 		record.messages = messages;
 		record.updatedAt = new Date().toISOString();
@@ -143,15 +190,15 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 
 	/** A synchronous read/merge/write keeps concurrent worker and turn writes from losing snapshots. */
 	function saveImageSnapshot(id: string, snapshotId: string, image: ImageSnapshot): void {
-		if (!/^[a-f0-9]{64}$/.test(snapshotId) || createHash("sha256").update(Buffer.from(image.data, "base64")).digest("hex") !== snapshotId) {
+		const bytes = Buffer.from(image.data, "base64");
+		if (!/^[a-f0-9]{64}$/.test(snapshotId) || sha256(bytes) !== snapshotId) {
 			throw new Error("Invalid image snapshot identity");
 		}
-		const record = getChat(id);
+		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
+		blobs.put(bytes); // bytes first (also heals a by-hash entry whose bytes went missing)
 		if (record.imageSnapshots?.[snapshotId]) return;
-		record.imageSnapshots = { ...record.imageSnapshots, [snapshotId]: {
-			mimeType: image.mimeType, data: image.data, width: image.width, height: image.height,
-		} };
+		record.imageSnapshots = { ...record.imageSnapshots, [snapshotId]: { mimeType: image.mimeType, width: image.width, height: image.height } };
 		writeChat(record);
 	}
 
@@ -160,7 +207,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 	 * persist appends once, while continuation turns (which share a response
 	 *  message id) each keep their usage. */
 	function appendTurnUsage(id: string, entry: TurnUsage): void {
-		const record = getChat(id);
+		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
 		record.turns = record.turns?.some((t) => t.id === entry.id)
 			? record.turns
@@ -172,7 +219,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 	 * log — idempotent per startedAt: a retry that reaches the append twice
 	 * (abort replays) does not double-count spend. */
 	function appendExtractionUsage(id: string, entry: ExtractionRunUsage): void {
-		const record = getChat(id);
+		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
 		record.extractions = record.extractions?.some((r) => r.startedAt === entry.startedAt)
 			? record.extractions
@@ -183,7 +230,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 	/** Persist the per-chat model/thinking settings — replace-whole (the
 	 * picker sends the complete object; absent = config defaults). */
 	function saveSettings(id: string, settings: ChatSettings): void {
-		const record = getChat(id);
+		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
 		// Like saveTree: a settings tweak is not conversation activity, so it
 		// deliberately does NOT bump updatedAt (sidebar order must not churn).
@@ -197,12 +244,12 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 	 * string becomes "Untitled session" (the API gate rejects it first; this
 	 * is the honest floor for any other caller). */
 	function renameChat(id: string, title: string): ChatRecord {
-		const record = getChat(id);
+		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
 		record.title = title.trim() || "Untitled session";
 		writeChat(record);
 		emit("chats-changed", {});
-		return record;
+		return hydrate(record);
 	}
 
 	/** Delete the session record file entirely (session-deletion wave 6,
@@ -223,7 +270,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string } = {
 
 	/** Persist the session plan tree (plan tools call this in execute). */
 	function saveTree(id: string, tree: PlanTree): void {
-		const record = getChat(id);
+		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
 		record.tree = tree;
 		// Deliberately does NOT bump updatedAt: tree mutations piggyback on the

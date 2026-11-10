@@ -72,6 +72,14 @@ export interface ChatStore {
 	deleteChat(id: string): boolean;
 }
 
+/** Derived read surface over the graph (projections.sqlite). Rebuilt from the GraphStore; never a source of truth. */
+export interface ProjectionStore {
+	/** Ids of every node needed to derive `targetId`, target included, sorted. */
+	deriveClosure(targetId: string): string[];
+	/** Node ids by full-text rank (bm25), ties by id. User text never throws; no word means []. */
+	search(query: string, limit: number): string[];
+}
+
 // ─── GraphStore — the append-only evidence ledgers (data/graph) ──────────────
 // Chains are the stored truth (owner, 2026-09-30): nodes + reasoning
 // chains; edges are a DERIVED view (core/graph.ts) and never touch this
