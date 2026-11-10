@@ -17,39 +17,47 @@ env:
   NEXT_TELEMETRY_DISABLED: "1"
 
 jobs:
-  quality:
-    name: Typecheck, tests, lint
+  # Typecheck, tests and lint run in cf-ci sandboxes (.cf-ci.yml). This job only starts the
+  # run; the cf-ci App posts one check per step, named "cf-ci / <step>". It is the wait: false
+  # path of nyashkn/cf-ci run.yml@v1, inlined because a public repo cannot call a private
+  # repo's reusable workflow. Timeouts added (nyashkn/cf-ci#14).
+  cf-ci:
+    name: cf-ci start
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "26"
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # The Electron binary is fetched lazily from github.com (pnpm skips its postinstall).
-      # Cache it per version/OS, then fetch with backoff on a cold cache.
-      - id: electron
-        shell: bash
-        run: echo "version=$(node -p "require('electron/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/electron-cache
-          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ steps.electron.outputs.version }}
-      - name: Fetch Electron binary (retry with backoff)
-        shell: bash
+      - name: Start the cf-ci run
         env:
-          electron_config_cache: ${{ runner.temp }}/electron-cache
+          WORKER: https://cf-ci.kn-dev.workers.dev
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          for delay in 0 15 45 90 180; do
-            sleep "$delay"
-            node node_modules/electron/install.js && exit 0
-          done
-          echo "::error::Electron binary download failed after 5 attempts (GitHub outage?)"
-          exit 1
-      - run: pnpm run ci
+          set -euo pipefail
+          BODY=$(mktemp)
+          die() { echo "::error::$*" >&2; exit 1; }
+          # api METHOD PATH EXPECTED_CODE [JSON]: fresh OIDC token per call; body in $BODY, status in $CODE.
+          api() {
+            TOK=$(curl -sSf --max-time 30 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=cf-ci" | jq -er .value)
+            echo "::add-mask::$TOK"
+            local data=()
+            if [ $# -ge 4 ]; then data=(-H 'Content-Type: application/json' -d "$4"); fi
+            CODE=$(curl -sS --connect-timeout 15 --max-time 60 -o "$BODY" -w '%{http_code}' -X "$1" -H "Authorization: Bearer $TOK" "${data[@]}" "$WORKER$2") || CODE=000
+            [ "$CODE" = "$3" ]
+          }
+          api POST /runs 201 || die "POST /runs failed: HTTP $CODE: $(cat "$BODY")"
+          RUN_ID=$(jq -er .run_id "$BODY")
+          GIT_URL=$(jq -er .git_url "$BODY")
+          GIT_TOKEN=$(jq -er .git_token "$BODY")
+          echo "::add-mask::$GIT_TOKEN"
+          # Parentless commit with the checkout's tree: no history goes to the sandbox store.
+          C=$(GIT_AUTHOR_NAME=cf-ci GIT_AUTHOR_EMAIL=cf-ci@users.noreply.github.com GIT_COMMITTER_NAME=cf-ci GIT_COMMITTER_EMAIL=cf-ci@users.noreply.github.com git commit-tree "HEAD^{tree}" -m "cf-ci $GITHUB_SHA")
+          timeout 180 git -c "http.extraHeader=Authorization: Bearer $GIT_TOKEN" push -q "$GIT_URL" "$C:refs/heads/ci/$RUN_ID" || die "git push to ci/$RUN_ID failed"
+          START=$(jq -nc --arg ref "refs/heads/ci/$RUN_ID" --arg sha "$HEAD_SHA" '{ref: $ref, report: "checks", head_sha: $sha}')
+          api POST "/runs/$RUN_ID/start" 202 "$START" || die "start failed: HTTP $CODE: $(cat "$BODY")"
+          echo "started run $RUN_ID; results appear as cf-ci / <step> checks on ${HEAD_SHA:0:12}"
 
   standalone:
     name: Standalone (${{ matrix.platform }})
