@@ -5,7 +5,7 @@
 # launch. The owner's repeatable first-run BYOK test bed.
 #
 #   bash scripts/dev-fresh.sh            # http://localhost:3005
-#   npm run dev:fresh                    # the same, via package.json
+#   pnpm dev:fresh                       # the same, via package.json
 #   scripts/dev-fresh.sh --port 3006    # any port OUTSIDE 3000-3004
 #   scripts/dev-fresh.sh --keep         # don't wipe between runs
 #                                        (multi-session testing)
@@ -96,4 +96,4 @@ echo "  keys     : env keys hidden (LH_IGNORE_ENV_KEYS=1), auth.json empty"
 echo "─────────────────────────────────────────────────────────"
 
 cd "$ROOT"
-exec npm run dev
+exec pnpm dev

@@ -67,9 +67,9 @@ All three platforms support in-app updates.
 ## Development and support
 
 ```bash
-npm ci
-npm run dev        # http://localhost:3000
-npm test           # fixtures and fake providers
+pnpm install --frozen-lockfile
+pnpm dev           # http://localhost:3000
+pnpm test          # fixtures and fake providers
 ```
 
 See the [documentation index](docs/README.md) for all guides, [development](docs/development.md) for setup and checks, [architecture](docs/architecture.md) for the runtime, [keyboard shortcuts](docs/keyboard.md), and [desktop builds and releases](docs/desktop-release.md).

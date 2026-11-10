@@ -7,19 +7,19 @@ For product setup, see [Getting started](getting-started.md). For runtime flows,
 CI and release builds use **Node 26**. Use the lockfile and a compatible native build environment:
 
 ```sh
-npm ci
-npm run dev            # normally http://localhost:3000
-npm run desktop:dev    # Next dev + Electron on localhost:3000
+pnpm install --frozen-lockfile
+pnpm dev               # normally http://localhost:3000
+pnpm desktop:dev       # Next dev + Electron on localhost:3000
 ```
 
 No key is needed to open the UI. Configure connections and the Strong/Cheap/Vision slots before model-driven use; there are no factory model selections. OpenRouter is supported, not mandatory.
 
 ```sh
-npm run build          # Next production build, including standalone output
-npm start              # serve the production build with Next
+pnpm build             # Next production build, including standalone output
+pnpm start             # serve the production build with Next
 ```
 
-`npm run desktop:dist` is the local **signed macOS** packaging path, not a portable unsigned shortcut. Prerequisites and Windows/Linux instructions are in [Desktop builds and releases](desktop-release.md).
+`pnpm desktop:dist` is the local **signed macOS** packaging path, not a portable unsigned shortcut. Prerequisites and Windows/Linux instructions are in [Desktop builds and releases](desktop-release.md).
 
 ## Configuration
 
@@ -40,7 +40,7 @@ Provider-specific setup and limitations: [Claude Code](claude-code.md), [custom 
 
 ### Subscription connections in web/dev
 
-`npm run dev` and `npm start` support ChatGPT, GitHub Copilot, and Grok sign-in. `desktop:dev` uses those same dev-server connections; packaged desktop has a separate main-process credential owner/private transport. Subscription routes do not fall back to API-key billing.
+`pnpm dev` and `pnpm start` support ChatGPT, GitHub Copilot, and Grok sign-in. `desktop:dev` uses those same dev-server connections; packaged desktop has a separate main-process credential owner/private transport. Subscription routes do not fall back to API-key billing.
 
 Web/dev writes `chatgpt-credentials.json`, `github-copilot-credentials.json`, and `xai-credentials.json` **beside `LH_AUTH_FILE`**, in the repo by default—not under `data/` or a global Pi profile. Git/build exclusions cover these files and their write temporaries. Refresh serialization is process-local: use one server per credential directory.
 
@@ -55,7 +55,7 @@ Use a disposable data root and a separate empty `{}` auth file:
 ```sh
 LH_DATA_DIR=/absolute/path/to/scratch/data \
 LH_AUTH_FILE=/absolute/path/to/scratch/auth.json \
-npm run dev -- --port 3001
+pnpm dev --port 3001
 ```
 
 These variables isolate app records/saved keys, **not every external effect**. Ambient keys still win; subscription files follow the auth directory; Claude Code can use its native profile. File tools have broad read access under the server's user, subject to the [path guard](architecture.md#file-access-and-external-services). A scratch data root is not a filesystem or credential sandbox. Use synthetic fixtures/fake providers for automated reproduction and avoid personal files or ambient credentials.
@@ -72,7 +72,7 @@ Read the relevant installed Next guide under `node_modules/next/dist/docs/` befo
 For example:
 
 ```sh
-LH_BACKGROUND_CAPTURE=auditor npm run desktop:dev
+LH_BACKGROUND_CAPTURE=auditor pnpm desktop:dev
 ```
 
 The flag must reach the **Next server**; restart an existing server to change it. Captures are off by default and written to `<data root>/debug/background-captures/<role>-<run ID>.json`. Each file retains the last request and response/error/tool results, with prior conversation in that request and compact per-turn timings—not every request body.
@@ -84,10 +84,10 @@ For frontend failures, inspect the actual UI, requests, console, and state. A st
 ## Checks
 
 ```sh
-npm test               # node:test via tsx; injected engines, fixtures, fake transports
-npm run typecheck      # tsc --noEmit
-npm run lint           # ESLint, including import restrictions
-npm run build          # Next production build
+pnpm test              # node:test via tsx; injected engines, fixtures, fake transports
+pnpm typecheck         # tsc --noEmit
+pnpm lint              # ESLint, including import restrictions
+pnpm build             # Next production build
 ```
 
 The suite requires no paid models or real sign-in. Some tests use temporary files, native processes, or local fake endpoints: deterministic does not mean every test is pure or cannot bind a loopback port. Inspect focused-suite setup before running beside a live app.
