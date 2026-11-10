@@ -16,6 +16,7 @@ import { OPENING_PROMPT_FAILURE } from "@/components/opening-prompt";
 import { PathInput } from "@/components/path-input";
 import { AttachFilesButton } from "@/components/attach-files-button";
 import { SessionStarter } from "@/components/start-session";
+import { ProposedSessions } from "@/components/proposed-sessions";
 import type { TurnUsage } from "@/src/core";
 
 /**
@@ -110,14 +111,14 @@ export function Home({
 		}
 		void dictation.finish().then(() => begin());
 	};
-	const begin = async () => {
-		const t = topicRef.current.trim();
-		if (!t || startingRef.current) return;
+	/* The pre-send guards, shared by the topic box and the proposed-sessions
+	 * panel: false when setup or the model picker opened instead. */
+	const guardStart = (): boolean => {
 		// Unconfigured: the send INTERCEPTS into the setup flow (the draft
 		// stays in the textarea; the learner sends it after Save).
 		if (!configured) {
 			setSetupOpen(true);
-			return;
+			return false;
 		}
 		// The pre-send KEY guards (owner interlude, no-orphan-chats): the
 		// models case guards BEFORE creation; the key cases must too — a
@@ -128,13 +129,19 @@ export function Home({
 		// picker. The server's admission gate remains the belt.
 		if (zeroKeys) {
 			setSetupOpen(true);
-			return;
+			return false;
 		}
 		const strong = catalog?.slots.strong?.model;
 		if (selectedModelUnavailable(catalog, strong ? `${strong.provider}:${strong.id}` : undefined)) {
 			openModelPicker();
-			return; // Preserve the draft and never create an orphan session.
+			return false; // Preserve the draft and never create an orphan session.
 		}
+		return true;
+	};
+	const begin = async () => {
+		const t = topicRef.current.trim();
+		if (!t || startingRef.current) return;
+		if (!guardStart()) return;
 		startingRef.current = true;
 		setBusy(true);
 		setStartError(false);
@@ -212,6 +219,10 @@ export function Home({
 			    px-4) so nothing shifts when a session starts (owner). */}
 			<div className="pointer-events-none absolute inset-x-0 bottom-0 pb-5">
 				<div className="pointer-events-auto mx-auto w-full max-w-[46rem] px-4">
+					{/* Proposed sessions (K5): seeds from the learner's own agent
+					    history, above the composer in both home views. Teaching
+					    only — a seed starts a teach session. */}
+					{mode === "teach" && <ProposedSessions canStart={guardStart} navigate={(href) => router.push(href)} />}
 					{/* The pick bar (owner vision, 2026-10-04): the chain
 					    table's selection is PERSISTENT — picked
 					    propositions show here as a count + Clear in EITHER

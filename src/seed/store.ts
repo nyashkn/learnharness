@@ -166,10 +166,16 @@ export function createSeedStore(db: SeedDb) {
 			return db.all<{ proposal_id: string; verdict: Verdict; at: string }>("SELECT proposal_id, verdict, at FROM label ORDER BY proposal_id").map((r) => ({ proposalId: r.proposal_id, verdict: r.verdict, at: r.at }));
 		},
 
-		/** The accept record and the status flip commit together. */
+		/** The accept record, its "learn" label and the status flip commit together: an accept is always a label the calibration can read. */
 		saveAccept(row: AcceptRow): void {
 			db.transaction(() => {
 				db.run("INSERT INTO proposal_accept (proposal_id, chat_id, first_message, at) VALUES (?, ?, ?, ?)", row.proposalId, row.chatId, row.firstMessage, row.at);
+				// an existing learn label keeps its own time
+				db.run(
+					"INSERT INTO label (proposal_id, verdict, at) VALUES (?, 'learn', ?) ON CONFLICT(proposal_id) DO UPDATE SET verdict = 'learn', at = excluded.at WHERE label.verdict <> 'learn'",
+					row.proposalId,
+					row.at,
+				);
 				db.run("UPDATE proposal SET status = 'accepted' WHERE id = ?", row.proposalId);
 			});
 		},

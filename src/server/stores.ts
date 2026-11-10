@@ -20,6 +20,13 @@ import { beforeWrite, openDataFolder, type Backend } from "../store/marker.ts";
 import { createSqlGraphStores } from "../store/sql/open.ts";
 import { emit } from "../core/events.ts";
 import type { Stores } from "../core/ports.ts";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import pkg from "../../package.json" with { type: "json" };
+import { openNodeSqlite } from "../store/sql/drivers/node-sqlite.ts";
+import { MigrationRefusedError, migrate } from "../store/sql/migrate.ts";
+import { seedMigration } from "../store/sql/migrations/seeds/index.ts";
+import { createSeedStore, type SeedStore } from "../seed/store.ts";
 // OPEN: the marker and format check, once, at module load. A folder this build must not touch
 // (newer layout, corrupt marker, a backend with no adapter, a newer graph format) fails here, for
 // reads and writes alike. It never writes and a missing folder is fine (`next build`, first run).
@@ -61,3 +68,21 @@ export type { Stores };
 export function effectiveSettings(): EffectiveSettings {
 	return resolveSettings(settingsStore.readSettings());
 }
+
+/**
+ * seeds.sqlite for the home panel (K5), the second composition point beside scripts/seed.ts (CB7). Opened per call
+ * and closed after, so a running `seed scan` keeps its own handle. A missing file means no proposals: the panel never
+ * creates it, and returns null. A newer schema throws MigrationRefusedError, as for the CLI.
+ */
+export function withSeedStore<T>(fn: (store: SeedStore) => T): T | null {
+	const file = path.join(PATHS.data, "seeds.sqlite");
+	if (!existsSync(file)) return null;
+	const db = openNodeSqlite(file);
+	try {
+		migrate(db, { ...seedMigration, lhVersion: pkg.version, backupPath: (from) => path.join(PATHS.data, `seeds.bak-v${from}-${Date.now()}.sqlite`) });
+		return fn(createSeedStore(db));
+	} finally {
+		db.close();
+	}
+}
+export { MigrationRefusedError };

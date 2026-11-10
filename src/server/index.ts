@@ -16,6 +16,7 @@ export { joinPages } from "../agent/subagents/pdf-markdown.ts";
 export * from "./commit-positions.ts";
 export * from "./jobs.ts";
 export * from "./stores.ts";
+export * from "./seeds.ts";
 // Prompt-segment validation for the settings routes. The settings *Record aliases
 // (readSettingsRecord, writeSettingsRecord) and the prompt overrides come from ./stores.ts above.
 export { isValidSegmentPath } from "../core/prompt-segments.ts";
