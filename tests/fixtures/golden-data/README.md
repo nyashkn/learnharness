@@ -29,6 +29,7 @@ core tool surface must appear in real data here.
   coverage (93), sources (4), render-settings, positions.
 - `jobs/` — five records covering kind × status: research done + aborted by
   learner, demo done, visual done, pdf error.
+- `graph/review/` — written by the R3 backfill from the practice chat chat_mv293wv5_10656952 (10 Nov).
 - `settings.json` — the stamped settings record (version 1, model slots).
 
 ## Regenerating / extending

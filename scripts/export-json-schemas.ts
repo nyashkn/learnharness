@@ -5,8 +5,9 @@ import { NodeLineSchema } from "../src/core/contracts/schemas/node-line.ts";
 import { ChainLineSchema } from "../src/core/contracts/schemas/chain-line.ts";
 import { CoverageLineExportSchema } from "../src/core/contracts/schemas/coverage-line.ts";
 import { CheckpointLineSchema } from "../src/core/contracts/schemas/checkpoint-line.ts";
+import { ReviewLineSchema, ReviewRemapLineSchema } from "../src/core/contracts/schemas/review-line.ts";
 
-const SCHEMAS = { "node-line": NodeLineSchema, "chain-line": ChainLineSchema, "coverage-line": CoverageLineExportSchema, "checkpoint-line": CheckpointLineSchema };
+const SCHEMAS = { "node-line": NodeLineSchema, "chain-line": ChainLineSchema, "coverage-line": CoverageLineExportSchema, "checkpoint-line": CheckpointLineSchema, "review-line": ReviewLineSchema, "review-remap-line": ReviewRemapLineSchema };
 
 const args = process.argv.slice(2);
 const check = args.includes("--check");

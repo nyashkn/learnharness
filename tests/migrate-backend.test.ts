@@ -1181,3 +1181,69 @@ describe("B CLI", () => {
 		assert.deepEqual([...BACKENDS], ["file", "sqlite", "doltlite"]);
 	});
 });
+
+// ─── V rung-1 source (before the review ledgers existed) ─────────────────────
+
+const V1_SQL = fs.readFileSync(path.join(import.meta.dirname, "../src/store/sql/migrations/graph/shapes/v1.sql"), "utf8");
+const V1_ROWS = { nodes: '{"id":"n1"}', chains: '{"c":1}', checkpoints: '{"s":1}', coverage: '{"v":1}' };
+
+/** A store at rung 1, built straight from the frozen v1 shape: openGraphStore would upgrade it to the top rung and hide the bug. */
+function seedV1(dir: string, b: "sqlite" | "doltlite"): void {
+	fs.mkdirSync(dir, { recursive: true });
+	const file = path.join(dir, storeName(b));
+	const lock = b === "doltlite" ? acquireStoreLock(file) : undefined;
+	const db = openRW(file, b, lock);
+	try {
+		db.exec(V1_SQL);
+		db.transaction(() => {
+			for (const [k, v] of Object.entries({ store_kind: "graph", schema_version: "1", line_format: "1" })) db.run("INSERT INTO lh_meta (key, value) VALUES (?, ?)", k, v);
+			db.run("INSERT INTO ledger_nodes (seq, line_json) VALUES (1, ?)", V1_ROWS.nodes);
+			db.run("INSERT INTO ledger_chains (seq, line_json) VALUES (1, ?)", V1_ROWS.chains);
+			db.run("INSERT INTO ledger_checkpoints (seq, line_json) VALUES (1, ?)", V1_ROWS.checkpoints);
+			db.run("INSERT INTO ledger_coverage (seq, line_json) VALUES (1, ?)", V1_ROWS.coverage);
+			db.run("INSERT INTO sources (id, record_json) VALUES ('a', ?)", '{"id":"a","filePath":"/a","importedAt":"t"}');
+			db.run("INSERT INTO documents (key, json) VALUES ('source-organization', ?)", '{"version":1,"folders":[]}');
+		});
+		db.seal("seed");
+	} finally {
+		db.close();
+		lock?.release();
+	}
+	writeMarker(dir, b);
+}
+
+/** exportTree maps paths to sha256 of the bytes. */
+function assertV1Arrived(tree: Record<string, string>): void {
+	assert.equal(tree["graph/nodes.jsonl"], sha(`${V1_ROWS.nodes}\n`));
+	assert.equal(tree["graph/chains.jsonl"], sha(`${V1_ROWS.chains}\n`));
+	assert.equal(tree["graph/sessions.jsonl"], sha(`${V1_ROWS.checkpoints}\n`));
+	assert.equal(tree["graph/coverage.jsonl"], sha(`${V1_ROWS.coverage}\n`));
+	assert.equal(tree["graph/sources.json"], sha(JSON.stringify({ a: { id: "a", filePath: "/a", importedAt: "t" } }, null, "\t")));
+	assert.equal(tree["graph/review/reviews.jsonl"], sha(""));
+	assert.equal(tree["graph/review/remaps.jsonl"], sha(""));
+}
+
+describe("V a source still at rung 1 (no review tables)", () => {
+	for (const from of ["sqlite", "doltlite"] as const) {
+		for (const to of ["file", "sqlite", "doltlite"] as const) {
+			if (to === from) continue;
+			test(`V ${from} -> ${to}: migrates, v1 rows arrive, reviews empty, source unchanged`, () => {
+				const dir = mk();
+				seedV1(dir, from);
+				const before = sourceState(dir, from);
+				mig(dir, to, { now });
+				assert.deepEqual(sourceState(dir, from), before);
+				assertV1Arrived(exportOf(dir));
+			});
+		}
+		test(`V ${from}: exportStore reads it, v1 rows arrive, reviews empty, source unchanged`, () => {
+			const dir = mk();
+			seedV1(dir, from);
+			const before = sourceState(dir, from);
+			const out = path.join(mk(), "e");
+			exportStore(dir, out, { now });
+			assert.deepEqual(sourceState(dir, from), before);
+			assertV1Arrived(exportTree(out));
+		});
+	}
+});

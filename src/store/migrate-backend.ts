@@ -29,6 +29,7 @@ import { openDoltlite } from "./sql/drivers/doltlite.ts";
 import { openNodeSqlite } from "./sql/drivers/node-sqlite.ts";
 import type { SqlDriver } from "./sql/driver.ts";
 import { assertStoreNotNewer, openGraphStore, type GraphCore } from "./sql/graph-store.ts";
+import { graphRungs } from "./sql/migrations/graph/index.ts";
 import { acquireStoreLock, type StoreLock } from "./sql/lock.ts";
 
 // ─── text ────────────────────────────────────────────────────────────────────
@@ -297,7 +298,13 @@ export function snapshotSql(file: string, backend: "sqlite" | "doltlite"): Snaps
 		if (format === undefined || !/^[1-9]\d{0,9}$/.test(format)) throw new MigrateRefusedError(MIGRATE_TEXT.badMeta(file, "line_format", format));
 		const dropped: Dropped = { crlf: 0, blank: 0, torn: 0 };
 		const ledgers = {} as Record<Ledger, string[]>;
+		// A ledger table added by a later rung is absent below it: that is an empty ledger. The source is read-only, so it is never upgraded. Absent at the top rung stays an error.
+		const rung = Number(db.get<{ value: string }>("SELECT value FROM lh_meta WHERE key = 'schema_version'")?.value);
 		for (const l of LEDGERS) {
+			if (!tables.includes(l.table) && rung < graphRungs.length) {
+				ledgers[l.entity] = [];
+				continue;
+			}
 			const rows = textRows(db, file, l.table, ["line_json"], "ORDER BY seq").map(([line], i) => {
 				if ((line as string).includes("\n")) throw new MigrateRefusedError(MIGRATE_TEXT.multiline(file, `${l.table}.line_json row ${i + 1}`));
 				return line as string;

@@ -1,0 +1,17 @@
+{
+	"type": "object",
+	"required": [
+		"from",
+		"to"
+	],
+	"properties": {
+		"from": {
+			"type": "string"
+		},
+		"to": {
+			"type": "string"
+		}
+	},
+	"$id": "lh.graph.review-remap-line.v1",
+	"additionalProperties": true
+}
