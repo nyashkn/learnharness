@@ -129,7 +129,9 @@ describe("lineCheck (compiled, used by the stores) agrees with Value.Check (inte
 				}),
 				{ numRuns: 1_000 },
 			);
-			assert.ok(accepted >= 100 && rejected >= 100, `accepted=${accepted} rejected=${rejected}`);
+			// Measured over seeds 1-200 (lh-5rw): the lowest count of either verdict was review's accepted, 85-144 (mean ~115, sd ~10).
+			// 30 is far below that, so it never flakes, and still fails a generator that drifts to all-reject or all-accept.
+			assert.ok(accepted >= 30 && rejected >= 30, `accepted=${accepted} rejected=${rejected}`);
 		});
 	}
 });
