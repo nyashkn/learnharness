@@ -491,7 +491,7 @@ describe("lock release on shutdown", () => {
 				${how === "SIGTERM-with-listener" ? 'process.on("SIGTERM", () => setTimeout(() => process.exit(0), 50));' : ""}
 				beforeWrite(${JSON.stringify(dir)});
 				console.log("ready");
-				${how === "exit" ? "" : "setInterval(() => {}, 1000);"}`;
+				${how === "exit" ? "process.stdin.resume(); // stdin keeps the child alive until the parent ends it; then it exits 0 by itself" : "setInterval(() => {}, 1000);"}`;
 			const c = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
 				cwd: path.resolve(import.meta.dirname, ".."), env: { PATH: process.env.PATH, HOME: home, NODE_ENV: "test" },
 			});
@@ -501,7 +501,8 @@ describe("lock release on shutdown", () => {
 				if (ready) return;
 				ready = true;
 				const lockAtReady = fs.existsSync(path.join(dir, "storage.json.lock"));
-				if (how !== "exit") c.kill(how === "SIGINT" ? "SIGINT" : "SIGTERM");
+				if (how === "exit") c.stdin.end(); // EOF lets the child exit on its own, after the check above
+				else c.kill(how === "SIGINT" ? "SIGINT" : "SIGTERM");
 				const killer = setTimeout(() => c.kill("SIGKILL"), 5000); // a child that swallows the signal fails the test, not hangs it
 				c.on("exit", () => clearTimeout(killer));
 				c.on("exit", (code, signal) => resolve({ code, signal, lockAtReady }));
