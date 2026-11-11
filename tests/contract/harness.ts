@@ -57,7 +57,7 @@ export interface AdapterFactory {
 
 /** Glob tests/contract/adapters/*.ts. Fails loudly when the glob is empty (an empty glob would pass vacuously). */
 export async function discoverAdapters(): Promise<AdapterFactory[]> {
-	const here = path.dirname(new URL(import.meta.url).pathname);
+	const here = import.meta.dirname; // not URL.pathname: on Windows that is /D:/..., which path turns into D:\D:\...
 	const contracts = fs.readdirSync(here).filter((f) => f.endsWith(".contract.ts"));
 	const files = fs.readdirSync(path.join(here, "adapters")).filter((f) => f.endsWith(".ts")).sort();
 	if (contracts.length === 0 || files.length === 0) throw new Error(`contract discovery found ${contracts.length} contract files and ${files.length} adapters in ${here}`);

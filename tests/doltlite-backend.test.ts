@@ -315,7 +315,7 @@ describe("doltlite backend", { skip: !DOLTLITE_HOST }, () => {
 	it("a store lock held by another process: the write is refused with StoreLockedError naming the holder, and no store byte changes", async () => {
 		for (const which of ["graph.doltlite", "storage.json"] as const) {
 			const dir = cleanStore();
-			const holder = spawn("sleep", ["30"], { stdio: "ignore" });
+			const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" }) // not `sleep`: no such binary on Windows outside Git Bash;
 			try {
 				const theirs = acquireStoreLock(path.join(dir, which), { pid: holder.pid });
 				const store = tree(dir)["graph.doltlite"], log = disk(dir);
