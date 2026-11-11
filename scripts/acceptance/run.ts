@@ -36,10 +36,21 @@ async function withApp<T>(f: ReturnType<typeof newFolder>, storage: string | und
 		const page = await openPage(run.browser!, server.origin + "/");
 		current = page;
 		if (process.env.LH_ACCEPTANCE_DEBUG) { page.on("console", (m) => console.log(`[console ${m.type()}] ${m.text().slice(0, 200)}`)); page.on("response", (r) => { if (r.status() >= 400) console.log(`[http ${r.status()}] ${r.request().method()} ${r.url()}`); }); page.on("requestfailed", (r) => console.log(`[reqfail] ${r.url()}`)); page.on("pageerror", (e) => console.log(`[pageerror] ${String(e).slice(0, 200)}`)); }
-		await page.waitForSelector("[data-file-path-input]");
-		if (model) { await configureScripted(page, model); await page.reload({ waitUntil: "domcontentloaded" }); await page.waitForSelector("[data-file-path-input]"); }
+		await hydrated(page);
+		if (model) { await configureScripted(page, model); await page.reload({ waitUntil: "domcontentloaded" }); await hydrated(page); }
 		try { return await body({ server, page }); } catch (error) { await shot(page, run, `FAIL-${path.basename(f.home)}`).catch(() => {}); throw error; } finally { await page.close().catch(() => {}); }
 	} finally { await server.stop(); }
+}
+
+/** Server HTML paints the composer and sidebar before React attaches the composer's native listeners (layout effect), so an input
+ *  or click sent then is lost. The sidebar leaves "Loading…" only after a client effect fetched the chat list: React owns the page. */
+async function hydrated(page: Page): Promise<void> {
+	await page.waitForSelector("[data-file-path-input]");
+	await page.waitForFunction(() => !document.body.innerText.includes("Loading…"));
+}
+async function gotoHome(page: Page): Promise<void> {
+	await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+	await hydrated(page);
 }
 
 async function setComposer(page: Page, selector: string, text: string): Promise<void> {
@@ -81,7 +92,7 @@ async function snapshot(page: Page) {
 }
 /** Wait until the home screen has loaded (sessions in the sidebar, review pill, model picker filled); return what the DOM shows. */
 async function loadedState(page: Page): Promise<{ pill: string; titles: string[] }> {
-	await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+	await gotoHome(page);
 	await page.waitForFunction(async () => {
 		const chats: { title: string }[] = (await (await fetch("/api/chats")).json()).chats;
 		const text = document.body.innerText;
@@ -95,15 +106,13 @@ async function loadedState(page: Page): Promise<{ pill: string; titles: string[]
 async function assertScreens(page: Page, nodes: number, due: number): Promise<void> {
 	assert.equal((await api(page, "GET", "/api/graph")).json.nodes.length, nodes);
 	assert.equal((await api(page, "GET", "/api/review")).json.dueCount, due);
-	await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+	await gotoHome(page);
 	await page.waitForSelector('[data-testid="review-pill"]');
 }
 
 /** Answer the open quiz: pick Mercury, set confidence, submit. */
-async function answerQuiz(page: Page, id: string, confidence: number, shotName?: string): Promise<void> {
+async function answerQuiz(page: Page, confidence: number, shotName?: string): Promise<void> {
 	await page.waitForSelector('[data-testid="question-dock"]');
-	await settled(page, id);
-	await sleep(1500);
 	await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('[data-testid="question-dock"] [role="radio"]')].find((el) => el.textContent?.includes("Mercury"))!.click());
 	await page.waitForSelector('[data-testid="question-dock"] [role="radio"][aria-checked="true"]');
 	await setConfidence(page, confidence);
@@ -114,12 +123,11 @@ async function answerQuiz(page: Page, id: string, confidence: number, shotName?:
 	await page.keyboard.press("Enter");
 	await page.waitForSelector('[data-testid="answered-card"]');
 }
-/** The dock shows while the first turn is still closing; an answer sent before the client is ready is dropped. */
+/** Wait until the chat has no turn in flight. */
 const settled = (page: Page, id: string) => page.waitForFunction(async (chat) => !(await (await fetch(`/api/chats/${chat}`)).json()).turnInFlight, {}, id);
 
 async function startSession(page: Page, prompt: string): Promise<string> {
-	await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
-	await page.waitForSelector("[data-file-path-input]");
+	await gotoHome(page);
 	await page.waitForFunction(() => !document.querySelector('[data-testid="setup-cta"]'));
 	await setComposer(page, "[data-file-path-input]", prompt);
 	await page.waitForFunction(() => { const b = document.querySelector<HTMLButtonElement>('button[aria-label="Start session"]'); return b && !b.disabled; });
@@ -148,7 +156,7 @@ async function main(): Promise<void> {
 			});
 			await step("session-quiz-confidence", async () => {
 				const id = await startSession(page, "teach me about planets");
-				await answerQuiz(page, id, 70, "02-quiz-confidence-70");
+				await answerQuiz(page, 70, "02-quiz-confidence-70");
 				await shot(page, run, "03-quiz-answered");
 				const record = await api(page, "GET", `/api/chats/${id}`);
 				assert.match(JSON.stringify(record.json), /"confidence":\s*70/, "confidence 70 not in the stored chat record");
@@ -156,7 +164,7 @@ async function main(): Promise<void> {
 			await step("review-queue", async () => {
 				const before = (await api(page, "GET", "/api/review")).json;
 				assert.ok(before.dueCount >= 2, `dueCount ${before.dueCount}`);
-				await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+				await gotoHome(page);
 				await page.waitForSelector('[data-testid="review-pill"]');
 				const pill = await page.$eval('[data-testid="review-pill"]', (e) => e.textContent);
 				assert.match(pill ?? "", /due/);
@@ -172,7 +180,7 @@ async function main(): Promise<void> {
 				await page.waitForFunction(async (n) => (await (await fetch("/api/review")).json()).dueCount < n, {}, before.dueCount);
 			});
 			await step("seed-panel", async () => {
-				await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+				await gotoHome(page);
 				await page.waitForSelector('[data-testid="seed-panel-toggle"]');
 				await page.click('[data-testid="seed-panel-toggle"]');
 				await page.waitForFunction(() => document.querySelectorAll('[data-testid="seed-row"]').length === 2);
@@ -180,7 +188,7 @@ async function main(): Promise<void> {
 				await page.evaluate(() => (document.querySelectorAll('[data-testid="seed-row"]')[0]!.querySelector('[data-testid="seed-start"]') as HTMLElement).click());
 				await page.waitForFunction(() => /^\/chat\/chat_/.test(location.pathname));
 				await shot(page, run, "08-seed-accepted-session");
-				await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+				await gotoHome(page);
 				await page.waitForSelector('[data-testid="seed-panel-toggle"]');
 				await page.click('[data-testid="seed-panel-toggle"]');
 				await page.waitForFunction(() => document.querySelectorAll('[data-testid="seed-row"]').length === 1);
@@ -193,7 +201,7 @@ async function main(): Promise<void> {
 				assert.equal(d.labels.p_second, "know");
 			});
 			// What the screens show now (sessions made on the scripted model, the practice review, the seed decisions), for the migrate step.
-			await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+			await gotoHome(page);
 			await page.waitForFunction(async () => (await (await fetch("/api/chats")).json()).chats.every((c: { busy: boolean }) => !c.busy));
 			await sleep(1500);
 			fileBefore = { ...(await snapshot(page)), dom: await loadedState(page) };
@@ -229,7 +237,7 @@ async function main(): Promise<void> {
 			await assertScreens(page, 3, 2);
 			await shot(page, run, "11b-doltlite-screens");
 			await step("delete-source-doltlite", async () => {
-				await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+				await gotoHome(page);
 				await page.locator("::-p-text(Chains)").click();
 				await page.locator('input[aria-label="Select source notes"]').click();
 				await page.click('[data-testid="chain-delete"]');
@@ -246,7 +254,7 @@ async function main(): Promise<void> {
 				await shot(page, run, "13-source-deleted");
 			});
 			await step("delete-session-doltlite", async () => {
-				await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+				await gotoHome(page);
 				await page.locator('::-p-text(Kept session)').click({ button: "right" });
 				await page.locator("::-p-text(Delete…)").click();
 				await page.waitForSelector('[data-testid="delete-session-dialog"]');
@@ -301,9 +309,10 @@ async function main(): Promise<void> {
 try { await main(); }
 catch (error) { console.log(`FAIL acceptance: ${String(error).slice(0, 300)}`); results.push({ name: "acceptance", ok: false }); }
 finally {
+	await run.browser?.close().catch(() => {});
 	for (const pid of run.pids) { try { process.kill(-pid, "SIGKILL"); } catch { /* already stopped */ } }
 	console.log(`screenshots: ${run.shots}`);
 	// Throwaway data folders and the browser profile go; the screenshots stay (LH_ACCEPTANCE_KEEP=1 keeps everything).
-	if (!process.env.LH_ACCEPTANCE_KEEP) for (const name of fs.readdirSync(run.dir)) if (name !== "shots") fs.rmSync(path.join(run.dir, name), { recursive: true, force: true });
+	if (!process.env.LH_ACCEPTANCE_KEEP) for (const name of fs.readdirSync(run.dir)) if (name !== "shots") try { fs.rmSync(path.join(run.dir, name), { recursive: true, force: true }); } catch { /* a dying child may still write; leftover tmp is not a test result */ }
 	process.exit(results.length > 0 && results.every((r) => r.ok) ? 0 : 1);
 }
