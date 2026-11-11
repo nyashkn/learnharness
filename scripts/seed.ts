@@ -138,7 +138,8 @@ export async function main(rawArgv: readonly string[], overrides: Partial<Factor
 		if (optOut.length === 0 && !existsSync(file)) f.out(`opt-out: 0 entries, file not found at ${file}`);
 		else {
 			const ignored = optOut.filter(blocksNothing);
-			f.out(`opt-out: ${optOut.length - ignored.length} entries from ${file}`);
+			if (optOut.length > 0 && ignored.length === optOut.length) f.out(`opt-out: 0 usable entries from ${file} (${ignored.length} ignored); rows with no project are blocked`);
+			else f.out(`opt-out: ${optOut.length - ignored.length} entries from ${file}`);
 			// the redacted form only: seed output can land in agent transcripts
 			for (const e of ignored) f.out(`opt-out: ignoring entry ${JSON.stringify(redact(e))}: after redaction it names no project, so it blocks nothing`);
 		}

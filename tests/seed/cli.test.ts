@@ -149,6 +149,29 @@ describe("composeAllowEgress", () => {
 	it("a listed name is refused inside a path", () => {
 		assert.equal(composeAllowEgress(["secretco"])("/work/SecretCo/app"), false);
 	});
+	const swallowedSlug = ["Qz7-x9K", "mP2v-R8tL", "w4Yb-N6s", "Jd3h-u5Fq", "cE1"].join("");
+	const ignoredEntries = ["/Users/alice", "C:\\Users\\bob", "/home/carol", "~", "/", swallowedSlug];
+	it("a non-empty list of only ignored entries refuses null and blank projects, allows named ones (lh-6tw)", () => {
+		assert.ok(ignoredEntries.every(blocksNothing), "precondition: every entry blocks nothing");
+		fc.assert(
+			fc.property(fc.array(fc.constantFrom(...ignoredEntries), { minLength: 1, maxLength: 6 }), fc.constantFrom("", "  ", "/-_"), proj, (list, blank, p) => {
+				const allow = composeAllowEgress(list);
+				assert.equal(allow(null), false);
+				assert.equal(allow(blank), false);
+				assert.equal(allow(p), !/^[/_-]+$/.test(p));
+			}),
+		);
+	});
+	it("a mixed list: null refused, a project refused iff blank or it contains an effective entry (lh-6tw)", () => {
+		const tagged = fc.oneof(entry.map((e) => ({ e, eff: true })), fc.constantFrom(...ignoredEntries).map((e) => ({ e, eff: false })));
+		fc.assert(
+			fc.property(fc.array(tagged, { minLength: 1, maxLength: 6 }).filter((l) => l.some((t) => t.eff)), proj, (tags, p) => {
+				const allow = composeAllowEgress(tags.map((t) => t.e));
+				assert.equal(allow(null), false);
+				assert.equal(allow(p), !(/^[/_-]+$/.test(p) || tags.some((t) => t.eff && p.toLowerCase().includes(t.e))));
+			}),
+		);
+	});
 });
 
 describe("end-to-end egress through scan", () => {
@@ -196,6 +219,14 @@ describe("opt-out entries meet redacted projects (lh-an0)", () => {
 		await r.run("scan");
 		assert.equal(reach(r, "ZQXOPTMARK"), true);
 	});
+	it("a no-project row does not reach the wire when every opt-out entry is ignored, and does without a list (lh-6tw)", async () => {
+		const blocked = rig({ items: [marked(null), ...ALPHA], optOut: ["/Users/alice"] });
+		await blocked.run("scan");
+		assert.equal(reach(blocked, "ZQXOPTMARK"), false);
+		const open = rig({ items: [marked(null), ...ALPHA], optOut: [] });
+		await open.run("scan");
+		assert.equal(reach(open, "ZQXOPTMARK"), true);
+	});
 	it("a blank or whitespace project is refused once a list exists, allowed without one", async () => {
 		for (const project of ["", "   ", "\t", "/"]) {
 			const withList = rig({ items: [marked(project), ...ALPHA], optOut: ["secretco"] });
@@ -206,9 +237,9 @@ describe("opt-out entries meet redacted projects (lh-an0)", () => {
 			assert.equal(reach(without, "ZQXOPTMARK"), true, JSON.stringify(project));
 		}
 	});
-	it("an entry that canonicalises to nothing is dropped, not a block-all", () => {
+	it("an entry that canonicalises to nothing blocks no named project but refuses no-project rows (lh-6tw)", () => {
 		assert.equal(composeAllowEgress(["/Users/alice"])("~/work/app"), true);
-		assert.equal(composeAllowEgress(["/Users/alice"])(null), true);
+		assert.equal(composeAllowEgress(["/Users/alice"])(null), false);
 	});
 	it("blocksNothing agrees with the allow function it feeds (lh-aei)", () => {
 		const word = fc.constantFrom("acme", "client_x", "Pivot", "dockblocks", "a b", "x.y");
@@ -225,12 +256,13 @@ describe("opt-out entries meet redacted projects (lh-an0)", () => {
 			{ numRuns: 500 },
 		);
 	});
-	it("an all-ignored list: home-path entries leave no-project rows allowed, swallowed entries still refuse them (lh-aei; lh-6tw decides)", () => {
+	it("an all-ignored list fails closed: no-project rows refused for home-path and swallowed entries, named projects allowed (lh-6tw)", () => {
 		const swallowed = ["Qz7-x9K", "mP2v-R8tL", "w4Yb-N6s", "Jd3h-u5Fq", "cE1"].join("");
 		assert.ok(blocksNothing("/Users/alice") && blocksNothing(swallowed), "precondition: both entries block nothing, so the CLI counts 0");
-		assert.equal(composeAllowEgress(["/Users/alice"])(null), true);
-		assert.equal(composeAllowEgress([swallowed])(null), false);
-		assert.equal(composeAllowEgress([swallowed])("~/work/app"), true);
+		for (const e of ["/Users/alice", swallowed]) {
+			assert.equal(composeAllowEgress([e])(null), false);
+			assert.equal(composeAllowEgress([e])("~/work/app"), true);
+		}
 	});
 });
 
@@ -871,6 +903,14 @@ describe("scripts/seed main", () => {
 			const file = join(r.dir, "seed-optout.txt");
 			const ignoring = (e: string) => `opt-out: ignoring entry ${JSON.stringify(redact(e))}: after redaction it names no project, so it blocks nothing`;
 			assert.deepEqual(optLines(r.lines), [`opt-out: 1 entries from ${file}`, ignoring("/Users/alice"), ignoring("C:\\Users\\bob"), ignoring(swallowed)]);
+			assert.ok(!r.lines.join("\n").includes(swallowed), "the raw slug is never printed");
+		});
+		it("an all-ignored file says 0 usable entries and that no-project rows are blocked, then names each ignored one (lh-6tw)", async () => {
+			const swallowed = ["aB3xK9", "mQ7zT2pL", "vR8nW4yC", "5hJ6dF1s", "Gq0eU"].join("");
+			const r = await ordering("scan", `/Users/alice\n${swallowed}\n`);
+			const file = join(r.dir, "seed-optout.txt");
+			const ignoring = (e: string) => `opt-out: ignoring entry ${JSON.stringify(redact(e))}: after redaction it names no project, so it blocks nothing`;
+			assert.deepEqual(optLines(r.lines), [`opt-out: 0 usable entries from ${file} (2 ignored); rows with no project are blocked`, ignoring("/Users/alice"), ignoring(swallowed)]);
 			assert.ok(!r.lines.join("\n").includes(swallowed), "the raw slug is never printed");
 		});
 		it("scan with the configured-llm judge prints it before the model is built", async () => {
