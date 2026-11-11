@@ -163,7 +163,17 @@ export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLoc
 			try {
 				if (readText(lockFile) === seen) fs.rmSync(lockFile, { force: true });
 			} finally {
-				if (readText(reclaimFile) === text) fs.rmSync(reclaimFile, { force: true }); // only while it still holds our token
+				try {
+					let ours: boolean;
+					try {
+						ours = readText(reclaimFile) === text;
+					} catch {
+						ours = fs.statSync(reclaimFile, { bigint: true }).ino === fs.statSync(temp, { bigint: true }).ino; // unreadable: still a hard link of our temp?
+					}
+					if (ours) fs.rmSync(reclaimFile, { force: true }); // only while it still holds our token
+				} catch {
+					// cleanup must not hide the error above; a `.reclaim` we cannot prove is ours stays, like any leftover
+				}
 			}
 		}
 		const last = readText(lockFile);

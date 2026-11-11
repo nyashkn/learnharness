@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { after, describe, it, mock } from "node:test";
 
 /** doltlite has an adapter on darwin-arm64 and linux-x64 only (marker.adapterFor); a hardcoded literal, not derived from src. */
@@ -527,5 +528,30 @@ describe("lock release on shutdown", () => {
 		const r = await run(dir, "SIGTERM-with-listener");
 		assert.equal(fs.existsSync(path.join(dir, "storage.json.lock")), false);
 		assert.deepEqual([r.code, r.signal], [0, null]);
+	});
+});
+
+// ─── lh-azj: deleteChat sweeps only under the store lock ────────────────────
+
+describe("deleteChat sweep (lh-azj)", () => {
+	it("an unlink that succeeds without the lock taken (existsSync raced false) does not sweep blobs", async () => {
+		const { createChatStore } = await import("../src/store/chats.ts");
+		const dir = fs.mkdtempSync(path.join(root, "del-sweep-"));
+		const sweeps: unknown[] = [];
+		const blobs = { sweep: (keep: unknown) => (sweeps.push(keep), 0) } as never;
+		const store = createChatStore(path.join(dir, "chats"), { dataDir: dir, blobs });
+		const chat = store.createChat("doomed");
+		marker.releaseStoreLock(dir); // createChat took the lock; drop it so only beforeWrite could retake it
+		const realExists = fs.existsSync;
+		const exists = mock.method(fs, "existsSync", (f: fs.PathLike) => (String(f).endsWith(`${chat.id}.json`) ? false : realExists(f)));
+		syncBuiltinESMExports();
+		try {
+			assert.equal(store.deleteChat(chat.id), true);
+		} finally {
+			exists.mock.restore();
+			syncBuiltinESMExports();
+			marker.releaseStoreLock(dir);
+		}
+		assert.equal(sweeps.length, 0, "the sweep is a write: it must not run without the store lock");
 	});
 });

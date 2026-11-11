@@ -19,3 +19,18 @@ test("a failed open closes the handle before rethrowing (lh-dej)", () => {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("a throwing close() during failed setup does not hide the setup error (lh-azj)", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-nsq-"));
+	const file = path.join(dir, "bad.sqlite");
+	fs.writeFileSync(file, "this is not a database, just text padding ".repeat(40));
+	const close = mock.method(DatabaseSync.prototype, "close", () => {
+		throw new Error("close exploded");
+	});
+	try {
+		assert.throws(() => openNodeSqlite(file), (e: Error) => !/close exploded/.test(e.message));
+	} finally {
+		close.mock.restore();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
