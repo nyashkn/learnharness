@@ -91,20 +91,21 @@ for (const asset of [
 
 // 4) DoltLite (bead D2): exactly THIS platform's addon ships, never the CLI
 //    or another platform's prebuild (~45 MB for five platforms, see
-//    next.config.ts). Missing addon is fatal on macOS arm64 (the shipping
-//    target); win/linux are continue-on-error until D5, so warn only.
+//    next.config.ts). The addon ships on 3 platforms (D5): missing there is
+//    fatal; any other platform only warns.
 const DOLT_DIR = path.join(STANDALONE, "node_modules", "@dolthub", "doltlite");
 const DOLT_PREBUILDS = path.join(DOLT_DIR, "prebuilds");
 const DOLT_PLATFORM = `${process.platform}-${process.arch}`;
+const DOLT_SHIPPING = new Set(["darwin-arm64", "win32-x64", "linux-x64"]);
 const doltMissing = ["index.js", "package.json", path.join("prebuilds", DOLT_PLATFORM, "doltlite.node")].filter((f) => !exists(path.join(DOLT_DIR, f)));
 if (doltMissing.length > 0) {
 	const msg = `@dolthub/doltlite missing from the standalone: ${doltMissing.join(", ")}`;
-	if (DOLT_PLATFORM === "darwin-arm64") {
+	if (DOLT_SHIPPING.has(DOLT_PLATFORM)) {
 		console.error(`[build-server] REFUSING: ${msg}`);
 		console.error("             Check outputFileTracingIncludes in next.config.ts.");
 		process.exit(1);
 	}
-	console.warn(`[build-server] WARNING (${DOLT_PLATFORM}, not required until D5): ${msg}`);
+	console.warn(`[build-server] WARNING (${DOLT_PLATFORM}, not a shipping platform): ${msg}`);
 }
 if (exists(DOLT_PREBUILDS)) {
 	for (const entry of fs.readdirSync(DOLT_PREBUILDS)) {
