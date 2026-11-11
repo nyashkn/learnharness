@@ -41,7 +41,7 @@ export const MIGRATE_TEXT = {
 	usage: `usage: lh migrate --to <file|sqlite|doltlite> [--data-dir <path>] [--allow-empty-source]\n  An empty source refuses to replace a target that holds data unless --allow-empty-source is passed.\n  ${SOURCE_NOTE}`,
 	exportUsage: `usage: lh export [--out <dir>] [--data-dir <path>]\n  ${SOURCE_NOTE}`,
 	noDataDir: (dir: string) => `the data folder ${dir} does not exist`,
-	doltliteTarget: (host: string) => `DoltLite runs only on macOS arm64 in this build (this machine is ${host}), so the app could not open the folder after migrating; nothing was changed. DoltLite as a source (the exit path) works`,
+	doltliteTarget: (host: string) => `DoltLite runs only on macOS arm64 and Linux x64 in this build (this machine is ${host}), so the app could not open the folder after migrating; nothing was changed. DoltLite as a source (the exit path) works`,
 	sameBackend: (backend: string) => `the data folder already uses the ${backend} backend; nothing to migrate`,
 	missingStore: (store: string, backend: string) => `the marker names ${backend} but ${store} is missing; restore it before migrating or exporting`,
 	markerChanged: "the storage marker changed while taking the locks; nothing was changed, run again",
@@ -696,7 +696,7 @@ export function migrateBackend(dataDirIn: string, to: Backend, options: MigrateO
 
 	// a. refusals: before any write or lock
 	if (!(BACKENDS as readonly string[]).includes(to)) throw new MigrateRefusedError(MIGRATE_TEXT.usage);
-	// The app's own platform rule: where it refuses a DoltLite folder (until D5), migrating there would lock the user out.
+	// The app's own platform rule: where it refuses a DoltLite folder (any host but macOS arm64 and Linux x64), migrating there would lock the user out.
 	if (to === "doltlite") {
 		try {
 			adapterFor("doltlite", markerFile(dataDir));

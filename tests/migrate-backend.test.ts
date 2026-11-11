@@ -50,9 +50,9 @@ let clock = Date.UTC(2026, 0, 1);
 /** Every call a new stamp: two fresh runs in one folder never share a backup dir. */
 const now = (): Date => new Date((clock += 1000));
 
-/** A migration INTO DoltLite runs as if on macOS arm64, the one host the app enables DoltLite on; the engine itself runs on every CI OS, and B22 tests the refusal elsewhere. */
+/** A migration INTO DoltLite runs as if on a host the app enables DoltLite on (macOS arm64 by default); the engine itself runs on every CI OS, and B22 tests the refusal elsewhere. */
 let addonLoaded = false;
-function asDoltliteHost<T>(fn: () => T): T {
+function asDoltliteHost<T>(fn: () => T, host: readonly [string, string] = ["darwin", "arm64"]): T {
 	// The addon picks its prebuild from process.platform at first load, so load it under the real host before faking.
 	if (!addonLoaded) {
 		openDoltlite(":memory:").close();
@@ -63,7 +63,7 @@ function asDoltliteHost<T>(fn: () => T): T {
 		Object.defineProperty(process, "platform", { value: platform, configurable: true });
 		Object.defineProperty(process, "arch", { value: arch, configurable: true });
 	};
-	set("darwin", "arm64");
+	set(host[0], host[1]);
 	try {
 		return fn();
 	} finally {
@@ -578,7 +578,7 @@ describe("C crash at every checkpoint, then resume", () => {
 				`import fs from "node:fs";
 const [, , mod, dir, to, ready, loadAddon] = process.argv;
 const { migrateBackend } = await import(mod);
-if (loadAddon === "1") { // see asDoltliteHost: load the addon under the real host, then (target only) fake macOS arm64
+if (loadAddon === "1") { // see asDoltliteHost: load the addon under the real host, then (target only) fake a DoltLite host (macOS arm64)
 	const { openDoltlite } = await import(new URL("./sql/drivers/doltlite.ts", mod).href);
 	openDoltlite(":memory:").close();
 }
@@ -1051,14 +1051,14 @@ describe("B CLI", () => {
 		assert.deepEqual(tree(newer), before);
 		assert.equal(readMarkerBytes(newer), undefined);
 	});
-	test("B22 off macOS arm64 (platform faked) `--to doltlite` refuses with the platform named and changes nothing; the exit path still works", () => {
+	test("B22 off the DoltLite hosts (platform faked) `--to doltlite` refuses with the platform named and changes nothing; the exit path still works", () => {
 		const real = { platform: process.platform, arch: process.arch };
 		const fake = (platform: string, arch: string) => {
 			Object.defineProperty(process, "platform", { value: platform, configurable: true });
 			Object.defineProperty(process, "arch", { value: arch, configurable: true });
 		};
 		try {
-			for (const [platform, arch] of [["linux", "x64"], ["linux", "arm64"], ["win32", "x64"], ["darwin", "x64"]] as const) {
+			for (const [platform, arch] of [["win32", "x64"], ["linux", "arm64"], ["win32", "arm64"], ["darwin", "x64"]] as const) {
 				fake(platform, arch);
 				for (const from of ["file", "sqlite"] as const) {
 					const dir = mk();
@@ -1068,7 +1068,7 @@ describe("B CLI", () => {
 					const marker = readMarkerBytes(dir);
 					const r = runRaw(["migrate", "--to", "doltlite", "--data-dir", dir]);
 					assert.equal(r.code, 1, `${platform}-${arch} from ${from}`);
-					assert.match(r.err[0] as string, new RegExp(`^lh migrate: DoltLite runs only on macOS arm64 .*this machine is ${platform}-${arch}.*nothing was changed`));
+					assert.match(r.err[0] as string, new RegExp(`^lh migrate: DoltLite runs only on macOS arm64 and Linux x64 .*this machine is ${platform}-${arch}.*nothing was changed`));
 					assert.deepEqual(tree(dir), before, "no graph.doltlite, backup, journal or lock");
 					assert.equal(readMarkerBytes(dir), marker);
 				}
@@ -1080,6 +1080,14 @@ describe("B CLI", () => {
 			}
 		} finally {
 			fake(real.platform, real.arch);
+		}
+	});
+	test("B22b linux-x64 (platform faked) is not refused: `--to doltlite` migrates", () => {
+		for (const host of [["linux", "x64"]] as const) {
+			const dir = mk();
+			writeFolder(dir, DIRTY);
+			asDoltliteHost(() => migrateBackend(dir, "doltlite", { now }), host);
+			assert.equal(JSON.parse(readMarkerBytes(dir) as string).backend, "doltlite", `${host[0]}-${host[1]}`);
 		}
 	});
 	test("B14 DoltLite as a source needs no option: the exit path (--to file and --to sqlite) works through the CLI", () => {

@@ -744,8 +744,8 @@ export function registerContract(f: AdapterFactory): void {
 		});
 
 		T("N1", "golden fixtures (item 1): the real graph ledgers load through the port, read back line-for-line, and fold to the independent oracle", (b) => {
-			const dir = new URL("../fixtures/golden-data/graph/", import.meta.url).pathname;
-			const lines = (n: string) => fs.readFileSync(`${dir}${n}.jsonl`, "utf8").split("\n").filter((l) => l.trim() !== "");
+			const dir = new URL("../fixtures/golden-data/graph/", import.meta.url); // a URL, not .pathname (wrong on Windows)
+			const lines = (n: string) => fs.readFileSync(new URL(`${n}.jsonl`, dir), "utf8").split(/\r?\n/).filter((l) => l.trim() !== "");
 			const parse = <T>(n: string) => lines(n).map((l) => JSON.parse(l) as T);
 			const [nodes, chains, cov, cps] = [parse<GraphNode>("nodes"), parse<GraphChain>("chains"), parse<CoverageEntry>("coverage"), parse<SessionCheckpoint>("sessions")];
 			nodes.forEach((x) => b.graph.appendNode(x)); chains.forEach((x) => b.graph.appendChain(x)); cov.forEach((x) => b.graph.appendCoverage(x)); cps.forEach((x) => b.graph.appendCheckpoint(x));

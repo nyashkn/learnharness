@@ -110,10 +110,11 @@ jobs:
         env:
           NODE_ENV: test
           ELECTRON_RUN_AS_NODE: "1"
-      # The DoltLite app path (marker, open.ts promotion, both locks) runs only where the
-      # app enables DoltLite, so the Ubuntu ci job cannot cover it. Required on mac-arm64.
+      # The DoltLite app path (marker, open.ts promotion, both locks) runs on every host
+      # the app enables DoltLite on: darwin-arm64 and linux-x64 (also the cf-ci `just ci`). Windows waits on
+      # dolthub/doltlite-node#13 (lh-8jh): close() keeps the files open, so rm/rename after close fail there.
       - name: DoltLite app-path contract and backend tests
-        if: matrix.platform == 'mac-arm64'
+        if: matrix.platform != 'windows-x64'
         env:
           NODE_ENV: test
         run: |
