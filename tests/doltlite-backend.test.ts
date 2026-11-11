@@ -3,7 +3,7 @@
  * Open never writes (a writable DoltLite open appends bytes even with no commit); a newer store is refused before ANY writable open;
  * the first write promotes the read-only handle, recovers a dirty working set as its own commit, and seals one commit per transact.
  * Expectations come from the folder bytes, `dolt_log` read through a separate read-only connection, and values written here.
- * Everything except the `adapterFor` host table runs on the three hosts that have an adapter (darwin-arm64, linux-x64, win32-x64).
+ * Everything except the `adapterFor` host table runs on the two hosts that have an adapter (darwin-arm64, linux-x64).
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -31,7 +31,7 @@ const { StorageVersionError } = await import("../src/store/graph-format.ts");
 /** Every native open this process makes, recorded before the driver first loads the addon (the byte growth of a stray writable open is not reliable evidence, so the open mode is). */
 const opens: { target: string; readOnly: boolean }[] = [];
 // A hardcoded literal on purpose: the expected hosts must not be derived from the code under test.
-const DOLTLITE_HOST = ["darwin-arm64", "linux-x64", "win32-x64"].includes(`${process.platform}-${process.arch}`);
+const DOLTLITE_HOST = ["darwin-arm64", "linux-x64"].includes(`${process.platform}-${process.arch}`);
 if (DOLTLITE_HOST) {
 	const mod = createRequire(import.meta.url)("@dolthub/doltlite") as { DatabaseSync: new (target: string, options?: { readOnly?: boolean }) => unknown };
 	const Original = mod.DatabaseSync;
@@ -41,15 +41,15 @@ if (DOLTLITE_HOST) {
 }
 const writableSince = (mark: number): number => opens.slice(mark).filter((o) => !o.readOnly).length;
 
-describe("adapterFor: doltlite runs on darwin-arm64, linux-x64 and win32-x64 only", () => {
+describe("adapterFor: doltlite runs on darwin-arm64 and linux-x64 only", () => {
 	const file = "/x/storage.json";
-	it("linux/arm64, darwin/x64, win32/arm64 and other hosts are refused with NoAdapterError naming the backend", () => {
-		for (const host of [{ platform: "linux", arch: "arm64" }, { platform: "darwin", arch: "x64" }, { platform: "win32", arch: "arm64" }, { platform: "win32", arch: "ia32" }, { platform: "freebsd", arch: "x64" }]) {
+	it("win32/x64 (held for doltlite-node#13), linux/arm64, darwin/x64, win32/arm64 and other hosts are refused with NoAdapterError naming the backend", () => {
+		for (const host of [{ platform: "win32", arch: "x64" }, { platform: "linux", arch: "arm64" }, { platform: "darwin", arch: "x64" }, { platform: "win32", arch: "arm64" }, { platform: "win32", arch: "ia32" }, { platform: "freebsd", arch: "x64" }]) {
 			assert.throws(() => marker.adapterFor("doltlite", file, host), (e: unknown) => e instanceof marker.NoAdapterError && e.backend === "doltlite" && e.file === file, `${host.platform}/${host.arch}`);
 		}
 	});
-	it("darwin/arm64, linux/x64 and win32/x64 are allowed", () => {
-		for (const host of [{ platform: "darwin", arch: "arm64" }, { platform: "linux", arch: "x64" }, { platform: "win32", arch: "x64" }]) {
+	it("darwin/arm64 and linux/x64 are allowed", () => {
+		for (const host of [{ platform: "darwin", arch: "arm64" }, { platform: "linux", arch: "x64" }]) {
 			assert.equal(marker.adapterFor("doltlite", file, host), "doltlite", `${host.platform}/${host.arch}`);
 		}
 	});
@@ -315,7 +315,7 @@ describe("doltlite backend", { skip: !DOLTLITE_HOST }, () => {
 	it("a store lock held by another process: the write is refused with StoreLockedError naming the holder, and no store byte changes", async () => {
 		for (const which of ["graph.doltlite", "storage.json"] as const) {
 			const dir = cleanStore();
-			const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" }) // not `sleep`: no such binary on Windows outside Git Bash;
+			const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" }); // not `sleep`: no such binary on Windows outside Git Bash
 			try {
 				const theirs = acquireStoreLock(path.join(dir, which), { pid: holder.pid });
 				const store = tree(dir)["graph.doltlite"], log = disk(dir);

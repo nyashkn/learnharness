@@ -1058,7 +1058,7 @@ describe("B CLI", () => {
 			Object.defineProperty(process, "arch", { value: arch, configurable: true });
 		};
 		try {
-			for (const [platform, arch] of [["linux", "arm64"], ["win32", "arm64"], ["darwin", "x64"]] as const) {
+			for (const [platform, arch] of [["win32", "x64"], ["linux", "arm64"], ["win32", "arm64"], ["darwin", "x64"]] as const) {
 				fake(platform, arch);
 				for (const from of ["file", "sqlite"] as const) {
 					const dir = mk();
@@ -1068,7 +1068,7 @@ describe("B CLI", () => {
 					const marker = readMarkerBytes(dir);
 					const r = runRaw(["migrate", "--to", "doltlite", "--data-dir", dir]);
 					assert.equal(r.code, 1, `${platform}-${arch} from ${from}`);
-					assert.match(r.err[0] as string, new RegExp(`^lh migrate: DoltLite runs only on macOS arm64, Linux x64 and Windows x64 .*this machine is ${platform}-${arch}.*nothing was changed`));
+					assert.match(r.err[0] as string, new RegExp(`^lh migrate: DoltLite runs only on macOS arm64 and Linux x64 .*this machine is ${platform}-${arch}.*nothing was changed`));
 					assert.deepEqual(tree(dir), before, "no graph.doltlite, backup, journal or lock");
 					assert.equal(readMarkerBytes(dir), marker);
 				}
@@ -1082,8 +1082,8 @@ describe("B CLI", () => {
 			fake(real.platform, real.arch);
 		}
 	});
-	test("B22b linux-x64 and win32-x64 (platform faked) are not refused: `--to doltlite` migrates", () => {
-		for (const host of [["linux", "x64"], ["win32", "x64"]] as const) {
+	test("B22b linux-x64 (platform faked) is not refused: `--to doltlite` migrates", () => {
+		for (const host of [["linux", "x64"]] as const) {
 			const dir = mk();
 			writeFolder(dir, DIRTY);
 			asDoltliteHost(() => migrateBackend(dir, "doltlite", { now }), host);

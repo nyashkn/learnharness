@@ -10,8 +10,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { after, describe, it, mock } from "node:test";
 
-/** doltlite has an adapter on darwin-arm64, linux-x64 and win32-x64 only (marker.adapterFor); a hardcoded literal, not derived from src. */
-const DOLTLITE_HOST = ["darwin-arm64", "linux-x64", "win32-x64"].includes(`${process.platform}-${process.arch}`);
+/** doltlite has an adapter on darwin-arm64 and linux-x64 only (marker.adapterFor); a hardcoded literal, not derived from src. */
+const DOLTLITE_HOST = ["darwin-arm64", "linux-x64"].includes(`${process.platform}-${process.arch}`);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-marker-"));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 // The singletons (config-built) live in their own throwaway folder, never the repo's data/.
