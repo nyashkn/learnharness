@@ -43,10 +43,11 @@ export function createAllowEgress(optOut: readonly string[]): AllowEgress {
 /**
  * Default-on egress holds with an empty opt-out list. With any entry, a project with no usable provenance is refused:
  * Signet entities, cwd-less rows and slugs that redaction swallowed cannot be proven not to be opted-out work.
+ * Any entry counts, even one that blocks nothing (home path, swallowed slug): fail closed (lh-6tw).
  */
 export function composeAllowEgress(optOut: readonly string[]): AllowEgress {
 	const inner = createAllowEgress(optOut);
-	const listed = optOut.some((entry) => canonProject(entry) !== "");
+	const listed = optOut.some((entry) => entry.trim() !== "");
 	return (project) => (matchableProject(project) === null ? !listed : inner(project));
 }
 
