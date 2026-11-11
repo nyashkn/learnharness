@@ -28,7 +28,11 @@ export function openNodeSqlite(file: string, options: NodeSqliteOptions = {}): S
 		db.exec("PRAGMA foreign_keys = ON;");
 		engineVersion = (db.prepare("SELECT sqlite_version() AS v").get() as { v: string }).v;
 	} catch (error) {
-		db.close(); // do not leak the handle (and its file lock) when setup fails
+		try {
+			db.close(); // do not leak the handle (and its file lock) when setup fails
+		} catch {
+			// the setup error is the one the caller needs
+		}
 		throw error;
 	}
 

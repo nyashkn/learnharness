@@ -454,3 +454,59 @@ describe("store lock (CB6)", () => {
 		});
 	});
 });
+
+test("a non-ENOENT read failure in the reclaim cleanup does not hide the original error and leaves no .reclaim (lh-azj)", () => {
+	const f = store();
+	acquireStoreLock(f, { pid: 4242, host: "h1" }); // crashed holder
+	const lockFile = lockFileFor(f);
+	const real = fs.readFileSync;
+	const realRm = fs.rmSync;
+	let lockReads = 0;
+	const boom = Object.assign(new Error("EIO cleanup"), { code: "EIO" });
+	const rm = mock.method(fs, "rmSync", (p: fs.PathLike, o?: fs.RmOptions) => {
+		if (String(p) === lockFile) throw Object.assign(new Error("original rm failure"), { code: "EBUSY" });
+		return realRm(p, o);
+	});
+	const rd = mock.method(fs, "readFileSync", ((p: fs.PathOrFileDescriptor, o?: never) => {
+		if (String(p) === lockFile && ++lockReads === 2) return real(p, o) as never; // the `=== seen` check passes, so rmSync runs
+		if (String(p) === `${lockFile}.reclaim` && lockReads >= 2) throw boom; // the cleanup read in `finally`
+		return real(p, o);
+	}) as typeof fs.readFileSync);
+	try {
+		assert.throws(() => acquireStoreLock(f, { pid: 99, host: "h1", isAlive: (pid) => pid !== 4242 }), /original rm failure/);
+	} finally {
+		rd.mock.restore();
+		rm.mock.restore();
+	}
+	assert.equal(fs.existsSync(`${lockFile}.reclaim`), false, "our .reclaim must not be left behind");
+});
+
+test("an unreadable .reclaim that is no longer ours stays, and the original error still wins (lh-azj)", () => {
+	const f = store();
+	acquireStoreLock(f, { pid: 4242, host: "h1" }); // crashed holder
+	const lockFile = lockFileFor(f);
+	const reclaim = `${lockFile}.reclaim`;
+	const real = fs.readFileSync;
+	const realRm = fs.rmSync;
+	let replaced = false;
+	const rm = mock.method(fs, "rmSync", (p: fs.PathLike, o?: fs.RmOptions) => {
+		if (String(p) === lockFile) {
+			realRm(reclaim); // ours is gone; another process links its own
+			fs.writeFileSync(reclaim, "someone else's token");
+			replaced = true;
+			throw Object.assign(new Error("original rm failure"), { code: "EBUSY" });
+		}
+		return realRm(p, o);
+	});
+	const rd = mock.method(fs, "readFileSync", ((p: fs.PathOrFileDescriptor, o?: never) => {
+		if (String(p) === reclaim && replaced) throw Object.assign(new Error("EIO cleanup"), { code: "EIO" });
+		return real(p, o);
+	}) as typeof fs.readFileSync);
+	try {
+		assert.throws(() => acquireStoreLock(f, { pid: 99, host: "h1", isAlive: (pid) => pid !== 4242 }), /original rm failure/);
+	} finally {
+		rd.mock.restore();
+		rm.mock.restore();
+	}
+	assert.equal(fs.readFileSync(reclaim, "utf8"), "someone else's token", "a .reclaim we cannot prove is ours is never removed");
+});

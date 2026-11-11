@@ -119,11 +119,12 @@ describe("desktop standalone payload", () => {
 		});
 	});
 
-	it("requires the doltlite addon on darwin-arm64 and only warns elsewhere", () => {
+	it("requires the doltlite addon on the three shipping platforms and only warns elsewhere", () => {
 		withPayload(({ root, run }) => {
 			fs.rmSync(path.join(root, DOLT_ADDON));
 			const result = run();
-			if (PLATFORM === "darwin-arm64") {
+			const shipping = new Set(["darwin-arm64", "win32-x64", "linux-x64"]);
+			if (shipping.has(PLATFORM)) {
 				assert.equal(result.status, 1);
 				assert.match(String(result.stderr), /REFUSING.*doltlite missing/);
 			} else {

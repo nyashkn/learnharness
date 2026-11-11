@@ -19,7 +19,7 @@ import type { LhMessage } from "../core/native-messages.ts";
 import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts";
 import { phaseAt3Lh } from "../core/phases.ts";
 import { removeLeftoverTemps, writeFileAtomicSync } from "./atomic-write.ts";
-import { beforeWrite } from "./marker.ts";
+import { beforeWrite, holdsStoreLock } from "./marker.ts";
 import { createBlobStore, type BlobStore } from "./cas/blob-store.ts";
 
 /** On disk an image snapshot is `{ mimeType, width, height }`; its bytes live in blobs.sqlite under the key. A legacy record still holds inline `data`. */
@@ -264,7 +264,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 		} catch {
 			return false; // never existed, already deleted, or unreadable — same answer
 		}
-		sweepBlobs();
+		if (holdsStoreLock(dataDir)) sweepBlobs(); // the sweep is a write: only under the lock
 		emit("chats-changed", {}); // only a real removal — the present-entry law
 		return true;
 	}
