@@ -37,6 +37,11 @@ remote-ci:
 app:
     bash scripts/install-app.sh
 
+# Drives the fork's screens headless (puppeteer, throwaway data, scripted model, no keys); one PASS/FAIL line per step, screenshots under $TMPDIR.
+acceptance:
+    @node -v | grep -qE '^v26\.' || { echo "refusing: acceptance needs Node 26, found $(node -v 2>/dev/null || echo none)." >&2; exit 1; }
+    pnpm exec tsx scripts/acceptance/run.ts
+
 test-one file:
     NODE_ENV=test pnpm exec tsx --import ./tests/isolate-data-dir.ts --test {{file}}
 
