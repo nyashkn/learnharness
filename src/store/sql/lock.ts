@@ -20,15 +20,21 @@ export interface LockInfo {
 	startedAt: string;
 }
 
+/** A `.reclaim` younger than this whose pid is alive is a reclaim in progress, not a leftover. */
+const RECLAIM_YOUNG_MS = 30_000;
+
 export class StoreLockedError extends Error {
 	constructor(
 		readonly file: string,
 		readonly holder: LockInfo | null,
 		readonly reclaimFile?: string,
+		reclaimActive = false,
 	) {
 		super(
 			reclaimFile
-				? `${reclaimFile} exists: another process is reclaiming the lock, or a reclaim was interrupted${holder ? ` (pid ${holder.pid})` : ""}; delete it if no other process is using the store`
+				? reclaimActive
+					? `${reclaimFile} exists: another process (pid ${holder?.pid}) is reclaiming the lock; try again in a moment`
+					: `${reclaimFile} exists: another process is reclaiming the lock, or a reclaim was interrupted${holder ? ` (pid ${holder.pid})` : ""}; delete it if no other process is using the store`
 				: holder
 				? `${file} is held by pid ${holder.pid} on ${holder.host} (since ${holder.startedAt})`
 				: `${file} has an unreadable lock file; delete it if no other process is using the store`,
@@ -145,12 +151,19 @@ export function acquireStoreLock(storeFile: string, env: LockEnv = {}): StoreLoc
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 				const other = readText(reclaimFile);
-				throw new StoreLockedError(storeFile, other === undefined ? null : parseLock(other), reclaimFile);
+				const otherInfo = other === undefined ? null : parseLock(other);
+				let young = false;
+				try {
+					young = Date.now() - fs.statSync(reclaimFile).mtimeMs < RECLAIM_YOUNG_MS;
+				} catch {
+					// gone since the read: not active
+				}
+				throw new StoreLockedError(storeFile, otherInfo, reclaimFile, young && otherInfo !== null && otherInfo.host === host && isAlive(otherInfo.pid));
 			}
 			try {
 				if (readText(lockFile) === seen) fs.rmSync(lockFile, { force: true });
 			} finally {
-				fs.rmSync(reclaimFile, { force: true }); // ours: only its creator ever removes it
+				if (readText(reclaimFile) === text) fs.rmSync(reclaimFile, { force: true }); // only while it still holds our token
 			}
 		}
 		const last = readText(lockFile);

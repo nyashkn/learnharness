@@ -11,8 +11,10 @@
  * DoltLite (`graph.doltlite`, the same shape with the differences below):
  *  - A plain open is a READ-ONLY handle (a writable open appends bytes even with no commit). A short-lived read-only probe runs `assertStoreNotNewer`
  *    and `needsMigration` first; an upgrade takes `beforeWrite` and opens writable. A dirty working set is not recovered at open: reads see it.
- *  - The first outermost write promotes the handle: after `beforeWrite` returns the store lock, a read-only probe refuses a newer store, then the
- *    handle is reopened writable with that lock and `openGraphStore` recovers the dirty set (commit `recovered at open`) before the write's own commit.
+ *  - The first outermost write promotes the handle: after `beforeWrite` returns the store lock, the old handle (if any) is closed, a read-only probe
+ *    refuses a newer store, then the file is reopened writable with that lock and `openGraphStore` recovers the dirty set (commit `recovered at open`) before the write's own commit.
+ * This process never opens a read-only connection on a file it holds a writable handle on (each one would keep an fd until the writer closes, lh-ax3):
+ * a known handle is reused as is, and promote closes the old handle before it probes.
  * Handles live on globalThis, keyed by absolute file path, because Next dev loads several module instances in one process.
  */
 import fs from "node:fs";
@@ -163,9 +165,9 @@ export function createSqlGraphStores(
 		if (!lock) throw new Error(`${file}: beforeWrite returned no store lock for a doltlite write`);
 		const known = handles().get(file);
 		if (known?.lock?.held()) return;
-		probeDoltlite();
-		known?.db.close();
+		known?.db.close(); // close the old handle BEFORE probing: a read-only connection opened while this process holds a writer keeps an fd until the writer closes (lh-ax3)
 		handles().delete(file);
+		probeDoltlite();
 		openWith(openDoltlite(file, { lock }), lock);
 	}
 

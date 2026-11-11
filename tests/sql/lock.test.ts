@@ -325,13 +325,62 @@ describe("store lock (CB6)", () => {
 				const f = store();
 				leftover(f, content);
 				assert.throws(
-					() => acquireStoreLock(f, { pid: 99, host: "h1", isAlive: aliveExcept7 }),
+					() => acquireStoreLock(f, { pid: 99, host: "h1", isAlive: (pid) => pid !== 7 && pid !== 5 }),
 					(e) => e instanceof StoreLockedError && e.message.includes(`${lockFileFor(f)}.reclaim`) && /delete it if no other process/.test(e.message) && pidText.test(e.message),
 				);
 				assert.equal(fs.readFileSync(`${lockFileFor(f)}.reclaim`, "utf8"), content);
 				assert.equal(JSON.parse(fs.readFileSync(lockFileFor(f), "utf8")).pid, 7, "the stale lock is untouched");
 			});
 		}
+
+		test("property: the reclaimer's cleanup never removes a .reclaim that no longer holds its own text (lh-dej)", () => {
+			fc.assert(
+				fc.property(fc.string({ maxLength: 40 }), (foreign) => {
+					const f = store();
+					acquireStoreLock(f, { pid: 7, host: "h1" });
+					const reclaim = `${lockFileFor(f)}.reclaim`;
+					const orig = fs.rmSync;
+					// mid-reclaim, someone else's reclaim file replaces ours (hand deletion + a new reclaimer)
+					const m = mock.method(fs as any, "rmSync", function (this: unknown, p: unknown, ...r: unknown[]) {
+						if (p === lockFileFor(f) && fs.existsSync(reclaim)) fs.writeFileSync(reclaim, foreign);
+						return (orig as any).call(this, p, ...r);
+					});
+					try {
+						acquireStoreLock(f, { pid: 99, host: "h1", isAlive: aliveExcept7 }).release();
+					} finally {
+						m.mock.restore();
+					}
+					const kept = fs.readFileSync(reclaim, "utf8");
+					fs.rmSync(reclaim);
+					return kept === foreign;
+				}),
+				{ numRuns: 20 },
+			);
+		});
+
+		test("property: a collision with a .reclaim says 'delete it' only when it is stale (dead pid or old), else 'try again' (lh-dej)", () => {
+			fc.assert(
+				fc.property(fc.boolean(), fc.integer({ min: 0, max: 600 }), (alive, ageSec) => {
+					const f = store();
+					acquireStoreLock(f, { pid: 7, host: "h1" });
+					const reclaim = `${lockFileFor(f)}.reclaim`;
+					fs.writeFileSync(reclaim, JSON.stringify({ pid: 5, host: "h1", startedAt: "2026-01-01T00:00:00Z" }));
+					const t = (Date.now() - ageSec * 1000) / 1000;
+					fs.utimesSync(reclaim, t, t);
+					let msg = "";
+					try {
+						acquireStoreLock(f, { pid: 99, host: "h1", isAlive: (pid) => (pid === 5 ? alive : pid !== 7) });
+					} catch (e) {
+						msg = (e as Error).message;
+					}
+					// 30 s is the young/stale boundary; stay clear of it
+					if (ageSec > 25 && ageSec < 35) return true;
+					const young = alive && ageSec <= 25;
+					return young ? /try again/.test(msg) && !/delete it/.test(msg) : /delete it/.test(msg);
+				}),
+				{ numRuns: 40 },
+			);
+		});
 
 		test("a normal stale reclaim works and leaves no .reclaim, .tomb or .tmp", () => {
 			const f = store();

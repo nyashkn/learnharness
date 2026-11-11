@@ -425,9 +425,12 @@ function build(c: Ctx): GraphStore & { corruptLines(): number } {
  *  exactly what appendLine would have written. */
 function rewriteFile(c: Ctx, file: string, records: unknown[]): void {
 	beforeWrite(c.dataDir);
-	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const body = records.map((record) => JSON.stringify(record)).join("\n") + (records.length > 0 ? "\n" : "");
-	if (!sameOnDisk(file, body)) stamped(c, file, () => writeFileAtomicSync(file, body)); // a no-op rewrite must not move the revision
+	// A no-op rewrite must not move the revision (rule 9), and an absent ledger reads as empty, so an empty rewrite of it writes nothing.
+	if ((body !== "" || fs.existsSync(file)) && !sameOnDisk(file, body)) {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		stamped(c, file, () => writeFileAtomicSync(file, body));
+	}
 	removeLeftoverTemps(file); // crash leftovers would still hold the purged records
 }
 

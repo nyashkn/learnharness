@@ -99,10 +99,18 @@ export function deleteChatTraces(graphStore: GraphStore, chatId: string, mode: C
 /** The same provenance rules for a selected batch, with one ledger rewrite
  * rather than reparsing/rewriting the whole graph once per imported file. */
 export function deleteSourcesTraces(graphStore: GraphStore, sourceIds: ReadonlySet<string>, mode: ChatDeleteMode): ChatDeletionStats {
-	return graphStore.transact(`delete sources:${sourceIds.size}`, () => deleteSourcesTracesInTransaction(graphStore, sourceIds, mode));
+	const done = graphStore.transact(`delete sources:${sourceIds.size}`, () => deleteSourcesTracesInTransaction(graphStore, sourceIds, mode));
+	if (done.positions) graphStore.writePositions(done.positions); // outside the transaction (storage rule 13): after the commit, never on a throw
+	return done.stats;
 }
 
-function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: ReadonlySet<string>, mode: ChatDeleteMode): ChatDeletionStats {
+/** `positions` = the pruned map to write once the transaction has committed (absent: nothing to prune). */
+interface Deleted<S> {
+	stats: S;
+	positions?: Record<string, { x: number; y: number }>;
+}
+
+function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: ReadonlySet<string>, mode: ChatDeleteMode): Deleted<ChatDeletionStats> {
 	if (mode !== "preserve-graph" && mode !== "delete-nodes") {
 		throw new Error(`Unknown deletion mode: ${mode as string}`);
 	}
@@ -110,7 +118,7 @@ function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: Rea
 	// The bookkeeping rows die in BOTH modes — coverage and checkpoints
 	// are extraction state, not graph content (owner semantics: even
 	// preserve-graph deletes "the chat's coverage rows").
-	if (sourceIds.size === 0) return { ...EMPTY_STATS };
+	if (sourceIds.size === 0) return { stats: { ...EMPTY_STATS } };
 	const coverage = graphStore.readCoverage().filter((row) => !sourceIds.has(row.chatId));
 	const checkpoints = graphStore.readCheckpoints().filter((row) => !sourceIds.has(row.chatId));
 	const stats: ChatDeletionStats = {
@@ -123,7 +131,7 @@ function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: Rea
 		if (stats.coverageRemoved > 0 || stats.checkpointsRemoved > 0) {
 			graphStore.rewriteLedgers({ coverage, checkpoints });
 		}
-		return stats;
+		return { stats };
 	}
 
 	// ── delete-nodes: the full purge ──────────────────────────────────────
@@ -141,7 +149,7 @@ function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: Rea
 		if (stats.coverageRemoved > 0 || stats.checkpointsRemoved > 0) {
 			graphStore.rewriteLedgers({ coverage, checkpoints });
 		}
-		return stats;
+		return { stats };
 	}
 
 	// 1. Survival: a node lives iff a reference from ANY surviving source
@@ -238,11 +246,7 @@ function deleteSourcesTracesInTransaction(graphStore: GraphStore, sourceIds: Rea
 			([id]) => (live.has(id) || !knownNodeIds.has(id)) && !deadChainIds.has(id),
 		),
 	);
-	if (Object.keys(prunedPositions).length !== Object.keys(positions).length) {
-		graphStore.writePositions(prunedPositions);
-	}
-
-	return stats;
+	return { stats, ...(Object.keys(prunedPositions).length !== Object.keys(positions).length ? { positions: prunedPositions } : {}) };
 }
 
 // ─── single-node deletion (node interlude, owner-locked full-death) ───────────
@@ -298,10 +302,12 @@ function chainLinesOf(graphStore: GraphStore, chainId: string): GraphChain[] {
  * mtimes — the version stamp moves only when something really did).
  */
 export function deleteNodeTraces(graphStore: GraphStore, nodeId: string): NodeDeletionStats | null {
-	return graphStore.transact(`delete node:${nodeId}`, () => deleteNodeTracesInTransaction(graphStore, nodeId));
+	const done = graphStore.transact(`delete node:${nodeId}`, () => deleteNodeTracesInTransaction(graphStore, nodeId));
+	if (done?.positions) graphStore.writePositions(done.positions); // outside the transaction (storage rule 13)
+	return done && done.stats;
 }
 
-function deleteNodeTracesInTransaction(graphStore: GraphStore, nodeId: string): NodeDeletionStats | null {
+function deleteNodeTracesInTransaction(graphStore: GraphStore, nodeId: string): Deleted<NodeDeletionStats> | null {
 	const chainLines = graphStore.readChains();
 
 	// The argument branch: an arg_ id names a CHAIN, not a proposition —
@@ -312,11 +318,8 @@ function deleteNodeTracesInTransaction(graphStore: GraphStore, nodeId: string): 
 		if (outChains.length === chainLines.length) return null; // unknown argument
 		graphStore.rewriteLedgers({ chains: outChains });
 		const positions = graphStore.readPositions();
-		if (positions[nodeId] !== undefined) {
-			const { [nodeId]: _dead, ...rest } = positions;
-			graphStore.writePositions(rest);
-		}
-		return { chainsRemoved: chainLines.length - outChains.length };
+		const { [nodeId]: dead, ...rest } = positions;
+		return { stats: { chainsRemoved: chainLines.length - outChains.length }, ...(dead !== undefined ? { positions: rest } : {}) };
 	}
 
 	const nodeLines = nodeLinesOf(graphStore, nodeId);
@@ -340,11 +343,8 @@ function deleteNodeTracesInTransaction(graphStore: GraphStore, nodeId: string): 
 	const prunedPositions = Object.fromEntries(
 		Object.entries(positions).filter(([id]) => id !== nodeId && !deadChainIds.has(id)),
 	);
-	if (Object.keys(prunedPositions).length !== Object.keys(positions).length) {
-		graphStore.writePositions(prunedPositions);
-	}
-
 	return {
-		chainsRemoved: chainLines.length - outChains.length,
+		stats: { chainsRemoved: chainLines.length - outChains.length },
+		...(Object.keys(prunedPositions).length !== Object.keys(positions).length ? { positions: prunedPositions } : {}),
 	};
 }

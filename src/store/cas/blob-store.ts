@@ -24,6 +24,8 @@ export interface BlobStore {
 	put(bytes: Uint8Array): BlobInfo;
 	/** The bytes, or undefined when absent. A missing blobs.sqlite reads as absent and is not created. */
 	get(hash: string): (BlobInfo & { bytes: Uint8Array }) | undefined;
+	/** Delete every row whose hash is not in `keep`, in one transaction; returns rows deleted. A missing blobs.sqlite is a no-op and is not created. */
+	sweep(keep: ReadonlySet<string>): number;
 }
 
 const startsWith = (b: Uint8Array, magic: readonly number[], at = 0) => magic.every((m, i) => b[at + i] === m);
@@ -71,6 +73,17 @@ export function createBlobStore(file: string, opts: BlobStoreOptions = {}): Blob
 			if (!/^[a-f0-9]{64}$/.test(hash) || !fs.existsSync(file)) return undefined;
 			const row = withDb((db) => db.get<{ byte_len: number; content_type: string; bytes: Uint8Array }>("SELECT byte_len, content_type, bytes FROM cas_objects WHERE hash = ?", hash));
 			return row && { hash, contentType: row.content_type, byteLen: Number(row.byte_len), bytes: row.bytes };
+		},
+		sweep(keep) {
+			if (!fs.existsSync(file)) return 0;
+			// shortcut: hashes are listed then deleted one by one (no giant NOT IN), upgrade: a temp table when the CAS holds millions of rows.
+			return withDb((db) =>
+				db.transaction(() => {
+					let n = 0;
+					for (const { hash } of db.all<{ hash: string }>("SELECT hash FROM cas_objects")) if (!keep.has(hash)) n += db.run("DELETE FROM cas_objects WHERE hash = ?", hash).changes;
+					return n;
+				}),
+			);
 		},
 	};
 }

@@ -92,3 +92,28 @@ test("newer format: every mutator refuses with StorageVersionError and writes no
 	assert.ok(!fs.existsSync(LEDGER_FILES.nodes));
 	fs.rmSync(GRAPH_FORMAT_FILE);
 });
+
+test("revision (rule 9): an empty rewrite of an ABSENT ledger creates nothing and does not move it", () => {
+	graphStore.appendNode(node("keep"));
+	for (const key of ["chains", "coverage", "checkpoints"] as const) {
+		const file = key === "checkpoints" ? LEDGER_FILES.sessions : LEDGER_FILES[key];
+		fs.rmSync(file, { force: true });
+		const r = graphStore.revision();
+		graphStore.rewriteLedgers({ [key]: [] });
+		assert.equal(fs.existsSync(file), false, `${key}: the absent ledger was created`);
+		assert.equal(graphStore.revision(), r, `${key}: the revision moved`);
+	}
+});
+
+// N7 (contract) cannot future-date a file, and on APFS a plain write rarely ties the previous mtime, so it never noticed
+// the source-organization write inside a transact losing txn.stamped. A ledger dated ahead of the clock makes the plain write lose.
+test("revision (N7): a source-organization write inside a transact moves it although a ledger is future-dated", async () => {
+	const { sourceOrganizationStore } = await import("../src/store/source-organization.ts");
+	graphStore.appendNode(node("fut"));
+	const future = new Date(Date.now() + 3_600_000);
+	fs.utimesSync(LEDGER_FILES.nodes, future, future);
+	const r = graphStore.revision();
+	const org = (name: string) => ({ version: 1, folders: [{ id: "f1", name, parentId: null, createdAt: "t" }], placements: {} }) as never;
+	graphStore.transact("org", () => sourceOrganizationStore.write(org("future-A")));
+	assert.ok(graphStore.revision() > r, "the write did not move the revision");
+});

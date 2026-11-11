@@ -13,4 +13,9 @@ if (process.env.NODE_TEST_CONTEXT && !process.env.LH_DATA_DIR) {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lh-test-data-"));
 	process.env.LH_DATA_DIR = dir;
 	process.on("exit", () => fs.rmSync(dir, { recursive: true, force: true }));
+	// Never write under the real home (machine-id lives in ~/.learnharness). os.homedir() reads HOME on POSIX.
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "lh-test-home-"));
+	process.env.HOME = home;
+	process.env.USERPROFILE = home;
+	process.on("exit", () => fs.rmSync(home, { recursive: true, force: true }));
 }
