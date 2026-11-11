@@ -33,6 +33,10 @@ remote-ci:
     done
     exit $rc
 
+# Build the fork as an unsigned LearnHarness.app, put its data on DoltLite, install over the old app, open it.
+app:
+    bash scripts/install-app.sh
+
 test-one file:
     NODE_ENV=test pnpm exec tsx --import ./tests/isolate-data-dir.ts --test {{file}}
 

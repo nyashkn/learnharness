@@ -510,6 +510,12 @@ function setupAutoUpdater() {
 		reportUpdateStatus("disabled");
 		return;
 	}
+	// A from-source build (scripts/install-app.sh) ships no app-update.yml: no feed, so no updater.
+	if (process.resourcesPath && !fs.existsSync(path.join(process.resourcesPath, "app-update.yml"))) {
+		log("auto-update: no app-update.yml in this build — updater disabled");
+		reportUpdateStatus("disabled");
+		return;
+	}
 	try {
 		autoUpdater = require("electron-updater").autoUpdater;
 	} catch (err) {

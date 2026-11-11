@@ -57,6 +57,10 @@ See [Getting started](docs/getting-started.md) for model setup, dictation, files
 
 All three platforms support in-app updates.
 
+### Install from source on macOS
+
+On an Apple Silicon Mac with Node 26, pnpm and Xcode, `just app` builds an unsigned LearnHarness.app, installs it over any existing LearnHarness.app (same data folder, switched to DoltLite on first run) and opens it. It never uses sudo and is safe to rerun; that is also how you update, because this build does not check for updates.
+
 ## Your keys, your data
 
 - **Your keys and models.** No LearnHarness subscription or markup. Billing depends on your provider, CLI configuration, subscription, or local setup. The live cost meter estimates known API costs, not subscription, CLI, or custom-endpoint charges.
