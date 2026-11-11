@@ -79,6 +79,19 @@ async function snapshot(page: Page) {
 		seed: seed.map((p: { id: string; title: string }) => `${p.id}:${p.title}`).sort(),
 	};
 }
+/** Wait until the home screen has loaded (sessions in the sidebar, review pill, model picker filled); return what the DOM shows. */
+async function loadedState(page: Page): Promise<{ pill: string; titles: string[] }> {
+	await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
+	await page.waitForFunction(async () => {
+		const chats: { title: string }[] = (await (await fetch("/api/chats")).json()).chats;
+		const text = document.body.innerText;
+		return chats.length > 0 && document.querySelector('[data-testid="review-pill"]') && text.includes("scripted") && chats.every((c) => text.includes(c.title));
+	});
+	return page.evaluate(async () => {
+		const chats: { title: string }[] = (await (await fetch("/api/chats")).json()).chats;
+		return { pill: document.querySelector('[data-testid="review-pill"]')!.textContent ?? "", titles: chats.map((c) => c.title).filter((t) => document.body.innerText.includes(t)).sort() };
+	});
+}
 async function assertScreens(page: Page, nodes: number, due: number): Promise<void> {
 	assert.equal((await api(page, "GET", "/api/graph")).json.nodes.length, nodes);
 	assert.equal((await api(page, "GET", "/api/review")).json.dueCount, due);
@@ -121,7 +134,7 @@ async function main(): Promise<void> {
 		await launchBrowser(run);
 
 		// ── file backend: seeded only with what the screens cannot make (due reviews, proposals, an imported source); sessions are made through the screens ──
-		let fileBefore: Awaited<ReturnType<typeof snapshot>> | undefined;
+		let fileBefore: (Awaited<ReturnType<typeof snapshot>> & { dom: { pill: string; titles: string[] } }) | undefined;
 		const file = newFolder(run, "file");
 		await seedGraph(file.dataDir, file.authFile);
 		seedProposals(file.dataDir);
@@ -183,7 +196,7 @@ async function main(): Promise<void> {
 			await page.goto(new URL("/", page.url()).href, { waitUntil: "domcontentloaded" });
 			await page.waitForFunction(async () => (await (await fetch("/api/chats")).json()).chats.every((c: { busy: boolean }) => !c.busy));
 			await sleep(1500);
-			fileBefore = await snapshot(page);
+			fileBefore = { ...(await snapshot(page)), dom: await loadedState(page) };
 			await shot(page, run, "17-before-migrate");
 		}).catch(groupFailed("file-group"));
 
@@ -272,9 +285,11 @@ async function main(): Promise<void> {
 			assert.equal(out.status, 0, `migrate exit ${out.status}: ${out.out.slice(0, 300)}`);
 			assert.equal(marker(file.dataDir), "doltlite");
 			const after = await withApp(file, undefined, null, async ({ page }) => {
+				const dom = await loadedState(page);
 				await shot(page, run, "18-after-migrate");
-				return snapshot(page);
+				return { ...(await snapshot(page)), dom };
 			});
+			assert.match(before.dom.pill, /due/);
 			assert.deepEqual(after, before);
 		});
 	} finally {
