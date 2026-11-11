@@ -87,7 +87,9 @@ export async function startServer(run: Run, f: { dataDir: string; authFile: stri
 export async function launchBrowser(run: Run): Promise<Browser> {
 	run.browser = await puppeteer.launch({
 		executablePath: CHROME, headless: true, userDataDir: path.join(run.dir, "chrome"),
-		args: ["--disable-background-networking", "--disable-sync", "--no-first-run", "--disable-default-apps", "--window-size=1280,900"],
+		args: ["--disable-background-networking", "--disable-sync", "--no-first-run", "--disable-default-apps", "--window-size=1280,900",
+			// ubuntu-24.04 AppArmor blocks Chrome's unprivileged user-namespace sandbox on CI runners.
+			...(process.platform === "linux" ? ["--no-sandbox"] : [])],
 		defaultViewport: { width: 1280, height: 900 },
 	});
 	return run.browser;

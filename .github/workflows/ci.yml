@@ -129,3 +129,21 @@ jobs:
       - name: Smoke DoltLite in the standalone payload
         run: pnpm exec tsx scripts/smoke-doltlite.ts
       - run: node scripts/smoke-server.mjs --electron
+      # lh-jbe: the headless acceptance pass (scripted model, no keys, throwaway data) on the runner's
+      # preinstalled Chrome. Last, so `next dev` cannot touch the build/payload steps above. run.ts exits 1
+      # on any failing step; no retry, no continue-on-error. Runs `pnpm run acceptance` (= `just acceptance`
+      # minus the Node check; just is not installed on the runner).
+      - name: Acceptance pass (Chrome, scripted model)
+        if: matrix.platform == 'linux-x64'
+        timeout-minutes: 10
+        run: |
+          chrome="$(command -v google-chrome)" || { echo "::error::google-chrome not found on the runner"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/acceptance"
+          LH_TEST_CHROME="$chrome" TMPDIR="$RUNNER_TEMP/acceptance" pnpm run acceptance
+      - name: Upload acceptance screenshots
+        if: failure() && matrix.platform == 'linux-x64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: lh-acceptance-shots
+          path: ${{ runner.temp }}/acceptance/lh-acceptance-*/shots
+          if-no-files-found: warn
