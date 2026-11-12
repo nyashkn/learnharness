@@ -1,5 +1,5 @@
 # Linux checks in a Cloudflare sandbox (nyashkn/cf-ci). From a worktree: `just remote <step>`;
-# `just remote ci` runs the full gate (`just ci`) there instead of on the laptop.
+# `just remote ci` runs the full gate there: every step below, each in its own sandbox.
 # The base image is Debian slim with git, just and Python, so install adds what GitHub's runner has:
 # - Node 26 (fetched with Python; it needs libatomic1) and pnpm, pinned.
 # - fontconfig plus the Microsoft core fonts (contrib, EULA preseeded as on GitHub's runner): the SVG
@@ -12,8 +12,8 @@
 # Test steps (they run as root) also put their temp folders in memory (TMPDIR on a tmpfs; not over /tmp,
 # where cf-ci keeps the step log), since temp-folder stores on the sandbox disk ran N1 past its time budget, and raise the open-file limit, which is lower
 # than GitHub's while the migrate tests hold many files open.
-# `just remote-ci` runs every step below except `ci` at once, each in its own sandbox (about 5 min);
-# `just remote ci` is the same gate in one sandbox, about 10 min against the 15 min step cap.
+# `just remote ci` (same as `just remote-ci`) runs every step below in one run, each in its own sandbox (about 6 min);
+# there is no single `ci` step, because cf-ci caps a step's command at 900 s and the serial `just ci` outgrew it.
 image: base
 size: standard-4
 install: >-
@@ -38,4 +38,3 @@ steps:
   checks: pnpm run check:schemas && pnpm run check:pins
   # The Python skill's own tests (stdlib only; the skill needs 3.10+). Not part of `just ci`.
   test-skills: python3 -c 'import sys; assert sys.version_info >= (3, 10), sys.version' && python3 -B -m unittest discover -s tests/skills
-  ci: mkdir -p /mnt/lh-tmp && mount -t tmpfs -o size=6g tmpfs /mnt/lh-tmp && export TMPDIR=/mnt/lh-tmp; ulimit -n 65536; tini -s -- just ci
