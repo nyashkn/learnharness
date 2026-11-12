@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -54,15 +54,15 @@ test("external teaching example composes native tools, validated workers, separa
 	let service!: PluginWorkerService;
 	let delivered!: (message: SteerMessage) => void;
 	const delivery = new Promise<SteerMessage>(resolve => { delivered = resolve; });
-	const host = createPluginHost({ dataDirectoryFor: safePluginDataDirectory, directory, appVersion: "0.3.7", createServices(info) {
-		const inference = createPluginInference({ dataDirectory: info.dataDirectory, signal: info.signal }, {
+	const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: "0.3.7", createServices(info) {
+		const inference = createPluginInference({ dataDirectory: info.dataDirectory, signal: info.signal, beforeWrite: pluginHostGate(directory).beforeWrite }, {
 			catalog: () => catalog, providerKeyPresent: () => true,
 			engineForSpec: () => ({ model, level: "off", streamFn: (m, context, options) => {
 				assert.equal(options?.maxTokens, 1024, "worker generation budget reaches every native model call");
 				return worker.streamSimple(m, context, options);
 			} }),
 		});
-		service = createPluginWorkerService({ store: createPluginTaskRecordStore(path.join(info.dataDirectory, "tasks")), engineFor: inference.engineFor, onUsage: inference.onUsage, signal: info.signal });
+		service = createPluginWorkerService({ store: createPluginTaskRecordStore(path.join(info.dataDirectory, "tasks"), { dataDir: path.dirname(directory) }), engineFor: inference.engineFor, onUsage: inference.onUsage, signal: info.signal });
 		return {
 			learning: { directory: data } as PluginLearningData, inference: inference.inference,
 			agents: { dispose: async () => {} } as PluginAgentService, workers: service,

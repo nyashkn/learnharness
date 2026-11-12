@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -16,7 +16,7 @@ async function fixture(t: TestContext) {
   fs.mkdirSync(dist, { recursive: true });
   fs.writeFileSync(path.join(dist, "manifest.json"), JSON.stringify({ apiVersion: 1, id: "example", name: "Example", version: "1.0.0", minAppVersion: "0.4.0", backend: "backend.cjs" }));
   fs.writeFileSync(path.join(dist, "backend.cjs"), "exports.activate = ctx => { ctx.handle('context', () => ctx); };");
-  const host = createPluginHost({ dataDirectoryFor: safePluginDataDirectory, directory, appVersion: "0.4.1", createServices: () => ({ learning: {}, inference: {}, agents: { dispose: async () => {} }, workers: { dispose: async () => {} }, createBackgroundTool() { throw Error("Unexpected background tool"); } }) as never });
+  const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: "0.4.1", createServices: () => ({ learning: {}, inference: {}, agents: { dispose: async () => {} }, workers: { dispose: async () => {} }, createBackgroundTool() { throw Error("Unexpected background tool"); } }) as never });
   t.after(async () => { await host.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
   await host.initialize(); await host.setEnabled("example", true);
   return { host, ctx: await host.call("example", "context") as PluginBackendContext };

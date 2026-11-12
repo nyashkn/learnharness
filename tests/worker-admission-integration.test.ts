@@ -269,7 +269,7 @@ test("actual ctx.workers service admits user-purpose tasks and never dispatches 
 	const worker = run(scripted([async () => { entered.resolve(); await gate.promise; return answer(); }]));
 	let calls = 0, usage = 0;
 	const service = createPluginWorkerService({
-		store: createPluginTaskRecordStore(path.join(scratch, "plugin-tasks")),
+		store: createPluginTaskRecordStore(path.join(scratch, "plugin-tasks"), { dataDir: scratch }),
 		engineFor: () => submit("submit_result", { result: "answer" }, () => { calls++; }),
 		onUsage: () => { usage++; },
 	});

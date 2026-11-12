@@ -63,3 +63,26 @@ test("independent plugin-data and provider-debug filename producers retain their
 		for (const call of matched) assert.ok(ignored(call), `${relative}: runtime data must not be traced`);
 	}
 });
+
+test("store file producers over a caller-supplied dir retain their opt-outs (lh-53h: they traced the whole repo, tests/ and docs/ included)", () => {
+	for (const [relative, matches, count] of [
+		["src/store/graph.ts", (call: ts.CallExpression) => call.expression.getText().endsWith("join") && call.arguments[0]?.getText() === "graphDir", 11],
+		["src/store/render-settings.ts", (call: ts.CallExpression) => call.expression.getText().endsWith("join") && call.arguments[0]?.getText() === "graphDir", 2],
+		["src/store/settings.ts", (call: ts.CallExpression) => call.arguments[0]?.getText() === "dataDir", 1],
+		["src/agent/tools/pdf-read.ts", (call: ts.CallExpression) => call.arguments[0]?.getText() === "dir" && call.arguments.length === 2 && call.expression.getText().endsWith("join"), 1],
+	] as const) {
+		const { file, calls, ignored } = paths(relative);
+		const matched = calls.filter(call => matches(call));
+		assert.equal(matched.length, count, `${relative}: expected runtime path producers`);
+		for (const call of matched) assert.ok(ignored(call), `${relative}: runtime path must not ship: ${call.getText(file)}`);
+	}
+});
+
+test("non-path producers (spawn, statSync) of runtime paths retain their opt-outs", () => {
+	for (const [relative, needle] of [
+		["src/agent/subagents/headless.ts", "spawn(/* turbopackIgnore: true */ binary,"],
+		["src/store/sql/migrate.ts", "fs.statSync(/* turbopackIgnore: true */ file)"],
+	] as const) {
+		assert.ok(fs.readFileSync(new URL(`../${relative}`, import.meta.url), "utf8").includes(needle), `${relative}: lost ${needle}`);
+	}
+});

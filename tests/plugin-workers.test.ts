@@ -27,7 +27,8 @@ function options(extra: Partial<PluginWorkerStartOptions> = {}): PluginWorkerSta
 type Script = (context: TranscriptContext, index: number, stream: AssistantMessageEventStream) => AssistantMessage | Promise<AssistantMessage>;
 function fixture(t: TestContext, script: Script = () => message([submit("answer")]), override: Partial<PluginWorkerServiceDeps> = {}) {
 	const directory = mkdtempSync(join(tmpdir(), "lh-workers-"));
-	const store = createPluginTaskRecordStore(join(directory, "tasks"));
+	const dataFolder = mkdtempSync(join(tmpdir(), "lh-workers-data-")); // marker + lock land here, so `directory` holds only the records
+	const store = createPluginTaskRecordStore(join(directory, "tasks"), { dataDir: dataFolder });
 	const activation = new AbortController();
 	const calls: TranscriptContext[] = [];
 	const bound: unknown[][] = [];
@@ -50,7 +51,7 @@ function fixture(t: TestContext, script: Script = () => message([submit("answer"
 			} };
 		}, ...override };
 	const service = createPluginWorkerService(deps);
-	t.after(async () => { await service.dispose().catch(() => {}); activation.abort(); rmSync(directory, { recursive: true, force: true }); });
+	t.after(async () => { await service.dispose().catch(() => {}); activation.abort(); rmSync(directory, { recursive: true, force: true }); rmSync(dataFolder, { recursive: true, force: true }); });
 	const register = (definition: Partial<PluginWorkerDefinition> = {}) => service.register({ id: "worker", instructions: "Use submit_result to finish", resultSchema: Type.Unknown(), ...definition });
 	return { directory, store, service, calls, bound, billed, activation, register, deps, changes: () => changes };
 }

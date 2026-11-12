@@ -45,6 +45,8 @@ export interface PluginHostDependencies {
 		learning: PluginLearningData; inference: PluginInference; agents: PluginAgentService; workers: PluginWorkerService;
 		createBackgroundTool: PluginBackendContext["createBackgroundTool"];
 	};
+	/** Called before plugins-state.json is written (marker + store lock). The composition root passes marker.ts's beforeWrite. */
+	beforeWrite: () => void;
 	/** One process-wide pure converter; no backend services are needed for uploads. */
 	convertDocument?: (request: Request, signal: AbortSignal) => ReturnType<PluginFrontendContext["documents"]["toMarkdown"]>;
 	onChange?: () => void;
@@ -107,6 +109,10 @@ function targets(agents: PluginAgentKind[]): Set<PluginAgentKind> {
 }
 const safeSegment = (p: string) => /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(p);
 
+function lstatOrNull(target: string): fs.Stats | null {
+	try { return fs.lstatSync(target); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+}
 function readState(filename: string): State {
 	if (!exists(filename)) return { version: 1, enabled: Object.create(null) };
 	if (!fs.lstatSync(filename).isFile() || fs.lstatSync(filename).isSymbolicLink()) throw new Error("Unsafe plugins-state.json");
@@ -352,7 +358,7 @@ export function createPluginHost(deps: PluginHostDependencies) {
 	async function discover(state: State): Promise<void> {
 		const installationErrors = deps.installationErrors ?? {};
 		const failed = (id: string) => Object.hasOwn(installationErrors, id);
-		const communityIds = fs.readdirSync(/* turbopackIgnore: true */ directory).filter(id => {
+		const communityIds = (lstatOrNull(directory) ? fs.readdirSync(/* turbopackIgnore: true */ directory) : []).filter(id => {
 			const stat = fs.lstatSync(path.join(/* turbopackIgnore: true */ directory, id));
 			return stat.isDirectory() || stat.isSymbolicLink();
 		});
@@ -395,8 +401,9 @@ export function createPluginHost(deps: PluginHostDependencies) {
 		assertOpen();
 		if (initialized) return;
 		const state = readState(stateFile); // Never hide corrupt/future state or execute code first.
-		fs.mkdirSync(directory, { recursive: true });
-		if (!fs.lstatSync(directory).isDirectory() || fs.lstatSync(directory).isSymbolicLink()) throw new Error("Unsafe plugins directory");
+		// A missing plugins directory is an empty discovery: boot writes nothing. It is made lazily, behind beforeWrite, by the first plugin data directory that needs it (safePluginDataDirectory).
+		const stat = lstatOrNull(directory);
+		if (stat && (!stat.isDirectory() || stat.isSymbolicLink())) throw new Error("Unsafe plugins directory");
 		await discover(state);
 		initialized = true; change();
 	}
@@ -556,7 +563,7 @@ export function createPluginHost(deps: PluginHostDependencies) {
 				if (!PLUGIN_ID_PATTERN.test(id) || typeof enabled !== "boolean") throw new PluginHostError(400, "Invalid plugin enable request");
 				const pkg = get(id);
 				const state = readState(stateFile); // Recheck before overwriting externally changed state.
-				state.enabled[id] = enabled; writeState(stateFile, state);
+				state.enabled[id] = enabled; deps.beforeWrite(); writeState(stateFile, state); // marker + store lock first
 				if (enabled && pkg.activation?.ready) return;
 				pkg.info.enabled = enabled;
 				if (!enabled) {

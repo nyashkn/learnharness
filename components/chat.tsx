@@ -128,6 +128,7 @@ import {
 } from "@/src/core";
 import { ReadingThinkingField } from "@/components/reading-thinking";
 import { currentUserThinkingOpen, setAllUserThinkingOpen } from "@/components/thinking-block";
+type HeldThinkingCall = { capture: () => string; clear: (captured: string) => void; confidence: Parameters<PrepareThinkingWithConfidence>[2]; isCurrent(): boolean };
 
 /** One width for everything: transcript, cards, and the bottom blob share this column. */
 /**
@@ -439,8 +440,12 @@ export function Chat({
 	// lh-osh: the ONE quiz-answer press made while a turn was still running; replayed
 	// through prepareBuiltin (interceptors, images, validation) once busy clears.
 	const heldBuiltin = useRef(new HeldBuiltinSubmission<BuiltinSubmissionCapture>()).current;
+	// lh-7gn: the same hold for the practice thinking press (built-in problem dock), which is
+	// enabled while the posing turn still streams.
+	const heldThinking = useRef(new HeldBuiltinSubmission<HeldThinkingCall>()).current;
 	const abortInFlightTurn = useCallback(() => {
 		heldBuiltin.clear(); // Stop cancels a pending answer too
+		heldThinking.clear();
 		if (localStreamRef.current) stop();
 		void fetch("/api/activity/abort", {
 			method: "POST",
@@ -750,13 +755,15 @@ export function Chat({
 		});
 	};
 	const prepareBuiltinRef = useRef(prepareBuiltin); prepareBuiltinRef.current = prepareBuiltin;
-	useEffect(() => { heldBuiltin.clear(); }, [chatId, heldBuiltin]);
+	useEffect(() => { heldBuiltin.clear(); heldThinking.clear(); }, [chatId, heldBuiltin, heldThinking]);
 	const thinkingTarget = (): Extract<PluginSubmissionTarget, { type: "thinking" }> | undefined => {
 		const occurrence = activeProblemOccurrenceOf(nativeMessages);
 		if (!surfaceTarget || !activeProblem || activeProblem.pluginProblem || !occurrence) return;
 		return { type: "thinking", sessionId: chatId, sessionKind: kind === "practice" ? "practice" : "teaching", surfaceTarget, channels: ["content"], problem: { occurrence, statement: (activeProblem.input as { statement: string }).statement } };
 	};
 	const prepareThinking: PrepareThinkingWithConfidence = (capture, clear, confidence) => {
+		const heldKey = activeProblemOccurrenceOf(nativeMessages)?.toolCallId;
+		if (heldKey && heldThinking.press({ capture, clear, confidence, isCurrent: () => true }, heldKey, busyRef.current || compacting)) return;
 		const target = thinkingTarget();
 		if (!target || busyRef.current || compacting) return;
 		let captured = "";
@@ -767,6 +774,7 @@ export function Chat({
 			return send({ type: "thinking", problemCallId: target.problem.occurrence.toolCallId, occurrence: target.problem.occurrence, text: prepared.content.text, ...(confidence !== undefined ? { confidence } : {}), ...(prepared.content.images.length ? { images: prepared.content.images.map(image => ({ ...image })) } : {}) }, () => { clear(captured); attempt.accepted(); }, undefined, attempt.refused);
 		});
 	};
+	const prepareThinkingRef = useRef(prepareThinking); prepareThinkingRef.current = prepareThinking;
 	const pluginProblemTarget = (): Extract<PluginSubmissionTarget, { type: "plugin-problem-submission" }> | undefined => {
 		const original = activeProblem?.pluginProblem, occurrence = activeProblemOccurrence;
 		if (!surfaceTarget || !original || !occurrence) return;
@@ -775,6 +783,7 @@ export function Chat({
 	};
 	const preparePluginProblem: PreparePluginProblemSubmission = (capture, isCurrent, onAccepted) => {
 		const original = activeProblem?.pluginProblem, occurrence = activeProblemOccurrence, target = pluginProblemTarget();
+		// lh-7gn: unreachable while busy, the dock's `ready` (= !busy && !compacting) gates the button, Enter and valid(); pinned by tests/chat-submission-wiring.test.ts.
 		if (!target || !original || !occurrence || busyRef.current || compacting) return Promise.resolve(false);
 		return runSubmission(target, () => {
 			const raw = capture();
@@ -798,6 +807,7 @@ export function Chat({
 	};
 	const preparePluginQuestion: PreparePluginQuestionSubmission = (capture, isCurrent) => {
 		const target = pluginQuestionTarget();
+		// lh-7gn: unreachable while busy, the dock's `ready` (pluginReady = !busy && !compacting) gates the button, Enter and the capture; pinned by tests/chat-submission-wiring.test.ts.
 		if (!target || !pendingPlugin || busyRef.current || compacting) return Promise.resolve(false);
 		const original = pendingPlugin;
 		return runSubmission(target, () => {
@@ -814,6 +824,7 @@ export function Chat({
 	};
 	const prepareText = (supplied?: string, openingAccepted?: () => void, beforePost?: (captured: string) => boolean) => {
 		const target = textTarget();
+		// lh-7gn: busy is not a drop here (steer below); compacting is unreachable, sendAllowed disables the composer.
 		if (!target || pendingRef.current || pluginOwnsDock || activeProblemRef.current || compacting) return Promise.resolve(false);
 		if (!busyRef.current && zeroKeys) { setSetupOpen(true); return Promise.resolve(false); }
 		if (!busyRef.current && selectedModelUnavailable(catalog, selectedModel)) { openModelPicker(); return Promise.resolve(false); }
@@ -1111,7 +1122,8 @@ export function Chat({
 	const [compacting, setCompacting] = useState(initiallyCompacting);
 	useEffect(() => {
 		heldBuiltin.replay(busy || compacting, () => pendingQuestionOf(submissionLive.current.nativeMessages)?.key, call => prepareBuiltinRef.current(call));
-	}, [busy, compacting, heldBuiltin]);
+		heldThinking.replay(busy || compacting, () => activeProblemOccurrenceOf(submissionLive.current.nativeMessages)?.toolCallId, call => prepareThinkingRef.current(call.capture, call.clear, call.confidence));
+	}, [busy, compacting, heldBuiltin, heldThinking]);
 	submissionLive.current.ready = !compacting && reconciliation === "ready";
 	// A failed model response (issue #110): Retry keeps the saved input
 	// and completed work, without another learner message. Offered from

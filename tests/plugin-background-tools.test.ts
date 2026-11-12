@@ -423,7 +423,7 @@ describe("real worker/store terminal ownership", () => {
 		it(`${disable} wakes the canonical waiter and delivers interrupted fallback`, async () => {
 			const directory = mkdtempSync(join(tmpdir(), "lh-background-"));
 			const h = harness(); const admission = deferred<void>(); let enabled = true; let formats = 0;
-			const store = createPluginTaskRecordStore(join(directory, "tasks"));
+			const store = createPluginTaskRecordStore(join(directory, "tasks"), { dataDir: directory });
 			const workers = createPluginWorkerService({ store, signal: h.active.signal, engineFor: async () => { await admission.promise; throw new Error("No inference should run"); } });
 			workers.register({ id: "worker", instructions: "Return a result", resultSchema: Type.Unknown() });
 			const tool = createPluginBackgroundTool({ ...h.common, workers, pluginId: "example", context: { chatId: "chat", agent: "teacher" }, signal: h.active.signal, isActive: () => enabled && !h.active.signal.aborted, definition: {
@@ -473,7 +473,7 @@ describe("real worker/store terminal ownership", () => {
 		const formatting = deferred<void>(); const releaseFormat = deferred<void>();
 		const faux = createFauxCore({});
 		faux.setResponses([fauxAssistantMessage([fauxToolCall("submit_result", { result: false })], { stopReason: "toolUse" })]);
-		const store = createPluginTaskRecordStore(join(directory, "tasks"));
+		const store = createPluginTaskRecordStore(join(directory, "tasks"), { dataDir: directory });
 		const workers = createPluginWorkerService({ store, signal: h.active.signal, engineFor: () => ({ model: faux.getModel(), streamFn: faux.streamSimple }) });
 		workers.register({ id: "worker", instructions: "Return a result", resultSchema: Type.Boolean() });
 		const tool = createPluginBackgroundTool({ ...h.common, workers, pluginId: "example", context: { chatId: "chat", agent: "teacher" }, signal: h.active.signal, isActive: () => !h.active.signal.aborted, definition: {
@@ -513,7 +513,7 @@ describe("shared native job integration regressions", () => {
 		const active = new AbortController(); const admission = deferred<void>();
 		const faux = createFauxCore({});
 		faux.setResponses([fauxAssistantMessage([fauxToolCall("submit_result", { result: false })], { stopReason: "toolUse" })]);
-		const taskStore = createPluginTaskRecordStore(join(directory, "tasks"));
+		const taskStore = createPluginTaskRecordStore(join(directory, "tasks"), { dataDir: directory });
 		const workers = createPluginWorkerService({ store: taskStore, signal: active.signal, engineFor: async () => {
 			if (!complete) await admission.promise;
 			return { model: faux.getModel(), streamFn: faux.streamSimple };

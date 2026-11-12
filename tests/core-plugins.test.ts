@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -12,7 +12,7 @@ function fixture(t: TestContext) {
 	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 	const directory = path.join(root, "data", "plugins");
 	const core = { directory: path.join(root, "app", "core-plugins"), dataDirectory: path.join(root, "data", "core-plugin-data"), ids: ["official", "missing"] };
-	const deps: PluginHostDependencies = { dataDirectoryFor: safePluginDataDirectory, directory, core, appVersion: "0.4.1", createServices() {
+	const deps: PluginHostDependencies = { ...pluginHostGate(directory), directory, core, appVersion: "0.4.1", createServices() {
 		return { agents: { dispose() {} }, workers: { dispose() {} } } as unknown as ReturnType<PluginHostDependencies["createServices"]>;
 	} };
 	function pkg(id: string, origin: "core" | "community", backend = "exports.activate = ctx => { ctx.handle('context', () => ctx); };") {

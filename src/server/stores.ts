@@ -59,6 +59,7 @@ export { readRenderSettings, writeRenderSettings } from "../store/render-setting
 export { readSettings as readSettingsRecord, writeSettings as writeSettingsRecord } from "../store/settings.ts";
 // Plugin persistence (upstream v0.6.0): per-plugin record stores and data directories under the data folder.
 // plugins.ts builds one store per plugin directory, so the composition root hands it the factories.
+export { beforeWrite }; // plugins.ts binds it to PATHS.data for the host and inference writers
 export { createPluginAgentRecordStore } from "../store/plugin-agent-records.ts";
 export { createPluginTaskRecordStore, readPluginTaskRecord, recoverPluginTaskRecords } from "../store/plugin-task-records.ts";
 export { safePluginDataDirectory } from "../store/plugin-data-paths.ts";

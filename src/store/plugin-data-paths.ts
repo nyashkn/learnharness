@@ -1,12 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { PLUGIN_ID_PATTERN } from "../core/plugins.ts";
+import { beforeWrite } from "./marker.ts";
 
 export interface CorePluginDataLocation { directory: string; ids: readonly string[] }
 
-/** One origin-aware mapping shared by backend activation and crash recovery.
+/** `write` = create what is missing, taking the marker + store lock (on `write.dataDir`, the data folder) before the first directory; omitted = read-only.
+ * One origin-aware mapping shared by backend activation and crash recovery.
  * No package code, filesystem fallback, or old core data participates. */
-export function safePluginDataDirectory(communityDirectory: string, id: string, core?: CorePluginDataLocation, create = false): string | null {
+export function safePluginDataDirectory(communityDirectory: string, id: string, core?: CorePluginDataLocation, write?: { dataDir: string }): string | null {
 	if (!PLUGIN_ID_PATTERN.test(id)) throw new Error("Invalid plugin id");
 	const isCore = core?.ids.includes(id) === true;
 	const root = path.resolve(/* turbopackIgnore: true */ isCore ? core!.directory : communityDirectory);
@@ -18,7 +20,8 @@ export function safePluginDataDirectory(communityDirectory: string, id: string, 
 		try { stat = fs.lstatSync(directory); }
 		catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-			if (!create) return null;
+			if (!write) return null; // read-only lookup: nothing is made, no lock
+			beforeWrite(write.dataDir); // marker + store lock before the first directory is made
 			fs.mkdirSync(directory, { recursive: directory === root }); stat = fs.lstatSync(directory);
 		}
 		if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Unsafe plugin data directory: ${directory}`);

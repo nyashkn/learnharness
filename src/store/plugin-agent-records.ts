@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { PluginAgentRecord } from "../core/plugin-agents.ts";
 import type { PluginAgentRecordStore } from "../core/ports.ts";
+import { beforeWrite } from "./marker.ts";
 
 function safeId(id: string): void {
 	if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error("Invalid plugin agent identifier");
@@ -28,10 +29,12 @@ function validate(value: unknown, id: string): PluginAgentRecord {
  * chat store imports, silent read failures, or process-wide singleton state.
  * The host must share one service for this directory; this is not an interprocess
  * lock or a multi-process database. */
-export function createPluginAgentRecordStore(directory: string): PluginAgentRecordStore {
+/** `dataDir` (the data folder, not `directory`) takes the marker + store lock before every write. */
+export function createPluginAgentRecordStore(directory: string, { dataDir }: { dataDir: string }): PluginAgentRecordStore {
 	// Plugin data directories are runtime inputs, never deployment assets.
 	const root = path.resolve(/* turbopackIgnore: true */ directory);
-	fs.mkdirSync(root, { recursive: true });
+	const gate = () => { beforeWrite(dataDir); }; // marker + store lock on the first write
+	if (!fs.existsSync(root)) { gate(); fs.mkdirSync(root, { recursive: true }); }
 	const filename = (id: string) => { safeId(id); return path.join(/* turbopackIgnore: true */ root, `${id}.json`); };
 	const get = (id: string): PluginAgentRecord | null => {
 		const file = filename(id);
@@ -60,6 +63,8 @@ export function createPluginAgentRecordStore(directory: string): PluginAgentReco
 			// fail the acceptance barrier rather than corrupting an existing record.
 			const body = `${JSON.stringify(record, null, "\t")}\n`;
 			validate(JSON.parse(body), record.id);
+			gate();
+			fs.mkdirSync(root, { recursive: true });
 			const temporary = path.join(root, `.${record.id}.${randomUUID()}.tmp`);
 			let fd: number | undefined;
 			try {

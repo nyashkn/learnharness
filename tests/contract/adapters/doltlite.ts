@@ -21,7 +21,7 @@ import { openGraphStore } from "../../../src/store/sql/graph-store.ts";
 import { acquireStoreLock, type StoreLock } from "../../../src/store/sql/lock.ts";
 import { doltliteDbFile, releaseGraphDb } from "../../../src/store/sql/open.ts";
 import { createSourceOrganizationStore } from "../../../src/store/sql/source-organization-store.ts";
-import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
+import { chatHooks, type AdapterFactory, type AnyLedger, type StoreBundle } from "../harness.ts";
 import fileFactory from "./file.ts";
 
 const TABLES: Record<AnyLedger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" };
@@ -89,6 +89,7 @@ const direct: AdapterFactory = {
 			sourceOrg: createSourceOrganizationStore({ core: opened.core, emit }),
 			events: { subscribe: (l) => { const a = base.events.subscribe(l); const b = subscribe(l); return () => { a(); b(); }; } },
 			hooks: {
+				...chatHooks(dir),
 				injectCorruptLine: (ledger, text) => withDb((d) => d.run(`INSERT INTO ${TABLES[ledger]} (line_json) VALUES (?)`, text)),
 				stampNewerFormat: () => { base.hooks.stampNewerFormat(); setLineFormat(CURRENT_GRAPH_FORMAT_VERSION + 1); },
 				clearFormatStamp: () => { base.hooks.clearFormatStamp(); setLineFormat(CURRENT_GRAPH_FORMAT_VERSION); },
@@ -142,6 +143,7 @@ const app: AdapterFactory = {
 			render: { read: () => s.renderSettingsStore.readRenderSettings(), write: (raw) => s.renderSettingsStore.writeRenderSettings(raw) },
 			events: { subscribe },
 			hooks: {
+				...chatHooks(dir),
 				injectCorruptLine: (ledger, text) => withDb((db) => db.run(`INSERT INTO ${TABLES[ledger]} (line_json) VALUES (?)`, text)),
 				stampNewerFormat: () => { setLineFormat(CURRENT_GRAPH_FORMAT_VERSION + 1); fs.mkdirSync(path.dirname(formatFile), { recursive: true }); fs.writeFileSync(formatFile, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION + 1 })); },
 				clearFormatStamp: () => { fs.rmSync(formatFile, { force: true }); setLineFormat(CURRENT_GRAPH_FORMAT_VERSION); },
