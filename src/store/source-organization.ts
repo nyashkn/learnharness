@@ -17,8 +17,8 @@ const PENDING_KEY = "source-organization";
  */
 export function createSourceOrganizationStore(graphDir: string, graph: GraphStore, opts: { dataDir?: string } = {}): SourceOrganizationStore {
 	const dataDir = opts.dataDir ?? path.dirname(path.resolve(graphDir));
-	const file = path.join(graphDir, "source-organization.json");
-	const formatFile = path.join(graphDir, "format.json");
+	const file = path.join(/* turbopackIgnore: true */ graphDir, "source-organization.json");
+	const formatFile = path.join(/* turbopackIgnore: true */ graphDir, "format.json");
 	const txn = txnHooksOf(graph);
 	return {
 		read() {

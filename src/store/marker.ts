@@ -48,7 +48,7 @@ export class NoAdapterError extends Error {
 	}
 }
 
-export const markerFile = (dataDir: string): string => path.join(dataDir, MARKER_NAME);
+export const markerFile = (dataDir: string): string => path.join(/* turbopackIgnore: true */ dataDir, MARKER_NAME);
 const isBackend = (v: unknown): v is Backend => typeof v === "string" && (BACKENDS as readonly string[]).includes(v);
 
 /** The backends this build can run. */
@@ -110,7 +110,7 @@ export function resolveBackend(dataDir: string, env: Record<string, string | und
 }
 
 /** The graph-family format stamp lives beside the graph ledgers. */
-export const graphFormatFileIn = (dataDir: string): string => path.join(dataDir, "graph", "format.json");
+export const graphFormatFileIn = (dataDir: string): string => path.join(/* turbopackIgnore: true */ dataDir, "graph", "format.json");
 
 /** Agreement (architecture 3): a marker that names sqlite or doltlite needs the store it names. Without a marker, LH_STORAGE is only an intent: the store is made on the first write. */
 function assertAgreement(file: string, marker: { backend: Backend } | undefined, dataDir: string): void {
