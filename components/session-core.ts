@@ -327,6 +327,18 @@ export class SessionModel {
 		this.statusValue = status;
 		this.readyRef = status === "ready";
 		this.onChange?.();
+		// The turn that posed the question has closed: send the answer pressed meanwhile.
+		if (status === "ready" || status === "error") queueMicrotask(() => this.flushHeldAnswer());
+	}
+
+	/** One answer pressed while a turn was still running, kept until it ends (lh-osh). */
+	private heldAnswer: { toolCallId: string; output: QuestionAnswerData; key?: string } | null = null;
+
+	private flushHeldAnswer(): void {
+		const held = this.heldAnswer;
+		if (!held) return;
+		this.heldAnswer = null; // cleared before the send, so no second POST; send() drops it if the question left
+		void this.send({ type: "answer", toolCallId: held.toolCallId, answer: held.output }, undefined, held.key);
 	}
 
 	private setError(message: string | null): void {
@@ -841,6 +853,12 @@ export class SessionModel {
 	 *  result (fork 1), riding as its input event. */
 	submitAnswer(tool: string, toolCallId: string, output: QuestionAnswerData, questionKey?: string): Promise<void> {
 		void tool;
+		// Mid-turn the send gate would drop the press silently: hold it (the last press wins).
+		if (!this.readyRef && this.statusValue !== "error") {
+			const subject = pendingQuestionOf([...this.base, ...this.tail]);
+			if (subject?.toolCallId === toolCallId && (questionKey === undefined || subject.key === questionKey)) this.heldAnswer = { toolCallId, output, key: questionKey };
+			return Promise.resolve();
+		}
 		return this.send({ type: "answer", toolCallId, answer: output }, undefined, questionKey).then(() => undefined);
 	}
 
@@ -899,6 +917,7 @@ export class SessionModel {
 		this.streamingIds = new Set();
 		this.streamingMessageId = null;
 		this.executions = new Map();
+		this.heldAnswer = null; // Stop cancels a pending answer too
 		this.setStatus("ready");
 	}
 

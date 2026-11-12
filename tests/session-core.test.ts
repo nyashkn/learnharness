@@ -21,6 +21,7 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import fc from "fast-check";
 import { absorbed, pendingCallTool, SessionModel } from "../components/session-core.ts";
 import type { ChatInput } from "../src/core/input-events.ts";
 import type { LhMessage } from "../src/core/native-messages.ts";
@@ -1868,5 +1869,85 @@ describe("absorbed — the custom role (the doubled thinking card)", () => {
 		const customs = m.getState().nativeMessages.filter((x) => (x as { role?: string }).role === "custom");
 		assert.equal(customs.length, 1, "the server copy replaced the optimistic one — no doubling");
 		assert.equal((customs[0] as { id?: string }).id, "srv_1");
+	});
+});
+
+// ─── an answer pressed while the turn that posed the question still streams ──
+
+describe("answer pressed mid-turn (lh-osh)", () => {
+	const quiz = {
+		...assistantMsg("question", "Q?"),
+		content: [{ type: "toolCall", id: "q1", name: "quiz", arguments: { question: "Q?", options: [{ label: "A" }, { label: "B" }], correctAnswer: "A", explanation: "A is correct." } }],
+	} as LhMessage;
+	const key = pendingQuestionOf([quiz])!.key;
+	const mk = (thinking: string) => buildAnswer({ id: "q1", kind: "quiz", question: "Q?", mode: "single-select", options: [], createdAt: "fixture" }, { dontKnow: true, thinking });
+	const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+
+	type Act = "press" | "doublePress" | "close" | "leave";
+	/** The stream that posed the question stays open until `close`; the dock is up the whole time. */
+	async function run(acts: Act[]) {
+		const posts: { thinking: string }[] = [];
+		let answered = false;
+		let closeFirst!: () => void;
+		let streams = 0;
+		let closed = false;
+		const record = () => (answered ? [quiz, newAnswerResult("q1", "quiz", mk("x"))] : closed ? [quiz] : []);
+		const m = model({ fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url === "/api/chat") {
+				const body = JSON.parse(String(init?.body));
+				if (body.input?.type === "answer") { answered = true; posts.push({ thinking: body.input.answer.thinking }); }
+				return Response.json({ ok: true });
+			}
+			if (url === "/api/chats/chat_x") return Response.json({ messages: record(), turnInFlight: !answered });
+			if (url === "/api/chats/chat_x/stream") {
+				if (streams++ > 0) return sseResponse("[DONE]"); // the reaction turn: closes at once
+				const enc = new TextEncoder();
+				return new Response(new ReadableStream<Uint8Array>({
+					start(c) {
+						c.enqueue(enc.encode(sse(partial(quiz.content as unknown[]))));
+						closeFirst = () => { c.enqueue(enc.encode(sse("[DONE]"))); c.close(); };
+					},
+				}), { status: 200 });
+			}
+			throw new Error(`unexpected fetch: ${url}`);
+		}) as typeof globalThis.fetch });
+		void m.send({ type: "text", text: "start" });
+		while (m.status !== "streaming") await tick();
+		// Oracle, independent of the model's code: what the learner did, in order.
+		let streaming = true, dockUp = true, pressed: string | null = null, expected: string[] = [], n = 0;
+		for (const a of acts) {
+			if (a === "press" || a === "doublePress") {
+				for (let i = 0; i < (a === "doublePress" ? 2 : 1); i++) {
+					const thinking = `t${n++}`;
+					void m.submitAnswer("quiz", "q1", mk(thinking), key);
+					if (dockUp && streaming) pressed = thinking; // held; the last press wins
+					else if (dockUp) { expected.push(thinking); dockUp = false; } // client ready: sent at once
+				}
+			} else if (a === "close" && streaming) {
+				streaming = false; closeFirst();
+				if (pressed !== null && dockUp) { expected.push(pressed); dockUp = false; }
+				pressed = null;
+				await tick(); closed = true; if (dockUp) m.setMessages(record()); // the page's settle sync adopts the record
+			} else if (a === "leave") { dockUp = false; pressed = null; m.setMessages([quiz, newAnswerResult("q1", "quiz", mk("x"))]); }
+			await tick();
+		}
+		if (streaming) closeFirst();
+		for (let i = 0; i < 5; i++) await tick();
+		return { posts, expected: streaming && pressed !== null && dockUp ? [pressed] : expected };
+	}
+
+	it("the plain case: pressed while streaming, sent exactly once when the turn closes", async () => {
+		const { posts, expected } = await run(["press", "close"]);
+		assert.deepEqual(posts.map((p) => p.thinking), ["t0"]);
+		assert.deepEqual(expected, ["t0"]);
+	});
+
+	it("property: one answer POST per Submit pressed while the question was pending — never zero, never two", async () => {
+		const act = fc.constantFrom<Act>("press", "doublePress", "close", "leave");
+		await fc.assert(fc.asyncProperty(fc.array(act, { maxLength: 8 }), async (acts) => {
+			const { posts, expected } = await run(acts);
+			assert.deepEqual(posts.map((p) => p.thinking), expected, acts.join(","));
+		}), { numRuns: 60 });
 	});
 });
