@@ -47,3 +47,38 @@ test("the replay effect waits on busy || compacting and re-runs when compacting 
 	const deps = effect.arguments[1];
 	assert.ok(deps && ts.isArrayLiteralExpression(deps) && deps.elements.some(e => e.getText(file) === "compacting") && deps.elements.some(e => e.getText(file) === "busy"), "deps include busy and compacting");
 });
+
+/** lh-7gn: the other submission paths, each held, blocked or proven unreachable while busy. */
+const arrow = (name: string) => { const d = all(ts.isVariableDeclaration).find(v => v.name.getText(file) === name); assert.ok(d?.initializer && ts.isArrowFunction(d.initializer), name); return d.initializer; };
+const dockText = (name: string) => fs.readFileSync(new URL(`../components/${name}`, import.meta.url), "utf8");
+
+test("prepareThinking (practice thinking) holds a press made while busy or compacting before its busy early return", () => {
+	const fn = arrow("prepareThinking"), body = fn.body.getText(file);
+	const press = body.indexOf("heldThinking.press("), early = body.indexOf("busyRef.current || compacting) return;");
+	assert.ok(press >= 0 && early > press, "heldThinking.press precedes the busy early return");
+	assert.match(body.slice(press, early), /busyRef\.current \|\| compacting\)\) return;/, "press is blocked on busy AND compacting");
+	const replay = calls("heldThinking.replay");
+	assert.equal(replay.length, 1);
+	assert.equal(replay[0]!.arguments[0]?.getText(file), "busy || compacting");
+	assert.ok((text.match(/heldThinking\.clear\(\)/g) ?? []).length >= 2, "Stop and a chat change clear the held press");
+});
+
+test("plugin problem and plugin question docks are unreachable while busy: chat.tsx passes ready = !busy && !compacting and the docks gate every submit path on it", () => {
+	assert.match(text, /pluginReady=\{!busy && !compacting && reconciliation === "ready"\}/);
+	assert.match(text, /ready: !busy && !compacting && reconciliation === "ready", reconciliation: activeProblemOf/);
+	const q = dockText("plugin-question-dock.tsx"), p = dockText("plugin-problem-dock.tsx");
+	assert.match(q, /const canSubmit = canonicalReady && ready &&/, "question button");
+	assert.match(q, /eligible: key => [^\n]*current\.current\.ready/, "question keyboard submit");
+	assert.match(q, /before\.reconciliation !== "ready" \|\| !before\.ready/, "question capture");
+	assert.match(p, /const canSubmit = ready && reconciliation === "ready"/, "problem button");
+	assert.match(p, /now\.ready && now\.available && now\.reconciliation === "ready"/, "problem keyboard submit");
+	assert.match(p, /now\.ready && now\.reconciliation === "ready"/, "problem capture");
+});
+
+test("prepareText never drops a press made while busy: busy steers, compacting is unreachable (sendAllowed)", () => {
+	const body = arrow("prepareText").body.getText(file);
+	const guard = /if \(!target \|\| pendingRef\.current[^\n]*\) return Promise\.resolve\(false\);/.exec(body)?.[0] ?? "";
+	assert.ok(guard && !guard.includes("busyRef"), "the early return does not test busy");
+	assert.match(body, /if \(busyRef\.current\) return steer\(/);
+	assert.match(text, /const sendAllowed = [^\n]*!compacting/);
+});
