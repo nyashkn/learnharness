@@ -87,7 +87,7 @@ import { revealCitationSource } from "@/components/citation-source";
 import { createSideQuestionActions, SideThreadBody, SideThreadPanel, SideThreadPopover } from "@/components/side-thread";
 import { useSideThread, type SideThreadOpenArgs } from "@/components/use-side-thread";
 import { useRouter } from "next/navigation";
-import { HeldBuiltinSubmission } from "./held-builtin-submission";
+import { HeldBuiltinSubmission, runSubmissionAttempt } from "./held-builtin-submission";
 import { PracticeDock, type PrepareThinkingWithConfidence } from "@/components/practice-dock";
 import { ProblemTally } from "@/components/problem-tally";
 import { PluginProblemDock, type PluginProblemDockProps } from "./plugin-problem-dock";
@@ -331,22 +331,16 @@ export function Chat({
 	inputViewReader.changed = notifyViewChanged;
 	const submissionLive = useRef({ nativeMessages, surfaceTarget, ready: true });
 	submissionLive.current = { nativeMessages, surfaceTarget, ready: true };
-	const runSubmission = async (target: PluginSubmissionTarget, capture: () => PluginSubmission | Promise<PluginSubmission>, current: () => boolean, deliver: (prepared: PluginSubmission, attempt: SubmissionAttempt) => Promise<boolean>): Promise<boolean> => {
+	const runSubmission = (target: PluginSubmissionTarget, capture: () => PluginSubmission | Promise<PluginSubmission>, current: () => boolean, deliver: (prepared: PluginSubmission, attempt: SubmissionAttempt) => Promise<boolean>): Promise<boolean> => {
 		const modelRevision = submissionModel.capture();
-		const attempt = submissionRunner.begin(target, pluginManager?.captureSubmissionInterceptors() ?? [], () => submissionMounted.current && submissionModel.isCurrent(modelRevision) && submissionLive.current.surfaceTarget === target.surfaceTarget && !!findSurfaceBoundary(target.surfaceTarget) && current());
-		if (!attempt) return false;
-		setPreparationError(undefined);
-		try {
-			const input = await attempt.finalize(async () => { await finishDictation(); return capture(); });
-			const prepared = await attempt.prepare(input, submissionLive.current.nativeMessages);
-			if (!prepared) return false;
-			attempt.check();
-			return await deliver(prepared, attempt);
-		} catch (error) {
-			attempt.cancel(); attempt.refused();
-			if (!(error instanceof DOMException && error.name === "AbortError")) setPreparationError(attempt.preparationFailure(error).message);
-			return false;
-		}
+		return runSubmissionAttempt({
+			runner: submissionRunner, target,
+			registrations: pluginManager?.captureSubmissionInterceptors() ?? [],
+			isCurrent: () => submissionMounted.current && submissionModel.isCurrent(modelRevision) && submissionLive.current.surfaceTarget === target.surfaceTarget && !!findSurfaceBoundary(target.surfaceTarget) && current(),
+			capture: async () => { await finishDictation(); return capture(); },
+			history: () => submissionLive.current.nativeMessages,
+			deliver, onBegin: () => setPreparationError(undefined), onError: setPreparationError,
+		});
 	};
 	const textTarget = (): Extract<PluginSubmissionTarget, { type: "text" }> | undefined => surfaceTarget ? { type: "text", sessionId: chatId, sessionKind: kind === "practice" ? "practice" : "teaching", surfaceTarget, channels: ["content"] } : undefined;
 	const scrollContextRef = useRef<StickToBottomContext | null>(null);
@@ -731,7 +725,7 @@ export function Chat({
 		// lh-osh: the dock is up while the turn that posed the question still streams (or the
 		// record is still syncing). Keep this press (the last wins) and replay it, through this
 		// same path, once the turn is over.
-		if (original && busyRef.current && !compacting) { heldBuiltin.hold({ question, capture, isCurrent }, original.key); return; }
+		if (original && heldBuiltin.press({ question, capture, isCurrent }, original.key, busyRef.current || compacting)) return;
 		if (!target || !original || busyRef.current || compacting) return;
 		void runSubmission(target, () => {
 			const raw = capture();
@@ -757,10 +751,6 @@ export function Chat({
 	};
 	const prepareBuiltinRef = useRef(prepareBuiltin); prepareBuiltinRef.current = prepareBuiltin;
 	useEffect(() => { heldBuiltin.clear(); }, [chatId, heldBuiltin]);
-	useEffect(() => {
-		if (busy) return;
-		heldBuiltin.replay(() => pendingQuestionOf(submissionLive.current.nativeMessages)?.key, call => prepareBuiltinRef.current(call));
-	}, [busy, heldBuiltin]);
 	const thinkingTarget = (): Extract<PluginSubmissionTarget, { type: "thinking" }> | undefined => {
 		const occurrence = activeProblemOccurrenceOf(nativeMessages);
 		if (!surfaceTarget || !activeProblem || activeProblem.pluginProblem || !occurrence) return;
@@ -1119,6 +1109,9 @@ export function Chat({
 	// server's registry mutex is the structural gate; this is the
 	// affordance).
 	const [compacting, setCompacting] = useState(initiallyCompacting);
+	useEffect(() => {
+		heldBuiltin.replay(busy || compacting, () => pendingQuestionOf(submissionLive.current.nativeMessages)?.key, call => prepareBuiltinRef.current(call));
+	}, [busy, compacting, heldBuiltin]);
 	submissionLive.current.ready = !compacting && reconciliation === "ready";
 	// A failed model response (issue #110): Retry keeps the saved input
 	// and completed work, without another learner message. Offered from
