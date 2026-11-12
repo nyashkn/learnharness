@@ -10,6 +10,7 @@ default:
 # The gate: everything an agent must pass.
 ci:
     @node -v | grep -qE '^v26\.' || { echo "refusing: the gate needs Node 26, found $(node -v 2>/dev/null || echo none). Fix: nvm use 26, or put Node 26 first on PATH." >&2; exit 1; }
+    pnpm run plugins:setup
     pnpm run ci
 
 # One step in a Cloudflare sandbox (cf-ci), from this worktree, uncommitted files included.
@@ -40,6 +41,7 @@ app:
 # Drives the fork's screens headless (puppeteer, throwaway data, scripted model, no keys); one PASS/FAIL line per step, screenshots under $TMPDIR.
 acceptance:
     @node -v | grep -qE '^v26\.' || { echo "refusing: acceptance needs Node 26, found $(node -v 2>/dev/null || echo none)." >&2; exit 1; }
+    pnpm run plugins:setup && pnpm run plugins:build-core && pnpm run plugins:build-authoring
     pnpm exec tsx scripts/acceptance/run.ts
 
 test-one file:

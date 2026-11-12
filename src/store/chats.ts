@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 import { PATHS } from "../../config.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
-import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, ImageSnapshot, PlanTree, TurnUsage } from "../core/contracts.ts";
+import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, ImageSnapshot, PlanTree, SideChatThread, TurnUsage } from "../core/contracts.ts";
 import { CURRENT_CHAT_VERSION } from "../core/contracts.ts";
 import type { LhMessage } from "../core/native-messages.ts";
 import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts";
@@ -33,7 +33,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 	const blobs = opts.blobs ?? createBlobStore(path.join(dataDir, "blobs.sqlite")); // opens per call, so building the store touches no disk
 	function chatFile(id: string): string {
 		if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Invalid chat id: ${id}`);
-		return path.join(chatsDir, `${id}.json`);
+		return path.join(/* turbopackIgnore: true */ chatsDir, `${id}.json`);
 	}
 
 	/** THE SILENCE LAW (push S6, 2026-10-02): chats-changed announces ONLY
@@ -90,7 +90,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 	function readRaw(id: string): StoredChat | null {
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(fs.readFileSync(chatFile(id), "utf-8"));
+			parsed = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ chatFile(id), "utf-8"));
 		} catch {
 			return null;
 		}
@@ -133,11 +133,11 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 	function listChats(): ChatSummary[] {
 		try {
 			return fs
-				.readdirSync(chatsDir)
+				.readdirSync(/* turbopackIgnore: true */ chatsDir)
 				.filter((f) => f.endsWith(".json"))
 				.map((f) => readRaw(f.slice(0, -5)))
 				.filter((r): r is StoredChat => r !== null)
-				.map(({ messages, tree, turns, extractions, imageSnapshots: _imageSnapshots, ...summary }) => {
+				.map(({ messages, tree, turns, extractions, imageSnapshots: _imageSnapshots, sideChats: _sideChats, ...summary }) => {
 					// Per-record isolation (Wave B): a record whose messages fail the
 					// projection (e.g. pre-Wave-B UIMessage-format scratch — the
 					// zero-back-compat wipe makes these "corrupt") must not blank the
@@ -183,6 +183,8 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 	function saveMessages(id: string, messages: LhMessage[]): void {
 		const record = readRaw(id);
 		if (!record) throw new Error(`Chat not found: ${id}`);
+		// Side-delivery watermarks are part of the appended native entries,
+		// so input + updates commit together without mutating thread history.
 		record.messages = messages;
 		record.updatedAt = new Date().toISOString();
 		writeChat(record);
@@ -295,6 +297,21 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 		writeChat(record);
 	}
 
+	/** Side-question threads (2026-11-02): one synchronous read-modify-write,
+	 *  so a concurrent turn's saveMessages (which re-reads the record) never
+	 *  loses a thread and a thread write never loses messages. Null when the
+	 *  chat is gone (a side answer finishing after session deletion). Silent
+	 *  and not conversation activity, like saveSettings. */
+	function updateSideChats(id: string, update: (threads: SideChatThread[]) => SideChatThread[]): SideChatThread[] | null {
+		const record = readRaw(id);
+		if (!record) return null;
+		const next = update(record.sideChats ?? []);
+		if (next.length > 0) record.sideChats = next;
+		else delete record.sideChats;
+		writeChat(record);
+		return next;
+	}
+
 	return {
 		createChat,
 		getChat,
@@ -307,6 +324,7 @@ export function createChatStore(chatsDir: string, opts: { dataDir?: string; blob
 		deleteChat,
 		appendTurnUsage,
 		appendExtractionUsage,
+		updateSideChats,
 	};
 }
 

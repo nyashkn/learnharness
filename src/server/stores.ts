@@ -14,7 +14,9 @@ import { settingsStore } from "../store/settings.ts";
 import { authStore } from "../store/auth.ts";
 import { promptOverrides } from "../store/prompt-overrides.ts";
 import { renderSettingsStore } from "../store/render-settings.ts";
+import { themeStore } from "../store/themes.ts";
 import { resolveSettings, type EffectiveSettings } from "../core/settings-resolution.ts";
+import { configureWorkerRequestAdmission } from "../agent/worker-request-admission.ts";
 import { PATHS } from "../../config.ts";
 import { beforeWrite, openDataFolder, type Backend } from "../store/marker.ts";
 import { createSqlGraphStores } from "../store/sql/open.ts";
@@ -48,12 +50,19 @@ export const stores: Stores = {
 	authStore,
 	promptOverrides,
 	renderSettingsStore,
+	themeStore,
 };
 
 // Named handles and the raw-record aliases the routes use (moved from the barrel).
-export { settingsStore, authStore, promptOverrides, renderSettingsStore };
+export { settingsStore, authStore, promptOverrides, renderSettingsStore, themeStore };
 export { readRenderSettings, writeRenderSettings } from "../store/render-settings.ts";
 export { readSettings as readSettingsRecord, writeSettings as writeSettingsRecord } from "../store/settings.ts";
+// Plugin persistence (upstream v0.6.0): per-plugin record stores and data directories under the data folder.
+// plugins.ts builds one store per plugin directory, so the composition root hands it the factories.
+export { createPluginAgentRecordStore } from "../store/plugin-agent-records.ts";
+export { createPluginTaskRecordStore, readPluginTaskRecord, recoverPluginTaskRecords } from "../store/plugin-task-records.ts";
+export { safePluginDataDirectory } from "../store/plugin-data-paths.ts";
+export { assertGraphFormat } from "../store/graph-format.ts";
 
 export type { Stores };
 
@@ -68,6 +77,9 @@ export type { Stores };
 export function effectiveSettings(): EffectiveSettings {
 	return resolveSettings(settingsStore.readSettings());
 }
+
+// Runtime policy is supplied at the composition root, never imported by agents.
+configureWorkerRequestAdmission(() => effectiveSettings().agent.workerRequestConcurrency);
 
 /**
  * seeds.sqlite for the home panel (K5), the second composition point beside scripts/seed.ts (CB7). Opened per call

@@ -10,6 +10,8 @@
  */
 
 import type { LhMessage } from "./native-messages.ts";
+import type { PluginAgentRecord } from "./plugin-agents.ts";
+import type { PluginTaskRecord } from "./plugin-workers.ts";
 import type {
 	ChatRecord,
 	ImageSnapshot,
@@ -19,12 +21,14 @@ import type {
 	GraphNode,
 	JobKind,
 	JobRecord,
+	PluginJobMetadata,
 	ExtractionRunUsage,
 	PlanTree,
 	Position,
 	CoverageEntry,
 	ReviewLine,
 	SessionCheckpoint,
+	SideChatThread,
 	TurnUsage,
 	NotesSource,
 } from "./contracts.ts";
@@ -32,6 +36,23 @@ import type { UserSettings } from "./settings.ts";
 import type { FileAccessSettingsResult } from "./file-access.ts";
 import type { CustomAuthBinding } from "./custom-provider-auth.ts";
 import type { GraphRenderSettings } from "./render-settings.ts";
+import type { Theme, ThemeFile } from "./themes.ts";
+
+// ─── Plugin sessions — plugin-owned data, separate from core chats ──────────
+
+/** One writer per plugin directory. Failed atomic replacements must throw. */
+export interface PluginAgentRecordStore {
+	list(): PluginAgentRecord[];
+	get(id: string): PluginAgentRecord | null;
+	save(record: PluginAgentRecord): void;
+}
+
+/** One writer per plugin task directory; accepted results require an atomic save. */
+export interface PluginTaskRecordStore {
+	list(): PluginTaskRecord[];
+	get(id: string): PluginTaskRecord | null;
+	save(record: PluginTaskRecord): void;
+}
 
 // ─── ChatStore — the session record's home (data/chats) ─────────────────────
 
@@ -70,6 +91,14 @@ export interface ChatStore {
 	 *  job cleanup are the caller's choreography (core/graph-deletion.ts +
 	 *  the DELETE route), not the store's. */
 	deleteChat(id: string): boolean;
+	/** Read-modify-write the record's side-question threads (inline
+	 *  clarification threads, 2026-11-02) in one synchronous section — the
+	 *  same per-field discipline as the usage logs, so it never clobbers a
+	 *  concurrent turn's messages. Returns the stored threads, or null when
+	 *  the chat is unknown (deleted mid-answer is not an error). Silent: the
+	 *  side-chat service announces its own changes. Not conversation
+	 *  activity — updatedAt stays put. */
+	updateSideChats(id: string, update: (threads: SideChatThread[]) => SideChatThread[]): SideChatThread[] | null;
 }
 
 /** Derived read surface over the graph (projections.sqlite). Rebuilt from the GraphStore; never a source of truth. */
@@ -192,6 +221,8 @@ export interface CreateJobInit {
 	toolCallId: string;
 	/** First activity line (defaults to "starting"). */
 	activity?: string;
+	/** Host-owned plugin worker linkage, not model-selected routing. */
+	plugin?: PluginJobMetadata;
 	/** Saved on the job before its worker is spawned. */
 	input?: unknown;
 }
@@ -246,6 +277,25 @@ export interface RenderSettingsStore {
 	readRenderSettings(): GraphRenderSettings | null;
 	/** Persist (sanitized again on write). Returns what was written. */
 	writeRenderSettings(raw: unknown): GraphRenderSettings;
+}
+
+// ─── ThemeStore — imported custom themes (theme wave, 2026-11-04) ──────────
+
+/**
+ * Custom themes as `<id>.json` files under config.THEMES_DIR, one per
+ * imported theme (core/themes.ts ThemeFile shape). The store persists
+ * what it is given; validation and id choice are the route's concern.
+ * Unreadable or invalid files are skipped on list, never thrown.
+ */
+export interface ThemeStore {
+	/** Every valid custom theme on disk, sorted by id. */
+	listThemes(): Theme[];
+	/** One custom theme, or null when the file is absent or invalid. */
+	readTheme(id: string): Theme | null;
+	/** Persist a theme file at `<id>.json` (creates the dir). */
+	writeTheme(id: string, theme: ThemeFile): void;
+	/** Remove `<id>.json`, if present. */
+	deleteTheme(id: string): void;
 }
 
 // ─── PromptOverrideStore — per-segment system-prompt overrides (2026-09-19) ──
@@ -314,4 +364,5 @@ export interface Stores {
 	authStore: AuthStore;
 	promptOverrides: PromptOverrideStore;
 	renderSettingsStore: RenderSettingsStore;
+	themeStore: ThemeStore;
 }

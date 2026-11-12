@@ -31,6 +31,7 @@ jobs:
           node-version: "26"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run plugins:setup
       - name: Tag must match package.json
         if: github.event_name == 'push'
         run: |
@@ -123,6 +124,7 @@ jobs:
         with:
           xcode-version: latest-stable
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run plugins:setup
       - name: Native renderer tests on this OS
         run: pnpm exec electron --import tsx --test tests/pdf-native-render.test.ts tests/pdf-ops.test.ts tests/svg-native-render.test.ts tests/browser-service.test.ts
         env:

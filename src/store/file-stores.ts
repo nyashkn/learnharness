@@ -14,6 +14,7 @@ import { createPromptOverrides } from "./prompt-overrides.ts";
 import { createRenderSettingsStore } from "./render-settings.ts";
 import { createSettingsStore } from "./settings.ts";
 import { createSourceOrganizationStore } from "./source-organization.ts";
+import { createThemeStore } from "./themes.ts";
 import { emit } from "../core/events.ts";
 import { createSqlGraphStores } from "./sql/open.ts";
 import type { LockEnv } from "./sql/lock.ts";
@@ -37,6 +38,7 @@ export function createFileStores(dataDir: string, authFile: string): Stores {
 		authStore: createAuthStore(authFile),
 		promptOverrides: createPromptOverrides(path.join(dataDir, "prompts"), { dataDir }),
 		renderSettingsStore: createRenderSettingsStore(graphDir, { dataDir }),
+		themeStore: createThemeStore(path.join(dataDir, "themes"), { dataDir }),
 	};
 }
 

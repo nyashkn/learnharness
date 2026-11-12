@@ -29,7 +29,8 @@ else
   # hardenedRuntime=false: an ad-hoc signature plus hardened runtime blocks loading the server's native addons.
   # --dir builds no dmg/zip, so electron-builder writes no app-update.yml; electron/main.cjs reads that as updater off.
   BUILD_LOG="$(mktemp)"
-  (cd "$ROOT" && pnpm run desktop:dist --dir --publish never -c.mac.notarize=false -c.mac.identity=- -c.mac.hardenedRuntime=false -c.npmRebuild=false) >"$BUILD_LOG" 2>&1 \
+  # plugins:setup: desktop:dist builds the core plugins, which need their locked dependencies (idempotent npm ci).
+  (cd "$ROOT" && pnpm run plugins:setup && pnpm run desktop:dist --dir --publish never -c.mac.notarize=false -c.mac.identity=- -c.mac.hardenedRuntime=false -c.npmRebuild=false) >"$BUILD_LOG" 2>&1 \
     || { tail -40 "$BUILD_LOG" >&2; die "build failed; full log: $BUILD_LOG"; }
   rm -f "$BUILD_LOG"
   BUNDLE="$ROOT/dist/mac-arm64/$APP_NAME.app"
