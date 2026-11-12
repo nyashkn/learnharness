@@ -1,6 +1,6 @@
 {
 	"name": "learnharness",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"packageManager": "pnpm@11.20.0",
 	"license": "AGPL-3.0-only",
 	"author": {
