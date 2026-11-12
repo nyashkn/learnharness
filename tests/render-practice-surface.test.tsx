@@ -14,7 +14,7 @@ import React from "react";
 (globalThis as Record<string, unknown>).React = React;
 
 import assert from "node:assert/strict";
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderWithInteractionLayers as renderToStaticMarkup } from "./interaction-layer-render.tsx";
 import { describe, it } from "node:test";
 
 import { PracticeDock } from "../components/practice-dock.tsx";
@@ -274,9 +274,9 @@ describe("ProblemTally", () => {
 		const html = renderToStaticMarkup(<ProblemTally tally={{ solved: 3, hinted: 1, unsolved: 2 }} />);
 		assert.match(html, /data-testid="problem-tally"/);
 		assert.match(html, /6 done ·/);
-		assert.match(html, /data-bucket="solved" class="text-green-500">3</);
-		assert.match(html, /data-bucket="hinted" class="text-amber-500">1</);
-		assert.match(html, /data-bucket="unsolved" class="text-red-500">2</);
+		assert.match(html, /data-bucket="solved" class="text-success">3</);
+		assert.match(html, /data-bucket="hinted" class="text-warning">1</);
+		assert.match(html, /data-bucket="unsolved" class="text-error">2</);
 		assert.match(html, /aria-label="6 done: Solved 3 · With hints 1 · Not solved 2"/);
 	});
 

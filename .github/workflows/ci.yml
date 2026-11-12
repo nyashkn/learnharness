@@ -85,6 +85,7 @@ jobs:
           node-version: "26"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run plugins:setup
       # The Electron binary is fetched lazily from github.com (pnpm skips its postinstall).
       # Cache it per version/OS, then fetch with backoff on a cold cache.
       - id: electron

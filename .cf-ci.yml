@@ -25,6 +25,7 @@ install: >-
   && tar -xzf /tmp/node.tgz -C /usr/local --strip-components=1
   && npm install -g --silent pnpm@11.20.0
   && pnpm install --frozen-lockfile
+  && pnpm run plugins:setup
   && node node_modules/electron/install.js
   && git remote set-url origin https://github.com/nyashkn/learnharness.git
 steps:

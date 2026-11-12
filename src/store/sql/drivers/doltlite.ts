@@ -26,9 +26,13 @@ function loadAddon(): Addon {
 	if (addon) return addon;
 	try {
 		const require = createRequire(import.meta.url);
-		const mod = require("@dolthub/doltlite") as { DatabaseSync: typeof DoltDatabase };
+		// Untraced on purpose: index.js resolves prebuilds/<platform>-<arch> at runtime, so a traced require
+		// sweeps in every platform's prebuild, and Next's trace excludes do not reach instrumentation.ts's
+		// trace. next.config.ts outputFileTracingIncludes ships exactly index.js, package.json and this
+		// platform's addon; scripts/build-server.mjs refuses anything else.
+		const mod = require(/* turbopackIgnore: true */ "@dolthub/doltlite") as { DatabaseSync: typeof DoltDatabase };
 		// doltVersion() returns the literal "doltlite-amalgamation", so the package version is the engine version.
-		const version = (require("@dolthub/doltlite/package.json") as { version: string }).version;
+		const version = (require(/* turbopackIgnore: true */ "@dolthub/doltlite/package.json") as { version: string }).version;
 		addon = { DatabaseSync: mod.DatabaseSync, version };
 		return addon;
 	} catch (cause) {

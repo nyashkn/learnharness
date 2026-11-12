@@ -30,9 +30,9 @@ export function ProblemTally({ tally, side = "bottom", className }: {
 				className={cn("lh-no-drag flex shrink-0 select-none items-center gap-1.5 text-xs font-medium tabular-nums", className)}
 			>
 				<span className="text-muted-foreground">{total} done ·</span>
-				<span data-bucket="solved" className="text-green-500">{tally.solved}</span>
-				<span data-bucket="hinted" className="text-amber-500">{tally.hinted}</span>
-				<span data-bucket="unsolved" className="text-red-500">{tally.unsolved}</span>
+				<span data-bucket="solved" className="text-success">{tally.solved}</span>
+				<span data-bucket="hinted" className="text-warning">{tally.hinted}</span>
+				<span data-bucket="unsolved" className="text-error">{tally.unsolved}</span>
 			</span>
 		</Hint>
 	);

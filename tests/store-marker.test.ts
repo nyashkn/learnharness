@@ -181,6 +181,7 @@ describe("no file appears on open or read", () => {
 			readCoverage: (s) => s.graphStore.readCoverage(), readSources: (s) => s.graphStore.readSources(), readPositions: (s) => s.graphStore.readPositions(),
 			revision: (s) => s.graphStore.revision?.(), sourceOrgRead: (s) => s.sourceOrganizationStore.read(), renderRead: (s) => s.renderSettingsStore.readRenderSettings(),
 			authVars: (s) => s.authStore.authVars(),
+			listThemes: (s) => s.themeStore.listThemes(), readTheme: (s) => s.themeStore.readTheme("my-theme"),
 		};
 		fc.assert(fc.property(fc.constantFrom("no-folder", "empty"), fc.array(fc.constantFrom(...Object.keys(reads)), { minLength: 1, maxLength: 12 }), (kind, seq) => {
 			const dir = fresh();
@@ -209,6 +210,8 @@ const FAMILIES: Record<string, (s: S) => unknown> = {
 	renderSettings: (s) => s.renderSettingsStore.writeRenderSettings({}),
 	sourceOrganization: (s) => s.sourceOrganizationStore.write(s.sourceOrganizationStore.read()),
 	transactAppend: (s) => s.graphStore.transact("t", () => s.graphStore.appendNode(NODE("a"))),
+	themes: (s) => s.themeStore.writeTheme("my-theme", { name: "Mine", mode: "dark", colors: {} } as never),
+	themeDelete: (s) => s.themeStore.deleteTheme("my-theme"),
 };
 
 describe("marker and lock are written on the first write, not before", () => {
