@@ -139,9 +139,8 @@ it("if rollback itself fails, retains and reports the previous dist backup rathe
 it("the documented npm command builds and installs without a checkout, and build failure prevents installation", () => fixture(({ root, project, directory, installed, write }) => {
 	fs.mkdirSync(path.join(project, "scripts")); fs.copyFileSync(helper, path.join(project, "scripts/install-plugin-local.mjs"));
 	write("source project/package.json", JSON.stringify({ private: true, scripts: { build: 'node -e "process.exit(Number(process.env.FAIL_BUILD || 0))"', "install:local": "npm run build && node scripts/install-plugin-local.mjs" } }));
-	const npm = process.env.npm_execpath;
-	assert.ok(npm, "test must run under npm");
-	const execute = (fail: string) => spawnSync(process.execPath, [npm, "run", "install:local", "--", directory], { cwd: project, encoding: "utf8", env: { ...process.env, HOME: root, FAIL_BUILD: fail } });
+	// The documented command is npm's. Fork: the suite runs under pnpm, which forwards the `--` literally, so use npm itself.
+	const execute = (fail: string) => spawnSync("npm", ["run", "install:local", "--", directory], { cwd: project, encoding: "utf8", shell: process.platform === "win32", env: { ...process.env, HOME: root, FAIL_BUILD: fail } });
 	const failed = execute("1"); assert.equal(failed.status, 1, failed.stderr); unchanged(installed);
 	const success = execute("0"); assert.equal(success.status, 0, success.stderr);
 	assert.match(success.stdout, /Installed:/);

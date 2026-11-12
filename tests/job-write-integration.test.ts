@@ -9,6 +9,10 @@ process.env.LH_DATA_DIR = path.join(root, "data");
 process.env.LH_AUTH_FILE = path.join(root, "auth.json");
 const { jobStore } = await import("../src/store/jobs.ts");
 const { subscribe } = await import("../src/core/events.ts");
+// The fork writes the data-folder marker (and takes the store lock) on the first write; land it now so the
+// held-rename mocks below count only job writes.
+const { beforeWrite } = await import("../src/store/marker.ts");
+beforeWrite(process.env.LH_DATA_DIR!);
 after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 const plugin = { pluginId: "example", toolName: "task", workerId: "worker", requestId: "request" };

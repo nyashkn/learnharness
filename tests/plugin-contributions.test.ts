@@ -233,7 +233,7 @@ test("plugin tools and Claude output preserve practice correction and mixed-batc
 		fauxAssistantMessage([
 			fauxToolCall("practice_addon", {}, { id: "addon-two" }),
 			fauxToolCall("send_to_user", { message: "Corrected exercise." }, { id: "send-two" }),
-			fauxToolCall("problem", { statement: "What is two plus two?", mode: "recall", modelSolution: "Four." }, { id: "good-pose" }),
+			fauxToolCall("problem", { statement: "What is two plus two?", mode: "recall", surface: "single-digit addition", modelSolution: "Four." }, { id: "good-pose" }),
 		], { stopReason: "toolUse" }),
 		fauxAssistantMessage("Must not continue before the learner answers."),
 	]);
