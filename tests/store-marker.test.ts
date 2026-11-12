@@ -667,17 +667,7 @@ describe("plugin writers take the marker and store lock (lh-m3e)", () => {
 
 describe("plugin startup and a fresh LH_STORAGE=doltlite folder", { skip: !DOLTLITE_HOST }, () => {
 	const repo = path.resolve(import.meta.dirname, "..");
-	/** One real server process: plugins.ts is what instrumentation.ts imports; `enable` also switches every core plugin on (a gated write) and waits for activation. */
-	const startup = (dir: string, enable: boolean): { status: number | null; out: string } => {
-		const code = `
-			const { initializePlugins, getPluginHost } = await import(${JSON.stringify(path.join(repo, "src/server/plugins.ts"))});
-			await initializePlugins();
-			if (${enable}) {
-				const host = await getPluginHost();
-				for (const p of host.list().filter((p) => p.origin === "core")) await host.setEnabled(p.id, true);
-				console.log(JSON.stringify(host.list().filter((p) => p.origin === "core").map((p) => [p.id, p.status])));
-			}
-			process.exit(0);`;
+	const run = (dir: string, code: string): { status: number | null; out: string } => {
 		const home = fresh();
 		fs.mkdirSync(home);
 		const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
@@ -686,24 +676,49 @@ describe("plugin startup and a fresh LH_STORAGE=doltlite folder", { skip: !DOLTL
 		});
 		return { status: r.status, out: `${r.stdout}${r.stderr}` };
 	};
+	/** The real entry instrumentation.ts imports. Its core set is the repo's built core-plugins/ (gitignored build output, absent in CI), so it is only booted here, never enabled. */
+	const realBoot = (dir: string) => run(dir, `
+		const { initializePlugins } = await import(${JSON.stringify(path.join(repo, "src/server/plugins.ts"))});
+		await initializePlugins();
+		process.exit(0);`);
+	/** The real PluginHost over a fixture core plugin, wired exactly as plugins.ts wires it (the same gate helper the host tests use): one server process per call.
+	 *  plugins.ts takes its core directory and ids from the repo, so a fixture set cannot be handed to it without a new seam. */
+	const hostProcess = (dir: string, coreRoot: string, enable: boolean) => run(dir, `
+		const { openDataFolder } = await import(${JSON.stringify(path.join(repo, "src/store/marker.ts"))});
+		const { createPluginHost } = await import(${JSON.stringify(path.join(repo, "src/server/plugin-host.ts"))});
+		const { pluginHostGate } = await import(${JSON.stringify(path.join(repo, "tests/plugin-host-gate.ts"))});
+		const path = await import("node:path");
+		openDataFolder(${JSON.stringify(dir)}); // what stores.ts does at module load
+		const directory = path.join(${JSON.stringify(dir)}, "plugins");
+		const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: "0.4.1",
+			core: { directory: ${JSON.stringify(path.join(coreRoot, "core-plugins"))}, dataDirectory: path.join(${JSON.stringify(dir)}, "core-plugin-data"), ids: ["fixture-core"] },
+			createServices: () => ({ agents: { dispose() {} }, workers: { dispose() {} } }) });
+		await host.initialize();
+		if (${enable}) { await host.setEnabled("fixture-core", true); console.log(JSON.stringify(host.list().map((p) => [p.id, p.status, p.error]))); }
+		process.exit(0);`);
 	const backendOf = (dir: string) => JSON.parse(fs.readFileSync(path.join(dir, "storage.json"), "utf8")).backend;
 
-	it("boot, restart, enable the core plugins, restart: still doltlite, and boot alone writes nothing", () => {
+	it("boot, restart, enable a core plugin, restart: still doltlite, and boot alone writes nothing", () => {
+		const coreRoot = fresh();
+		const code = path.join(coreRoot, "core-plugins", "fixture-core");
+		fs.mkdirSync(code, { recursive: true });
+		fs.writeFileSync(path.join(code, "manifest.json"), JSON.stringify({ apiVersion: 1, id: "fixture-core", name: "Fixture", version: "1.0.0", minAppVersion: "0.4.1", backend: "backend.cjs", main: "main.js", origin: "core" }));
+		fs.writeFileSync(path.join(code, "backend.cjs"), "exports.activate = () => {};");
+		fs.writeFileSync(path.join(code, "main.js"), "export function activate() {}");
 		const dir = fresh();
 		const leftovers: string[] = [];
-		for (let i = 0; i < 2; i++) { // a restart before any core write: the old boot made data/plugins, so the second boot saw a non-empty folder and picked file
-			const boot = startup(dir, false);
-			assert.equal(boot.status, 0, boot.out);
-			leftovers.push(fs.existsSync(dir) ? fs.readdirSync(dir).join(",") : "");
-		}
-		const enabled = startup(dir, true);
+		const seen = () => leftovers.push(fs.existsSync(dir) ? fs.readdirSync(dir).join(",") : "");
+		// A restart before any core write: the old boot made data/plugins, so the next boot saw a non-empty folder and picked file.
+		for (const boot of [realBoot(dir), realBoot(dir), hostProcess(dir, coreRoot, false), hostProcess(dir, coreRoot, false)]) { assert.equal(boot.status, 0, boot.out); seen(); }
+		const enabled = hostProcess(dir, coreRoot, true);
 		assert.equal(enabled.status, 0, enabled.out);
 		assert.equal(backendOf(dir), "doltlite", enabled.out);
-		assert.equal(fs.existsSync(path.join(dir, "core-plugin-data")), true, `a core plugin activated and got its data folder: ${enabled.out}`);
-		const again = startup(dir, false);
+		assert.match(enabled.out, /"fixture-core","active"/);
+		assert.equal(fs.statSync(path.join(dir, "core-plugin-data", "fixture-core")).isDirectory(), true, "the activated core plugin got its data folder");
+		const again = hostProcess(dir, coreRoot, false);
 		assert.equal(again.status, 0, again.out);
 		assert.equal(backendOf(dir), "doltlite");
-		assert.deepEqual(leftovers, ["", ""], "boot alone writes nothing into a fresh folder");
-		assert.equal(fs.existsSync(path.join(dir, "graph.doltlite")) || fs.readdirSync(dir).some((f) => /doltlite/.test(f)), true, "the doltlite store exists");
+		assert.deepEqual(leftovers, ["", "", "", ""], "boot alone writes nothing into a fresh folder");
+		assert.equal(fs.readdirSync(dir).some((f) => /doltlite/.test(f)), true, "the doltlite store exists");
 	});
 });
