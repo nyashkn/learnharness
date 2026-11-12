@@ -121,7 +121,7 @@ function backupInto(db: SqlDriver, dest: string): void {
 	const quoted = `'${dest.replaceAll("'", "''")}'`;
 	const file = db.get<{ file: string }>("SELECT file FROM pragma_database_list WHERE name = 'main'")?.file ?? "";
 	if (file === "") return void db.exec(`VACUUM INTO ${quoted}`); // in-memory: no file mode to copy
-	const mode = fs.statSync(file).mode & 0o777;
+	const mode = fs.statSync(/* turbopackIgnore: true */ file).mode & 0o777;
 	let fd: number;
 	try {
 		fd = fs.openSync(dest, "wx", mode);

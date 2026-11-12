@@ -21,8 +21,8 @@ import { writeFileAtomicSync } from "./atomic-write.ts";
 /** A file RenderSettingsStore over `graphDir` (data/graph); `dataDir` defaults to its parent. */
 export function createRenderSettingsStore(graphDir: string, opts: { dataDir?: string } = {}): RenderSettingsStore {
 	const dataDir = opts.dataDir ?? path.dirname(path.resolve(graphDir));
-	const file = path.join(graphDir, "render-settings.json");
-	const formatFile = path.join(graphDir, "format.json");
+	const file = path.join(/* turbopackIgnore: true */ graphDir, "render-settings.json");
+	const formatFile = path.join(/* turbopackIgnore: true */ graphDir, "format.json");
 	return {
 		/** The persisted settings, or null when no file exists yet (first boot). */
 		readRenderSettings(): GraphRenderSettings | null {

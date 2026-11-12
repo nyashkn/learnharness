@@ -53,7 +53,7 @@ export type FileSettingsStore = SettingsStore & { writeSettings(raw: unknown): U
 
 /** A file SettingsStore over the data folder `dataDir` (settings.json lives in it; the marker and lock too). */
 export function createSettingsStore(dataDir: string): FileSettingsStore {
-	const file = path.join(dataDir, "settings.json");
+	const file = path.join(/* turbopackIgnore: true */ dataDir, "settings.json");
 	/** ENOENT from a dangling settings/ancestor symlink is NOT first boot.
 	 * Find the nearest existing entry and verify its directory is usable. */
 	function settingsAreAbsent(): boolean {

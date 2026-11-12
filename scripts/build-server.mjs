@@ -63,6 +63,17 @@ for (const secret of ["auth.json", ...subscriptionSecrets, ".env", ".env.local"]
 	}
 }
 
+// 2d) Safety (lh-53h): repo tests/, docs/, goals/ and eslint/ never ship. They only appear
+// when a runtime path producer lacks `/* turbopackIgnore: true */` and widens the trace to the
+// whole project (tests/runtime-path-tracing.test.ts guards the known producers).
+for (const repoDir of ["tests", "docs", "goals", "eslint"]) {
+	if (exists(path.join(STANDALONE, repoDir))) {
+		console.error(`[build-server] REFUSING: standalone contains ${repoDir}/ — a runtime path producer widened the trace to the whole project.`);
+		console.error("             Add `/* turbopackIgnore: true */` to the producer; see the Turbopack warnings from `next build`.");
+		process.exit(1);
+	}
+}
+
 // Assemble plugin assets only after refusing unsafe traced data/credentials.
 // Runtime native plugin loader is deliberately outside Next's module graph.
 // Copy it explicitly: external plugin entries must be loaded by native Node,

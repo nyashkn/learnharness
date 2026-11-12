@@ -79,16 +79,16 @@ interface Txn { ops: Op[]; poisoned: boolean }
 /** The file names inside one graph dir (the same names config.ts publishes for the singleton). */
 export function graphPaths(graphDir: string) {
 	return {
-		nodes: path.join(graphDir, "nodes.jsonl"),
-		chains: path.join(graphDir, "chains.jsonl"),
-		sessions: path.join(graphDir, "sessions.jsonl"),
-		coverage: path.join(graphDir, "coverage.jsonl"),
-		reviews: path.join(graphDir, "review", "reviews.jsonl"),
-		reviewRemaps: path.join(graphDir, "review", "remaps.jsonl"),
-		sources: path.join(graphDir, "sources.json"),
-		sourceOrganization: path.join(graphDir, "source-organization.json"),
-		positions: path.join(graphDir, "positions.json"),
-		format: path.join(graphDir, "format.json"),
+		nodes: path.join(/* turbopackIgnore: true */ graphDir, "nodes.jsonl"),
+		chains: path.join(/* turbopackIgnore: true */ graphDir, "chains.jsonl"),
+		sessions: path.join(/* turbopackIgnore: true */ graphDir, "sessions.jsonl"),
+		coverage: path.join(/* turbopackIgnore: true */ graphDir, "coverage.jsonl"),
+		reviews: path.join(/* turbopackIgnore: true */ graphDir, "review", "reviews.jsonl"),
+		reviewRemaps: path.join(/* turbopackIgnore: true */ graphDir, "review", "remaps.jsonl"),
+		sources: path.join(/* turbopackIgnore: true */ graphDir, "sources.json"),
+		sourceOrganization: path.join(/* turbopackIgnore: true */ graphDir, "source-organization.json"),
+		positions: path.join(/* turbopackIgnore: true */ graphDir, "positions.json"),
+		format: path.join(/* turbopackIgnore: true */ graphDir, "format.json"),
 	} as const;
 }
 
