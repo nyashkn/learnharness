@@ -660,6 +660,34 @@ export function registerContract(f: AdapterFactory): void {
 			b.prompts.writeOverride(p, text); eq(b.prompts.readOverride(p), text); eq(b.prompts.listOverrides(), [p]);
 			b.prompts.deleteOverride(p); eq(b.prompts.readOverride(p), null); b.prompts.deleteOverride(p);
 		});
+		const thread = fc.record({
+			id: fc.string({ minLength: 1, maxLength: 5 }), open: fc.boolean(), createdAt: fc.constant("2026-01-01T00:00:00.000Z"),
+			anchor: fc.record({ messageId: fc.string({ minLength: 1, maxLength: 4 }), partId: fc.string({ minLength: 1, maxLength: 4 }), blockIndex: fc.nat(3), blockText: fc.string({ maxLength: 6 }) }),
+			messages: fc.array(fc.record({ id: fc.string({ minLength: 1, maxLength: 4 }), role: fc.constantFrom("user", "assistant") as fc.Arbitrary<"user" | "assistant">, text: fc.string({ maxLength: 6 }), at: fc.constant("2026-01-01T00:00:00.000Z") }), { maxLength: 3 }),
+		});
+		P("H15", "ChatStore.updateSideChats: read-your-writes, empty clears, silent (updatedAt/order kept), never clobbers messages, unknown chat -> null", fc.tuple(fc.array(thread, { maxLength: 4 }), fc.array(thread, { maxLength: 4 })), (b, [t1, t2]) => {
+			const c = b.chats.createChat("t"); const other = b.chats.createChat("o");
+			b.chats.saveMessages(c.id, [{ id: "m", role: "user", content: "keep" }] as never);
+			const before = b.chats.getChat(c.id)!; const order = b.chats.listChats().map((s) => [s.id, s.updatedAt]);
+			eq(b.chats.updateSideChats(c.id, (cur) => { eq(cur, []); return t1; }), t1);
+			eq(b.chats.getChat(c.id)!.sideChats ?? [], t1);
+			eq(b.chats.updateSideChats(c.id, (cur) => { eq(cur, t1); return t2; }), t2); // the callback sees what was stored
+			eq(b.chats.getChat(c.id)!.sideChats ?? [], t2);
+			eq({ ...b.chats.getChat(c.id)!, sideChats: undefined }, { ...before, sideChats: undefined }); // messages and updatedAt untouched
+			eq(b.chats.listChats().map((s) => [s.id, s.updatedAt]), order);
+			eq(b.chats.getChat(other.id)!.sideChats ?? [], []); // other chats untouched
+			eq(b.chats.updateSideChats(c.id, () => []), []); eq(b.chats.getChat(c.id)!.sideChats ?? [], []);
+			let called = false;
+			eq(b.chats.updateSideChats("chat_missing_000", () => { called = true; return t1; }), null); eq(called, false);
+			eq(b.chats.getChat("chat_missing_000"), null);
+		});
+		P("H16", "ChatStore.updateSideChats: a chat stamped with a NEWER schema version is refused (null, callback never called, file byte-identical)", fc.array(thread, { minLength: 1, maxLength: 3 }), (b, ts) => {
+			const c = b.chats.createChat("t"); b.chats.updateSideChats(c.id, () => ts);
+			b.hooks.stampNewerChat(c.id); const bytes = b.hooks.chatFileBytes(c.id)!;
+			let called = false;
+			eq(b.chats.updateSideChats(c.id, () => { called = true; return []; }), null);
+			eq(called, false); eq(b.hooks.chatFileBytes(c.id)!.equals(bytes), true);
+		});
 		const authName = fc.stringMatching(/^[A-Z][A-Z0-9_]{1,8}$/);
 		P("H14", "AuthStore: MODEL map semantics (set preserves others, delete absent = no-op, authVars on fresh = {})", fc.array(fc.tuple(fc.boolean(), authName, fc.string({ maxLength: 6 })), { maxLength: 10 }), (b, ops) => {
 			const m: Record<string, string> = {}; eq(b.auth.authVars(), {});

@@ -11,7 +11,7 @@ import { createSourceOrganizationStore } from "../../../src/store/sql/source-org
 import { openGraphStore } from "../../../src/store/sql/graph-store.ts";
 import type { SqlDriver } from "../../../src/store/sql/driver.ts";
 import { openNodeSqlite } from "../../../src/store/sql/drivers/node-sqlite.ts";
-import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
+import { chatHooks, type AdapterFactory, type AnyLedger, type StoreBundle } from "../harness.ts";
 import fileFactory from "./file.ts";
 
 const TABLES: Record<AnyLedger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" };
@@ -40,6 +40,7 @@ const factory: AdapterFactory = {
 			sourceOrg: createSourceOrganizationStore({ core: opened.core, emit }),
 			events: { subscribe: (l) => { const a = base.events.subscribe(l); const b = subscribe(l); return () => { a(); b(); }; } },
 			hooks: {
+				...chatHooks(dir),
 				injectCorruptLine: (ledger, text) => { db.run(`INSERT INTO ${TABLES[ledger]} (line_json) VALUES (?)`, text); },
 				stampNewerFormat: () => { base.hooks.stampNewerFormat(); setLineFormat(CURRENT_GRAPH_FORMAT_VERSION + 1); },
 				clearFormatStamp: () => { base.hooks.clearFormatStamp(); setLineFormat(CURRENT_GRAPH_FORMAT_VERSION); },

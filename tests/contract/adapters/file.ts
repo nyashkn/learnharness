@@ -9,7 +9,7 @@ import { subscribe } from "../../../src/core/events.ts";
 import { createFileStores } from "../../../src/store/file-stores.ts";
 import { graphPaths } from "../../../src/store/graph.ts";
 import { releaseStoreLock } from "../../../src/store/marker.ts";
-import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
+import { chatHooks, type AdapterFactory, type AnyLedger, type StoreBundle } from "../harness.ts";
 
 const factory: AdapterFactory = {
 	name: "file",
@@ -25,6 +25,7 @@ const factory: AdapterFactory = {
 			render: { read: () => s.renderSettingsStore.readRenderSettings(), write: (raw) => s.renderSettingsStore.writeRenderSettings(raw) },
 			events: { subscribe },
 			hooks: {
+				...chatHooks(dir),
 				injectCorruptLine: (l, t) => append(l, `${t}\n`),
 				injectTornTail: (l, t) => append(l, t),
 				stampNewerFormat: () => { fs.mkdirSync(path.dirname(g.format), { recursive: true }); fs.writeFileSync(g.format, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION + 1 })); },

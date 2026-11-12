@@ -7,6 +7,7 @@ import fc from "fast-check";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { CURRENT_CHAT_VERSION } from "../../src/core/contracts/chat.ts";
 import type { ReviewLine, CoverageEntry, GraphChain, GraphNode, ProvenancePoint, SessionCheckpoint } from "../../src/core/contracts.ts";
 import type {
 	AuthStore, ChatStore, GraphStore, JobStore, PromptOverrideStore,
@@ -36,6 +37,10 @@ export interface StoreBundle {
 		injectTornTail?(ledger: AnyLedger, text: string): void;
 		/** Make the data folder claim a NEWER graph format than this build knows. */
 		stampNewerFormat(): void;
+		/** Make chat `id`'s record claim a NEWER chat schema version than this build knows (its other fields stay as they are). */
+		stampNewerChat(id: string): void;
+		/** The raw bytes of chat `id`'s record in the data folder, read around the store; null when there is no file. */
+		chatFileBytes(id: string): Buffer | null;
 		/** Undo stampNewerFormat. */
 		clearFormatStamp(): void;
 		/** Versioned back-ends only (capabilities.commits): the commit messages of the store, newest first, read through a separate read-only connection. [] before the store exists. */
@@ -53,6 +58,15 @@ export interface AdapterFactory {
 	propertyTimeoutMs?: number;
 	/** Open a FRESH, EMPTY store whose bytes live under `dir` (an existing empty folder the harness owns and removes). */
 	open(dir: string): Promise<StoreBundle>;
+}
+
+/** The two chat-record hooks. Every back-end keeps chats as `<dir>/chats/<id>.json`, so one implementation serves all adapters. */
+export function chatHooks(dir: string): Pick<StoreBundle["hooks"], "stampNewerChat" | "chatFileBytes"> {
+	const file = (id: string) => path.join(dir, "chats", `${id}.json`);
+	return {
+		stampNewerChat: (id) => { const r = JSON.parse(fs.readFileSync(file(id), "utf-8")) as object; fs.writeFileSync(file(id), JSON.stringify({ ...r, version: CURRENT_CHAT_VERSION + 1 }, null, "\t")); },
+		chatFileBytes: (id) => { try { return fs.readFileSync(file(id)); } catch { return null; } },
+	};
 }
 
 /** Glob tests/contract/adapters/*.ts. Fails loudly when the glob is empty (an empty glob would pass vacuously). */

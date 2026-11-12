@@ -13,7 +13,7 @@ import { beforeWrite, releaseStoreLock } from "../../../src/store/marker.ts";
 import type { SqlDriver } from "../../../src/store/sql/driver.ts";
 import { openNodeSqlite } from "../../../src/store/sql/drivers/node-sqlite.ts";
 import { graphDbFile, releaseGraphDb } from "../../../src/store/sql/open.ts";
-import type { AdapterFactory, AnyLedger, StoreBundle } from "../harness.ts";
+import { chatHooks, type AdapterFactory, type AnyLedger, type StoreBundle } from "../harness.ts";
 
 const TABLES: Record<AnyLedger, string> = { nodes: "ledger_nodes", chains: "ledger_chains", coverage: "ledger_coverage", checkpoints: "ledger_checkpoints", reviews: "ledger_reviews", reviewRemaps: "ledger_review_remaps" };
 
@@ -48,6 +48,7 @@ const factory: AdapterFactory = {
 			render: { read: () => s.renderSettingsStore.readRenderSettings(), write: (raw) => s.renderSettingsStore.writeRenderSettings(raw) },
 			events: { subscribe },
 			hooks: {
+				...chatHooks(dir),
 				injectCorruptLine: (ledger, text) => withDb((db) => db.run(`INSERT INTO ${TABLES[ledger]} (line_json) VALUES (?)`, text)),
 				stampNewerFormat: () => { setLineFormat(CURRENT_GRAPH_FORMAT_VERSION + 1); fs.mkdirSync(path.dirname(formatFile), { recursive: true }); fs.writeFileSync(formatFile, JSON.stringify({ version: CURRENT_GRAPH_FORMAT_VERSION + 1 })); },
 				clearFormatStamp: () => { fs.rmSync(formatFile, { force: true }); setLineFormat(CURRENT_GRAPH_FORMAT_VERSION); },
