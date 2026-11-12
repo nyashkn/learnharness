@@ -42,7 +42,7 @@ function runtime(): Runtime {
 		isBusy: isTurnRunning, isCompacting: compactionInFlight,
 		readMetadata(name) {
 			assertGraphFormat();
-			try { return JSON.parse(fs.readFileSync(name === "format.json" ? GRAPH_FORMAT_FILE : RENDER_SETTINGS_FILE, "utf8")); }
+			try { return JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ name === "format.json" ? GRAPH_FORMAT_FILE : RENDER_SETTINGS_FILE, "utf8")); }
 			catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
 		},
 	});

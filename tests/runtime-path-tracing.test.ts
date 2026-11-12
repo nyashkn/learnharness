@@ -68,6 +68,8 @@ test("store file producers over a caller-supplied dir retain their opt-outs (lh-
 	for (const [relative, matches, count] of [
 		["src/store/graph.ts", (call: ts.CallExpression) => call.expression.getText().endsWith("join") && call.arguments[0]?.getText() === "graphDir", 11],
 		["src/store/render-settings.ts", (call: ts.CallExpression) => call.expression.getText().endsWith("join") && call.arguments[0]?.getText() === "graphDir", 2],
+		["src/store/source-organization.ts", (call: ts.CallExpression) => call.expression.getText().endsWith("join") && call.arguments[0]?.getText() === "graphDir", 2],
+		["src/store/marker.ts", (call: ts.CallExpression) => call.expression.getText().endsWith("join") && call.arguments[0]?.getText() === "dataDir" && call.arguments.some(arg => ['"format.json"', "MARKER_NAME"].includes(arg.getText())), 2],
 		["src/store/settings.ts", (call: ts.CallExpression) => call.arguments[0]?.getText() === "dataDir", 1],
 		["src/agent/tools/pdf-read.ts", (call: ts.CallExpression) => call.arguments[0]?.getText() === "dir" && call.arguments.length === 2 && call.expression.getText().endsWith("join"), 1],
 	] as const) {
@@ -82,6 +84,7 @@ test("non-path producers (spawn, statSync) of runtime paths retain their opt-out
 	for (const [relative, needle] of [
 		["src/agent/subagents/headless.ts", "spawn(/* turbopackIgnore: true */ binary,"],
 		["src/store/sql/migrate.ts", "fs.statSync(/* turbopackIgnore: true */ file)"],
+		["src/server/plugins.ts", 'fs.readFileSync(/* turbopackIgnore: true */ name === "format.json"'],
 	] as const) {
 		assert.ok(fs.readFileSync(new URL(`../${relative}`, import.meta.url), "utf8").includes(needle), `${relative}: lost ${needle}`);
 	}
