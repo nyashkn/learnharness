@@ -16,7 +16,7 @@ import { createPluginHost } from "./plugin-host.ts";
 import { createPluginTransport } from "./plugin-transport.ts";
 import { createPluginDocumentConverter } from "./plugin-documents.ts";
 import type { AgentBuildOptions } from "../agent/teacher-agent.ts";
-import { assertGraphFormat, createPluginAgentRecordStore, createPluginTaskRecordStore, readPluginTaskRecord, recoverPluginTaskRecords, safePluginDataDirectory, stores } from "./stores.ts";
+import { beforeWrite, assertGraphFormat, createPluginAgentRecordStore, createPluginTaskRecordStore, readPluginTaskRecord, recoverPluginTaskRecords, safePluginDataDirectory, stores } from "./stores.ts";
 import { isTurnRunning } from "./turn-liveness.ts";
 import { compactionInFlight } from "./compaction.ts";
 
@@ -48,14 +48,15 @@ function runtime(): Runtime {
 	});
 	const installationErrors: Record<string, string> = Object.create(null);
 	const host = createPluginHost({
-		directory: pluginDirectory, core, appVersion: packageJson.version, installationErrors, dataDirectoryFor: safePluginDataDirectory,
+		directory: pluginDirectory, core, appVersion: packageJson.version, installationErrors, dataDirectoryFor: (community, id, coreData, create) => safePluginDataDirectory(community, id, coreData, create ? { dataDir: PATHS.data } : undefined),
+		beforeWrite: () => { beforeWrite(PATHS.data); },
 		// The process-global runtime owns one admission slot across all plugins
 		// and every separately compiled Next route module.
 		convertDocument: createPluginDocumentConverter().convert,
 		createServices({ manifest, dataDirectory, signal }) {
-			const inference = createPluginInference({ signal, dataDirectory });
+			const inference = createPluginInference({ signal, dataDirectory, beforeWrite: () => { beforeWrite(PATHS.data); } });
 			const agents = createPluginAgentService({
-				store: createPluginAgentRecordStore(path.join(/* turbopackIgnore: true */ dataDirectory, "agents")),
+				store: createPluginAgentRecordStore(path.join(/* turbopackIgnore: true */ dataDirectory, "agents"), { dataDir: PATHS.data }),
 				engineFor: inference.engineFor, onUsage: inference.onUsage, signal,
 				onChange: () => { if (!signal.aborted) emit("plugin-message", { pluginId: manifest.id, topic: "agents-changed" }); },
 			});
@@ -64,7 +65,7 @@ function runtime(): Runtime {
 				cancel: taskId => workers.cancel(taskId),
 			});
 			const workers = createPluginWorkerService({
-				store: createPluginTaskRecordStore(path.join(/* turbopackIgnore: true */ dataDirectory, "tasks")),
+				store: createPluginTaskRecordStore(path.join(/* turbopackIgnore: true */ dataDirectory, "tasks"), { dataDir: PATHS.data }),
 				engineFor: inference.engineFor, onUsage: inference.onUsage, signal,
 				onChange: workerActivity,
 			});
@@ -91,7 +92,7 @@ function runtime(): Runtime {
 		}));
 		// Exclusive bootstrap sweep, including disabled packages whose services
 		// will not construct. Read-only job recovery never activates plugin code.
-		for (const [id, error] of Object.entries(recoverPluginTaskRecords(pluginDirectory, coreData))) {
+		for (const [id, error] of Object.entries(recoverPluginTaskRecords(pluginDirectory, coreData, { dataDir: PATHS.data }))) {
 			installationErrors[id] = `Task recovery failed: ${error}`;
 		}
 		await host.initialize();

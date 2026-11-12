@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -158,13 +158,13 @@ test("external native backend composes host, inference, persistent managed input
 		t.after(() => { clearTimeout(timeout); observers.delete(listener); });
 	});
 	const host = createPluginHost({
-		dataDirectoryFor: safePluginDataDirectory,
+		...pluginHostGate(plugins),
 		directory: plugins, appVersion: "0.3.7", onChange: () => { hostChanges++; }, onNotification: notify,
 		subscribeEvents(listener) { events.add(listener); return () => { events.delete(listener); }; },
 		createServices({ manifest, dataDirectory: directory, signal }) {
 			activationSignals.push(signal);
-			const adapter = createPluginInference({ signal, dataDirectory: directory }, deps);
-			const agents = createPluginAgentService({ store: createPluginAgentRecordStore(path.join(directory, "agents")), engineFor: adapter.engineFor, onUsage: adapter.onUsage, signal,
+			const adapter = createPluginInference({ signal, dataDirectory: directory, beforeWrite: pluginHostGate(plugins).beforeWrite }, deps);
+			const agents = createPluginAgentService({ store: createPluginAgentRecordStore(path.join(directory, "agents"), { dataDir: path.dirname(plugins) }), engineFor: adapter.engineFor, onUsage: adapter.onUsage, signal,
 				onChange: () => { if (!signal.aborted) { agentChanges++; notify({ pluginId: manifest.id, topic: "agents-changed" }); } },
 			});
 			return { learning, inference: adapter.inference, agents, workers: { dispose: async () => {} } as PluginWorkerService,

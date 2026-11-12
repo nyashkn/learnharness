@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -27,7 +27,7 @@ async function fixture(t: TestContext, pdfConverter = convertPdf) {
 		fs.writeFileSync(path.join(dist, "main.js"), "export function activate() {}");
 	}
 	const converter = createPluginDocumentConverter({ convertPdf: pdfConverter });
-	const host = createPluginHost({ dataDirectoryFor: safePluginDataDirectory, directory, appVersion: "0.4.1", convertDocument: converter.convert,
+	const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: "0.4.1", convertDocument: converter.convert,
 		createServices() { throw new Error("Pure document conversion must not construct backend/model/learning services"); },
 	});
 	await host.initialize();

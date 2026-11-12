@@ -7,6 +7,7 @@ import { normalizeContext, type AssistantMessage, type AssistantMessageEvent, ty
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
+import { beforeWrite } from "../src/store/marker.ts";
 import { createPluginInference, type PluginInferenceDeps } from "../src/server/plugin-inference.ts";
 import { createPluginAgentService } from "../src/agent/plugin-agents.ts";
 import { createPluginAgentRecordStore } from "../src/store/plugin-agent-records.ts";
@@ -37,6 +38,10 @@ function deferred<T = void>() {
 type Dispatch = { model: PluginModelSpec; background: boolean; context: TranscriptContext; options: SimpleStreamOptions; lifecycle?: SubscriptionDispatchLifecycle };
 function fixture(t: TestContext, customize?: { model?: PluginModelSpec; admitted?: boolean; produce?: (stream: AssistantMessageEventStream, call: Dispatch) => void }) {
 	const directory = mkdtempSync(join(tmpdir(), "lh-plugin-inference-test-"));
+	// The real marker + store lock run on a separate throwaway folder, so `directory` still holds only what the adapter writes.
+	const dataFolder = mkdtempSync(join(tmpdir(), "lh-plugin-inference-data-"));
+	t.after(() => rmSync(dataFolder, { recursive: true, force: true }));
+	const gate = () => { beforeWrite(dataFolder); };
 	t.after(() => rmSync(directory, { recursive: true, force: true }));
 	const signal = new AbortController();
 	const model = customize?.model ?? spec;
@@ -70,9 +75,9 @@ function fixture(t: TestContext, customize?: { model?: PluginModelSpec; admitted
 			},
 		}),
 	};
-	const adapter = createPluginInference({ signal: signal.signal, dataDirectory: directory }, deps);
+	const adapter = createPluginInference({ signal: signal.signal, dataDirectory: directory, beforeWrite: gate }, deps);
 	t.after(() => signal.abort());
-	return { directory, signal, deps, adapter, calls, catalog, removeKey: () => { keyPresent = false; } };
+	return { directory, dataFolder, gate, signal, deps, adapter, calls, catalog, removeKey: () => { keyPresent = false; } };
 }
 const ledger = (directory: string) => existsSync(join(directory, "usage.jsonl")) ? readFileSync(join(directory, "usage.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
 const collect = async (events: AsyncIterable<AssistantMessageEvent>) => { const all = []; for await (const event of events) all.push(event); return all; };
@@ -130,7 +135,7 @@ test("every model is explicit and available: missing, unknown, removed keys and 
 	await assert.rejects(f.adapter.engineFor({ provider: spec.provider, id: "missing" }, "background"), /Selected model unavailable/);
 	await assert.rejects(f.adapter.engineFor(spec, "automatic" as never), /purpose/);
 	await assert.rejects(f.adapter.engineFor({ ...spec, thinkingLevel: "guess" as never }, "user"), /thinkingLevel/);
-	const fallback = createPluginInference({ signal: f.signal.signal, dataDirectory: f.directory }, { ...f.deps, engineForSpec: () => ({ model: { provider: "another-provider", id: "another-model" } as never, streamFn: () => { throw new Error("must not run"); } }) });
+	const fallback = createPluginInference({ signal: f.signal.signal, dataDirectory: f.directory, beforeWrite: f.gate }, { ...f.deps, engineForSpec: () => ({ model: { provider: "another-provider", id: "another-model" } as never, streamFn: () => { throw new Error("must not run"); } }) });
 	await assert.rejects(fallback.engineFor(spec, "user"), /explicitly selected model/);
 	f.removeKey();
 	await assert.rejects(f.adapter.engineFor(spec, "user"), (error: unknown) => (error as { code?: string }).code === "provider_key_missing");
@@ -184,7 +189,7 @@ test("managed-agent usage checks original admission identity before cloning (inc
 			const failure = { ...output(pin), stopReason: "error" as const, errorMessage: admitted ? "Admitted provider error" : "Denied before dispatch" };
 			stream.push({ type: "error", reason: "error", error: failure }); stream.end();
 		} });
-		const service = createPluginAgentService({ store: createPluginAgentRecordStore(join(f.directory, "agents")), engineFor: f.adapter.engineFor, onUsage: f.adapter.onUsage, signal: f.signal.signal });
+		const service = createPluginAgentService({ store: createPluginAgentRecordStore(join(f.directory, "agents"), { dataDir: f.dataFolder }), engineFor: f.adapter.engineFor, onUsage: f.adapter.onUsage, signal: f.signal.signal });
 		t.after(() => service.dispose());
 		service.register({ id: "helper", instructions: "Test", model: pin });
 		const { id } = service.create("helper");
@@ -274,7 +279,7 @@ test("dispatch-time host refusals retain safe Error.message while cancellation r
 	const refused = await collect(engine.streamFn(engine.model, normalizeContext({ messages: [] }), {}));
 	assert.match((refused.at(-1) as { error: AssistantMessage }).error.errorMessage!, /key is set.*Settings/);
 	for (const thrown of [new Error("Selected connection disconnected mid-run; reconnect explicitly"), "opaque non-Error refusal"]) {
-		const adapter = createPluginInference({ signal: f.signal.signal, dataDirectory: f.directory }, {
+		const adapter = createPluginInference({ signal: f.signal.signal, dataDirectory: f.directory, beforeWrite: f.gate }, {
 			...f.deps, providerKeyPresent: () => true,
 			engineForSpec(model, background, lifecycle) {
 				if (lifecycle) throw thrown;
@@ -364,10 +369,10 @@ test("managed accounting write failures are visible without logging request cont
 		stream.push({ type: "start", partial: m }); stream.push({ type: "done", reason: "stop", message: m }); stream.end();
 	} });
 	const blocked = join(f.directory, "not-a-directory"); writeFileSync(blocked, "fixture");
-	const broken = createPluginInference({ signal: f.signal.signal, dataDirectory: blocked }, f.deps);
+	const broken = createPluginInference({ signal: f.signal.signal, dataDirectory: blocked, beforeWrite: f.gate }, f.deps);
 	assert.throws(() => broken.onUsage(spec, usage()), /EEXIST|ENOTDIR/);
 	const errors = t.mock.method(console, "error", () => {});
-	const service = createPluginAgentService({ store: createPluginAgentRecordStore(join(f.directory, "agents")), engineFor: broken.engineFor, onUsage: broken.onUsage });
+	const service = createPluginAgentService({ store: createPluginAgentRecordStore(join(f.directory, "agents"), { dataDir: f.dataFolder }), engineFor: broken.engineFor, onUsage: broken.onUsage });
 	t.after(() => service.dispose());
 	service.register({ id: "helper", instructions: "Fixture", model: spec });
 	const { id } = service.create("helper");
@@ -391,7 +396,7 @@ test("incomplete transport streams become explicit errors; usage persistence fai
 	// A directory supplied where a file is required fails writes without invoking
 	// any real host storage or relying on platform permission behavior.
 	const blocked = join(g.directory, "not-a-directory"); writeFileSync(blocked, "fixture");
-	const broken = createPluginInference({ signal: g.signal.signal, dataDirectory: blocked }, g.deps);
+	const broken = createPluginInference({ signal: g.signal.signal, dataDirectory: blocked, beforeWrite: g.gate }, g.deps);
 	await assert.rejects(broken.inference.complete(request()), /EEXIST|ENOTDIR/);
 	assert.equal(readFileSync(join(g.directory, "usage.jsonl"), "utf8"), "existing ledger\n");
 });

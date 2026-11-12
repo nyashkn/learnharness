@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -15,7 +15,7 @@ function fixture(t: TestContext) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-question-registration-"));
 	const directory = path.join(root, "plugins");
 	fs.mkdirSync(directory);
-	const host = createPluginHost({ dataDirectoryFor: safePluginDataDirectory, directory, appVersion: "0.4.1", createServices: () => ({
+	const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: "0.4.1", createServices: () => ({
 		learning: {} as PluginLearningData, inference: {} as PluginInference,
 		agents: { dispose: async () => {} } as PluginAgentService,
 		workers: { dispose: async () => {} } as PluginWorkerService,

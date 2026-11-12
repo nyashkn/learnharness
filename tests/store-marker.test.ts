@@ -558,3 +558,152 @@ describe("deleteChat sweep (lh-azj)", () => {
 		assert.equal(sweeps.length, 0, "the sweep is a write: it must not run without the store lock");
 	});
 });
+
+// ─── 6. plugin persistence writers (lh-m3e): marker + store lock before every write ───
+
+const { createPluginAgentRecordStore } = await import("../src/store/plugin-agent-records.ts");
+const { createPluginTaskRecordStore, recoverPluginTaskRecords } = await import("../src/store/plugin-task-records.ts");
+const { safePluginDataDirectory } = await import("../src/store/plugin-data-paths.ts");
+const { createPluginHost } = await import("../src/server/plugin-host.ts");
+const { createPluginInference } = await import("../src/server/plugin-inference.ts");
+
+const PLUGIN_AGENT = { version: 1, id: "a1", definitionId: "d", messages: [], pending: [], acceptedInputs: [], createdAt: "t", updatedAt: "t", status: "idle" };
+const PLUGIN_TASK = { version: 1, id: "task_one", definitionId: "worker", requestId: "request_one", input: {}, prompt: "p", model: { provider: "fixture", id: "offline" }, purpose: "background", maxTurns: 3,
+	createdAt: "2026-10-31T00:00:00.000Z", updatedAt: "2026-10-31T00:00:00.000Z", status: "queued", turns: 0, messages: [{ role: "user", content: "p", timestamp: 1 }] };
+/** A different folder to take the marker + lock on, for seeding records without touching the folder under test. */
+const seedFolder = (): string => { const d = fresh(); fs.mkdirSync(d); return d; };
+const communityTasks = (dir: string) => path.join(dir, "plugins", "p", "data", "tasks");
+
+interface PluginWriter { seed?: (dir: string) => void; write: (dir: string) => unknown }
+const PLUGIN_WRITERS: Record<string, PluginWriter> = {
+	agentRecordDirectory: { write: (dir) => createPluginAgentRecordStore(path.join(dir, "core-plugin-data", "p", "agents"), { dataDir: dir }) }, // the constructor makes the directory
+	agentRecordSave: { seed: (dir) => fs.mkdirSync(path.join(dir, "core-plugin-data", "p", "agents"), { recursive: true }), write: (dir) => createPluginAgentRecordStore(path.join(dir, "core-plugin-data", "p", "agents"), { dataDir: dir }).save(PLUGIN_AGENT as never) },
+	taskRecordSave: { write: (dir) => createPluginTaskRecordStore(communityTasks(dir), { dataDir: dir }).save(PLUGIN_TASK as never) },
+	pluginDataDirectories: { write: (dir) => safePluginDataDirectory(path.join(dir, "plugins"), "p", undefined, { dataDir: dir }) },
+	corePluginDataDirectories: { write: (dir) => safePluginDataDirectory(path.join(dir, "plugins"), "p", { directory: path.join(dir, "core-plugin-data"), ids: ["p"] }, { dataDir: dir }) },
+	pluginsStateJson: {
+		seed: (dir) => {
+			const dist = path.join(dir, "plugins", "p", "dist");
+			fs.mkdirSync(dist, { recursive: true });
+			fs.writeFileSync(path.join(dist, "manifest.json"), JSON.stringify({ apiVersion: 1, id: "p", name: "p", version: "1.0.0", minAppVersion: "0.3.0" }));
+		},
+		write: async (dir) => {
+			const host = createPluginHost({ directory: path.join(dir, "plugins"), appVersion: "0.3.7", dataDirectoryFor: (c, id, core, create) => safePluginDataDirectory(c, id, core, create ? { dataDir: dir } : undefined), beforeWrite: () => { marker.beforeWrite(dir); },
+				createServices() { throw new Error("no services: the plugin has no backend"); } });
+			try { await host.setEnabled("p", false); } finally { await host.dispose(); }
+		},
+	},
+	usageJsonl: {
+		write: (dir) => createPluginInference({ signal: new AbortController().signal, dataDirectory: path.join(dir, "core-plugin-data", "p"), beforeWrite: () => { marker.beforeWrite(dir); } })
+			.onUsage({ provider: "fixture", id: "offline" } as never, { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } as never),
+	},
+};
+
+describe("plugin writers take the marker and store lock (lh-m3e)", () => {
+	for (const [name, { seed, write }] of Object.entries(PLUGIN_WRITERS)) {
+		it(`${name}: writes the marker and lock on a fresh folder`, async () => {
+			const dir = fresh();
+			fs.mkdirSync(dir);
+			seed?.(dir);
+			assert.equal(fs.existsSync(path.join(dir, "storage.json")), false);
+			await write(dir);
+			assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "storage.json"), "utf8")), { backend: "file", layout: 1 });
+			assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "storage.json.lock"), "utf8")).pid, process.pid);
+			marker.releaseStoreLock(dir);
+		});
+		it(`${name}: refused while another host holds the lock; nothing is written`, async () => {
+			const dir = fresh();
+			fs.mkdirSync(dir);
+			seed?.(dir);
+			acquireStoreLock(path.join(dir, "storage.json"), { pid: 4242, host: "other-machine" });
+			const before = snapshot(dir);
+			await assert.rejects(async () => { await write(dir); }, (e: unknown) => e instanceof StoreLockedError && e.holder?.pid === 4242, name);
+			assert.equal(snapshot(dir), before);
+		});
+	}
+
+	it("recoverPluginTaskRecords: refused while another host holds the lock; the record stays queued and the failure is reported", () => {
+		const dir = fresh();
+		fs.mkdirSync(dir);
+		createPluginTaskRecordStore(communityTasks(dir), { dataDir: seedFolder() }).save(PLUGIN_TASK as never); // a crash-leftover, seeded under another folder's marker
+		acquireStoreLock(path.join(dir, "storage.json"), { pid: 4242, host: "other-machine" });
+		const before = snapshot(dir);
+		const errors = recoverPluginTaskRecords(path.join(dir, "plugins"), undefined, { dataDir: dir });
+		assert.match(errors.p ?? "", /pid 4242 on other-machine/);
+		assert.equal(snapshot(dir), before);
+	});
+	it("recoverPluginTaskRecords: interrupting a record writes the marker; a sweep with nothing to rewrite takes no lock", () => {
+		const idle = fresh();
+		fs.mkdirSync(idle);
+		createPluginTaskRecordStore(communityTasks(idle), { dataDir: seedFolder() }).save({ ...PLUGIN_TASK, status: "succeeded", result: 1, completedAt: "2026-10-31T00:01:00.000Z" } as never);
+		assert.deepEqual(recoverPluginTaskRecords(path.join(idle, "plugins"), undefined, { dataDir: idle }), {});
+		assert.equal(fs.existsSync(path.join(idle, "storage.json")), false);
+		const busy = fresh();
+		fs.mkdirSync(busy);
+		createPluginTaskRecordStore(communityTasks(busy), { dataDir: seedFolder() }).save(PLUGIN_TASK as never);
+		assert.deepEqual(recoverPluginTaskRecords(path.join(busy, "plugins"), undefined, { dataDir: busy }), {});
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(busy, "storage.json"), "utf8")), { backend: "file", layout: 1 });
+		marker.releaseStoreLock(busy);
+	});
+
+	it("read-only plugin paths take no lock and leave the folder byte-identical", () => {
+		const dir = fresh();
+		fs.mkdirSync(dir);
+		const tasks = createPluginTaskRecordStore(communityTasks(dir), { dataDir: dir });
+		assert.deepEqual(tasks.list(), []);
+		assert.equal(tasks.get("task_one"), null);
+		assert.equal(safePluginDataDirectory(path.join(dir, "plugins"), "p", undefined), null);
+		assert.deepEqual(recoverPluginTaskRecords(path.join(dir, "plugins"), undefined, { dataDir: dir }), {});
+		assert.deepEqual(fs.readdirSync(dir), []);
+		fs.mkdirSync(path.join(dir, "core-plugin-data", "p", "agents"), { recursive: true });
+		const agents = createPluginAgentRecordStore(path.join(dir, "core-plugin-data", "p", "agents"), { dataDir: dir });
+		assert.deepEqual(agents.list(), []);
+		assert.equal(agents.get("a1"), null);
+		assert.equal(fs.existsSync(path.join(dir, "storage.json")), false);
+	});
+});
+
+// ─── 7. plugin startup leaves a fresh LH_STORAGE folder on its chosen backend (lh-m3e) ───
+
+describe("plugin startup and a fresh LH_STORAGE=doltlite folder", { skip: !DOLTLITE_HOST }, () => {
+	const repo = path.resolve(import.meta.dirname, "..");
+	/** One real server process: plugins.ts is what instrumentation.ts imports; `enable` also switches every core plugin on (a gated write) and waits for activation. */
+	const startup = (dir: string, enable: boolean): { status: number | null; out: string } => {
+		const code = `
+			const { initializePlugins, getPluginHost } = await import(${JSON.stringify(path.join(repo, "src/server/plugins.ts"))});
+			await initializePlugins();
+			if (${enable}) {
+				const host = await getPluginHost();
+				for (const p of host.list().filter((p) => p.origin === "core")) await host.setEnabled(p.id, true);
+				console.log(JSON.stringify(host.list().filter((p) => p.origin === "core").map((p) => [p.id, p.status])));
+			}
+			process.exit(0);`;
+		const home = fresh();
+		fs.mkdirSync(home);
+		const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", code], {
+			cwd: repo, encoding: "utf8", timeout: 60_000,
+			env: { PATH: process.env.PATH, HOME: home, NODE_ENV: "test", LH_DATA_DIR: dir, LH_AUTH_FILE: auth(dir), LH_STORAGE: "doltlite" },
+		});
+		return { status: r.status, out: `${r.stdout}${r.stderr}` };
+	};
+	const backendOf = (dir: string) => JSON.parse(fs.readFileSync(path.join(dir, "storage.json"), "utf8")).backend;
+
+	it("boot, restart, enable the core plugins, restart: still doltlite, and boot alone writes nothing", () => {
+		const dir = fresh();
+		const leftovers: string[] = [];
+		for (let i = 0; i < 2; i++) { // a restart before any core write: the old boot made data/plugins, so the second boot saw a non-empty folder and picked file
+			const boot = startup(dir, false);
+			assert.equal(boot.status, 0, boot.out);
+			leftovers.push(fs.existsSync(dir) ? fs.readdirSync(dir).join(",") : "");
+		}
+		const enabled = startup(dir, true);
+		assert.equal(enabled.status, 0, enabled.out);
+		assert.equal(backendOf(dir), "doltlite", enabled.out);
+		assert.equal(fs.existsSync(path.join(dir, "core-plugin-data")), true, `a core plugin activated and got its data folder: ${enabled.out}`);
+		const again = startup(dir, false);
+		assert.equal(again.status, 0, again.out);
+		assert.equal(backendOf(dir), "doltlite");
+		assert.deepEqual(leftovers, ["", ""], "boot alone writes nothing into a fresh folder");
+		assert.equal(fs.existsSync(path.join(dir, "graph.doltlite")) || fs.readdirSync(dir).some((f) => /doltlite/.test(f)), true, "the doltlite store exists");
+	});
+});

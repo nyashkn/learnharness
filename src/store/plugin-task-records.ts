@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { PluginTaskRecordStore } from "../core/ports.ts";
 import type { PluginTaskRecord } from "../core/plugin-workers.ts";
 import { validatePluginInferenceOptions } from "../core/plugin-validation.ts";
+import { beforeWrite } from "./marker.ts";
 import { safePluginDataDirectory, type CorePluginDataLocation } from "./plugin-data-paths.ts";
 
 const safeId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
@@ -46,7 +47,12 @@ function validate(value: unknown, expected: string): PluginTaskRecord {
 
 /** Atomic one-file-per-task plugin-local records. One writer per directory;
  * this is not an interprocess lock. Never falls back past corrupt JSON. */
-export function createPluginTaskRecordStore(directory: string): PluginTaskRecordStore {
+export function createPluginTaskRecordStore(directory: string, { dataDir }: { dataDir: string }): PluginTaskRecordStore {
+	return taskStore(directory, () => { beforeWrite(dataDir); }); // marker + store lock on the first write
+}
+/** Recovery lookups only read; a save through this store is a bug. */
+const readOnlyGate = (): never => { throw new Error("Plugin task record store opened read-only"); };
+function taskStore(directory: string, gate: () => void): PluginTaskRecordStore {
 	// Plugin data directories are runtime inputs, never deployment assets.
 	const root = path.resolve(/* turbopackIgnore: true */ directory);
 	const filename = (id: string) => { if (!safeId(id)) throw new Error("Invalid plugin task id"); return path.join(/* turbopackIgnore: true */ root, `${id}.json`); };
@@ -95,6 +101,7 @@ export function createPluginTaskRecordStore(directory: string): PluginTaskRecord
 			jsonSafe(record);
 			const data = JSON.stringify(record, null, "\t");
 			validate(JSON.parse(data), record.id);
+			gate();
 			if (!directoryExists()) fs.mkdirSync(root, { recursive: true });
 			directoryExists();
 			const temp = path.join(root, `.${record.id}.${randomUUID()}.tmp`);
@@ -138,7 +145,7 @@ export function readPluginTaskRecord(rootPluginsDirectory: string, pluginId: str
 	if (taskId === undefined && requestId === undefined) throw new Error("A task id or request id is required");
 	const directory = safeTaskDirectory(rootPluginsDirectory, pluginId, core);
 	if (!directory) return null;
-	const store = createPluginTaskRecordStore(directory);
+	const store = taskStore(directory, readOnlyGate);
 	if (taskId !== undefined) {
 		const record = store.get(taskId);
 		if (record && requestId !== undefined && record.requestId !== requestId) throw new Error("Plugin task/request identity mismatch");
@@ -152,7 +159,7 @@ export function readPluginTaskRecord(rootPluginsDirectory: string, pluginId: str
 /** Exclusive server-bootstrap sweep, before any task services activate. Disabled
  * packages are included. Per-package failures are diagnostic, never rewritten
  * as missing data or allowed to prevent recovery of other valid packages. */
-export function recoverPluginTaskRecords(rootPluginsDirectory: string, core?: CorePluginDataLocation): Record<string, string> {
+export function recoverPluginTaskRecords(rootPluginsDirectory: string, core: CorePluginDataLocation | undefined, { dataDir }: { dataDir: string }): Record<string, string> {
 	const root = path.resolve(/* turbopackIgnore: true */ rootPluginsDirectory);
 	let entries: fs.Dirent[] = [];
 	try {
@@ -165,7 +172,7 @@ export function recoverPluginTaskRecords(rootPluginsDirectory: string, core?: Co
 	for (const id of ids) {
 		try {
 			const directory = safeTaskDirectory(root, id, core); if (!directory) continue;
-			const store = createPluginTaskRecordStore(directory);
+			const store = createPluginTaskRecordStore(directory, { dataDir });
 			// Read/validate the whole package first: corruption must not cause
 			// partially reinterpreted task histories within that package.
 			const records = store.list();

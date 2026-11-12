@@ -74,7 +74,7 @@ class PluginStream extends AssistantMessageEventStream {
  * All inference uses existing transports (including consent, quota and scope
  * cancellation), with no API-key fallback or automatic background→user retry. */
 export function createPluginInference(
-	{ signal, dataDirectory }: { signal: AbortSignal; dataDirectory: string },
+	{ signal, dataDirectory, beforeWrite }: { signal: AbortSignal; dataDirectory: string; beforeWrite: () => void },
 	injected?: PluginInferenceDeps,
 ): PluginInferenceAdapter {
 	const directory = path.resolve(/* turbopackIgnore: true */ dataDirectory);
@@ -111,6 +111,7 @@ export function createPluginInference(
 			input: usage.input, output: usage.output, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, totalTokens: usage.totalTokens,
 			cost: { input: usage.cost.input, output: usage.cost.output, cacheRead: usage.cost.cacheRead, cacheWrite: usage.cost.cacheWrite, total: usage.cost.total },
 		} };
+		beforeWrite(); // marker + store lock (the composition root passes marker.ts's)
 		fs.mkdirSync(directory, { recursive: true });
 		fs.appendFileSync(path.join(/* turbopackIgnore: true */ directory, "usage.jsonl"), `${JSON.stringify(row)}\n`, { mode: 0o600 });
 	};

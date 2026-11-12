@@ -48,7 +48,7 @@ function scripted(scripts: Script[]) {
 }
 function fixture(t: TestContext, scripts: Script[], extra: Partial<PluginAgentServiceDeps> = {}) {
 	const directory = mkdtempSync(join(tmpdir(), "lh-plugin-agent-test-"));
-	const store = createPluginAgentRecordStore(join(directory, "agents"));
+	const store = createPluginAgentRecordStore(join(directory, "agents"), { dataDir: directory });
 	const fake = scripted(scripts);
 	const purposes: PluginCallPurpose[] = [];
 	const deps: PluginAgentServiceDeps = { store, engineFor: (_model, purpose) => { purposes.push(purpose); return fake.engine; }, ...extra };

@@ -40,7 +40,7 @@ const metadata = (extra: Partial<PluginWorkerActivityMetadata> = {}): PluginWork
 });
 function fixture(t: TestContext, pluginId = "panel-fixture") {
 	const activation = new AbortController();
-	const store = createPluginTaskRecordStore(join(directory, pluginId, "tasks"));
+	const store = createPluginTaskRecordStore(join(directory, pluginId, "tasks"), { dataDir: directory });
 	const observed: PluginWorkerActivityMetadata[] = [];
 	const onChange = registerPluginWorkerActivity({ pluginId, pluginName: "Panel fixture", signal: activation.signal, cancel: id => service.cancel(id) });
 	let lists = 0;
@@ -88,7 +88,7 @@ test("queued and running standalone tasks are live metadata-only rows; END remov
 
 test("streaming deltas do not rescan tasks, clone transcripts, or publish partial text as activity", async t => {
 	const activation = new AbortController();
-	const store = createPluginTaskRecordStore(join(directory, "stream-fixture", "tasks"));
+	const store = createPluginTaskRecordStore(join(directory, "stream-fixture", "tasks"), { dataDir: directory });
 	let lists = 0; const originalList = store.list.bind(store); store.list = () => { lists++; return originalList(); };
 	const changes: PluginWorkerActivityMetadata[] = [];
 	const base: AssistantMessage = { role: "assistant", provider: pin.provider, model: pin.id, api: "fixture" as never,

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { PluginTaskRecord } from "../src/core/plugin-workers.ts";
 import { createPluginTaskRecordStore, readPluginTaskRecord, recoverPluginTaskRecords } from "../src/store/plugin-task-records.ts";
+/** A separate throwaway data folder for the marker and lock: the gate runs for real, and storage.json never lands in a records directory. */
+const dataFolder = (t: TestContext) => fixture(t);
 function fixture(t: TestContext) {
 	const directory = mkdtempSync(join(tmpdir(), "lh-task-records-"));
 	t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -17,7 +19,7 @@ function record(extra: Partial<PluginTaskRecord> = {}): PluginTaskRecord {
 const success = (result: unknown = false) => record({ status: "succeeded", result, completedAt: "2026-10-31T00:01:00.000Z" });
 
 test("store is lazy on missing reads and atomically round-trips independent native records", t => {
-	const root = fixture(t); const directory = join(root, "data", "tasks"); const store = createPluginTaskRecordStore(directory);
+	const root = fixture(t); const directory = join(root, "data", "tasks"); const store = createPluginTaskRecordStore(directory, { dataDir: dataFolder(t) });
 	assert.equal(store.get("missing"), null); assert.deepEqual(store.list(), []); assert(!existsSync(join(root, "data")));
 	const value = success({ final: 0 }); store.save(value);
 	assert.deepEqual(store.get(value.id), value); assert.deepEqual(store.list(), [value]);
@@ -29,14 +31,14 @@ test("store is lazy on missing reads and atomically round-trips independent nati
 });
 
 test("all falsy JSON results persist, while absent success and non-JSON data cannot be coerced", t => {
-	const store = createPluginTaskRecordStore(fixture(t));
+	const store = createPluginTaskRecordStore(fixture(t), { dataDir: dataFolder(t) });
 	for (const value of [false, 0, "", null]) { store.save(success(value)); assert.equal(store.get("task_one")?.result, value); }
 	for (const value of [undefined, Infinity, NaN, () => {}, BigInt(3), new Date()]) assert.throws(() => store.save({ ...success(), result: value }));
 	assert.equal(store.get("task_one")?.result, null);
 });
 
 test("corrupt JSON, unsupported versions and malformed known fields never disappear from get/list", t => {
-	const directory = fixture(t); const store = createPluginTaskRecordStore(directory); const file = join(directory, "task_one.json");
+	const directory = fixture(t); const store = createPluginTaskRecordStore(directory, { dataDir: dataFolder(t) }); const file = join(directory, "task_one.json");
 	for (const value of ["{", JSON.stringify(record({ version: 2 } as never)), JSON.stringify(record({ id: "different" })), JSON.stringify(record({ purpose: "other" } as never)), JSON.stringify(record({ messages: [] })), JSON.stringify(record({ status: "succeeded" })), JSON.stringify(record({ options: { apiKey: "not allowed" } } as never)), JSON.stringify(record({ status: "failed", error: { code: "bogus", message: "x" } } as never))]) {
 		writeFileSync(file, value); assert.throws(() => store.get("task_one"), /Corrupt|unsupported/); assert.throws(() => store.list(), /Corrupt|unsupported/);
 	}
@@ -46,7 +48,7 @@ test("corrupt JSON, unsupported versions and malformed known fields never disapp
 });
 
 test("invalid save and failed rename preserve the previous file and remove temporary artifacts", t => {
-	const directory = fixture(t); const store = createPluginTaskRecordStore(directory); store.save(record());
+	const directory = fixture(t); const store = createPluginTaskRecordStore(directory, { dataDir: dataFolder(t) }); store.save(record());
 	const before = readFileSync(join(directory, "task_one.json"), "utf8");
 	assert.throws(() => store.save(record({ turns: -1 }))); assert.equal(readFileSync(join(directory, "task_one.json"), "utf8"), before);
 	mkdirSync(join(directory, "blocked.json"));
@@ -56,7 +58,7 @@ test("invalid save and failed rename preserve the previous file and remove tempo
 });
 
 test("strict get/list refuse task files that are directories or symlinks", t => {
-	const directory = fixture(t); const store = createPluginTaskRecordStore(directory);
+	const directory = fixture(t); const store = createPluginTaskRecordStore(directory, { dataDir: dataFolder(t) });
 	mkdirSync(join(directory, "folder.json")); assert.throws(() => store.get("folder"), /Unsafe/); assert.throws(() => store.list(), /Unsafe/);
 	rmSync(join(directory, "folder.json"), { recursive: true });
 	const outside = join(directory, "outside.txt"); writeFileSync(outside, JSON.stringify(record())); symlinkSync(outside, join(directory, "task_one.json"));
@@ -64,7 +66,7 @@ test("strict get/list refuse task files that are directories or symlinks", t => 
 });
 
 test("recovery reads disabled plugin canonical outcomes by task or acceptance id without activating or mutating", t => {
-	const root = fixture(t); const directory = join(root, "fixture-plugin", "data", "tasks"); const store = createPluginTaskRecordStore(directory); store.save(success(0));
+	const root = fixture(t); const directory = join(root, "fixture-plugin", "data", "tasks"); const store = createPluginTaskRecordStore(directory, { dataDir: dataFolder(t) }); store.save(success(0));
 	writeFileSync(join(root, "fixture-plugin", "backend.cjs"), "throw new Error('must never activate');");
 	const before = readFileSync(join(directory, "task_one.json"), "utf8");
 	assert.deepEqual(readPluginTaskRecord(root, "fixture-plugin", "task_one"), success(0));
@@ -79,7 +81,7 @@ test("recovery reads disabled plugin canonical outcomes by task or acceptance id
 
 test("opaque Unicode/punctuation request ids are lookup keys only, never paths", t => {
 	const root = fixture(t); const directory = join(root, "fixture-plugin", "data", "tasks"); const requestId = '../学習:chunk:["1",2]';
-	createPluginTaskRecordStore(directory).save({ ...success(), requestId });
+	createPluginTaskRecordStore(directory, { dataDir: dataFolder(t) }).save({ ...success(), requestId });
 	assert.equal(readPluginTaskRecord(root, "fixture-plugin", undefined, requestId)?.id, "task_one");
 	assert.deepEqual(readdirSync(directory), ["task_one.json"]);
 	assert(!existsSync(join(root, "学習:chunk:[\"1\",2]")));
@@ -100,34 +102,34 @@ test("recovery missing paths return null without mkdir; unsafe ids and corrupt r
 
 test("bootstrap recovery includes disabled packages, interrupts all unfinished records, preserves successes and isolates errors", t => {
 	const root = fixture(t);
-	const good = join(root, "disabled-plugin", "data", "tasks"); const store = createPluginTaskRecordStore(good);
+	const good = join(root, "disabled-plugin", "data", "tasks"); const store = createPluginTaskRecordStore(good, { dataDir: dataFolder(t) });
 	store.save(record()); store.save(record({ id: "running", requestId: "running", status: "running" })); store.save({ ...success(0), id: "success", requestId: "success" });
 	const successBefore = readFileSync(join(good, "success.json"), "utf8");
 	const bad = join(root, "bad-plugin", "data", "tasks"); mkdirSync(bad, { recursive: true }); writeFileSync(join(bad, "broken.json"), "corrupt");
 	const absent = join(root, "empty-plugin"); mkdirSync(absent); writeFileSync(join(root, "plugins-state.json"), JSON.stringify({ enabled: { "disabled-plugin": false } }));
-	const errors = recoverPluginTaskRecords(root);
+	const errors = recoverPluginTaskRecords(root, undefined, { dataDir: dataFolder(t) });
 	assert.deepEqual(Object.keys(errors), ["bad-plugin"]); assert.match(errors["bad-plugin"]!, /Corrupt/);
 	assert.equal(store.get("task_one")?.status, "interrupted"); assert.equal(store.get("running")?.status, "interrupted");
 	assert.equal(readPluginTaskRecord(root, "disabled-plugin", "task_one")?.error?.code, "interrupted");
 	assert.equal(readFileSync(join(good, "success.json"), "utf8"), successBefore);
 	assert.deepEqual(readdirSync(absent), []);
-	const interruptedBefore = readFileSync(join(good, "task_one.json"), "utf8"); recoverPluginTaskRecords(root);
+	const interruptedBefore = readFileSync(join(good, "task_one.json"), "utf8"); recoverPluginTaskRecords(root, undefined, { dataDir: dataFolder(t) });
 	assert.equal(readFileSync(join(good, "task_one.json"), "utf8"), interruptedBefore);
 });
 
 test("bootstrap missing root stays missing, and unsafe package paths are per-package errors", t => {
-	const base = fixture(t); const missing = join(base, "missing"); assert.deepEqual(recoverPluginTaskRecords(missing), {}); assert(!existsSync(missing));
+	const base = fixture(t); const missing = join(base, "missing"); assert.deepEqual(recoverPluginTaskRecords(missing, undefined, { dataDir: dataFolder(t) }), {}); assert(!existsSync(missing));
 	const root = join(base, "root"); mkdirSync(root); symlinkSync(base, join(root, "unsafe-plugin")); mkdirSync(join(root, "Invalid_ID"));
-	const errors = recoverPluginTaskRecords(root); assert.match(errors["unsafe-plugin"]!, /Unsafe/); assert.match(errors.Invalid_ID!, /Invalid plugin id/);
-	const rootLink = join(base, "link"); symlinkSync(root, rootLink); assert.throws(() => recoverPluginTaskRecords(rootLink), /Unsafe/);
+	const errors = recoverPluginTaskRecords(root, undefined, { dataDir: dataFolder(t) }); assert.match(errors["unsafe-plugin"]!, /Unsafe/); assert.match(errors.Invalid_ID!, /Invalid plugin id/);
+	const rootLink = join(base, "link"); symlinkSync(root, rootLink); assert.throws(() => recoverPluginTaskRecords(rootLink, undefined, { dataDir: dataFolder(t) }), /Unsafe/);
 });
 
 test("core recovery uses only core-plugin-data, skips reserved community copies and includes disabled tasks", t => {
 	const base = fixture(t), root = join(base, "plugins"), core = { directory: join(base, "core-plugin-data"), ids: ["official", "missing"] };
 	const old = join(root, "official", "data", "tasks"); mkdirSync(old, { recursive: true }); writeFileSync(join(old, "broken.json"), "must not read legacy data");
-	const coreStore = createPluginTaskRecordStore(join(core.directory, "official", "tasks")); coreStore.save(record());
-	const community = createPluginTaskRecordStore(join(root, "other", "data", "tasks")); community.save(record());
-	assert.deepEqual(recoverPluginTaskRecords(root, core), {});
+	const coreStore = createPluginTaskRecordStore(join(core.directory, "official", "tasks"), { dataDir: dataFolder(t) }); coreStore.save(record());
+	const community = createPluginTaskRecordStore(join(root, "other", "data", "tasks"), { dataDir: dataFolder(t) }); community.save(record());
+	assert.deepEqual(recoverPluginTaskRecords(root, core, { dataDir: dataFolder(t) }), {});
 	assert.equal(coreStore.get("task_one")?.status, "interrupted"); assert.equal(community.get("task_one")?.status, "interrupted");
 	assert.equal(readPluginTaskRecord(root, "official", "task_one", undefined, core)?.status, "interrupted");
 	assert.equal(readPluginTaskRecord(root, "official", undefined, "request_one", core)?.status, "interrupted");
@@ -135,13 +137,13 @@ test("core recovery uses only core-plugin-data, skips reserved community copies 
 	assert.equal(existsSync(join(core.directory, "missing")), false);
 	assert.equal(readFileSync(join(old, "broken.json"), "utf8"), "must not read legacy data");
 	const before = readFileSync(join(core.directory, "official", "tasks", "task_one.json"), "utf8");
-	recoverPluginTaskRecords(root, core); assert.equal(readFileSync(join(core.directory, "official", "tasks", "task_one.json"), "utf8"), before);
+	recoverPluginTaskRecords(root, core, { dataDir: dataFolder(t) }); assert.equal(readFileSync(join(core.directory, "official", "tasks", "task_one.json"), "utf8"), before);
 });
 
 test("recovery refuses symlinks at every root/plugin/data/tasks component and at the task file", t => {
 	for (const component of ["root", "plugin", "data", "tasks", "file"]) {
 		const base = fixture(t); const root = join(base, "plugins"); const directory = join(root, "fixture-plugin", "data", "tasks");
-		createPluginTaskRecordStore(directory).save(success());
+		createPluginTaskRecordStore(directory, { dataDir: dataFolder(t) }).save(success());
 		const target = component === "root" ? root : component === "plugin" ? join(root, "fixture-plugin") : component === "data" ? join(root, "fixture-plugin", "data") : component === "tasks" ? directory : join(directory, "task_one.json");
 		const moved = join(base, "moved"); renameSync(target, moved); symlinkSync(moved, target);
 		assert.throws(() => readPluginTaskRecord(root, "fixture-plugin", "task_one"), /Unsafe/);

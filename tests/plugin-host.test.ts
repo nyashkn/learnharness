@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -24,7 +24,7 @@ function fixture(t: TestContext) {
 	const notifications: unknown[] = [];
 	let servicesCreated = 0;
 	const deps: PluginHostDependencies = {
-		dataDirectoryFor: safePluginDataDirectory,
+		...pluginHostGate(directory),
 		directory, appVersion: "0.3.7",
 		createServices() {
 			servicesCreated++;
@@ -139,7 +139,7 @@ test("activation-owned workers are interrupted after abort and never replay on r
 	f.deps.createServices = info => {
 		const services = original(info);
 		const workers = createPluginWorkerService({
-			store: createPluginTaskRecordStore(path.join(info.dataDirectory, "tasks")), signal: info.signal,
+			store: createPluginTaskRecordStore(path.join(info.dataDirectory, "tasks"), { dataDir: f.root }), signal: info.signal,
 			engineFor: async () => { engineRequests++; await gate; throw new Error("late engine rejection"); },
 		});
 		const dispose = workers.dispose.bind(workers);

@@ -1,4 +1,4 @@
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -34,7 +34,7 @@ test("actual Rich code blocks backend appends enabled-family instructions to eve
   fs.writeFileSync(path.join(dist, "main.js"), "export function activate() {}");
   fs.copyFileSync(path.join(source, "src/styles.css"), path.join(dist, "styles.css"));
   fs.writeFileSync(path.join(dist, "manifest.json"), JSON.stringify(manifest));
-  const host = createPluginHost({ dataDirectoryFor: safePluginDataDirectory, directory, appVersion: manifest.minAppVersion, createServices: () => ({
+  const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: manifest.minAppVersion, createServices: () => ({
     learning: {} as PluginLearningData, inference: {} as PluginInference,
     agents: { dispose: async () => {} } as PluginAgentService,
     workers: { dispose: async () => {} } as PluginWorkerService,

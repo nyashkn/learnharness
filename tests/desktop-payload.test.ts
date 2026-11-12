@@ -1,5 +1,5 @@
 /** Run the real payload-curation script in throwaway repository fixtures. */
-import { safePluginDataDirectory } from "../src/store/plugin-data-paths.ts";
+import { pluginHostGate } from "./plugin-host-gate.ts";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -84,7 +84,7 @@ describe("desktop standalone payload", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-example-layout-"));
 		const directory = path.join(root, "plugins");
 		fs.cpSync(path.resolve("examples/plugins"), directory, { recursive: true });
-		const host = createPluginHost({ dataDirectoryFor: safePluginDataDirectory, directory, appVersion: "0.4.1", createServices() { throw Error("disabled examples must not create services"); } });
+		const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: "0.4.1", createServices() { throw Error("disabled examples must not create services"); } });
 		try {
 			await host.initialize();
 			assert.deepEqual(host.list().map(plugin => [plugin.id, plugin.status]), [["hello-plugin", "disabled"], ["managed-agent", "disabled"], ["teaching-extension", "disabled"]]);
@@ -99,7 +99,7 @@ describe("desktop standalone payload", () => {
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "lh-smoke-layout-"));
 		const pluginRoot = createPluginSmokeFixture(home);
 		const directory = path.join(home, "data", "plugins");
-		const host = createPluginHost({ dataDirectoryFor: safePluginDataDirectory, directory, appVersion: "0.4.1", createServices() { throw Error("disabled smoke fixtures must not activate"); } });
+		const host = createPluginHost({ ...pluginHostGate(directory), directory, appVersion: "0.4.1", createServices() { throw Error("disabled smoke fixtures must not activate"); } });
 		try {
 			await host.initialize();
 			assert.deepEqual(host.list().map(plugin => [plugin.id, plugin.status]), [["native-smoke", "disabled"], ["native-smoke-picker-settings", "disabled"]]);
