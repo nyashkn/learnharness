@@ -87,6 +87,7 @@ import { revealCitationSource } from "@/components/citation-source";
 import { createSideQuestionActions, SideThreadBody, SideThreadPanel, SideThreadPopover } from "@/components/side-thread";
 import { useSideThread, type SideThreadOpenArgs } from "@/components/use-side-thread";
 import { useRouter } from "next/navigation";
+import { HeldBuiltinSubmission } from "./held-builtin-submission";
 import { PracticeDock, type PrepareThinkingWithConfidence } from "@/components/practice-dock";
 import { ProblemTally } from "@/components/problem-tally";
 import { PluginProblemDock, type PluginProblemDockProps } from "./plugin-problem-dock";
@@ -441,7 +442,11 @@ export function Chat({
 	// LOCAL view also detaches first — stop() settles the client instantly
 	// and keeps the partial; the server-side partial persists via the
 	// abort's own onFinish. Inert when nothing runs (busyRef gate).
+	// lh-osh: the ONE quiz-answer press made while a turn was still running; replayed
+	// through prepareBuiltin (interceptors, images, validation) once busy clears.
+	const heldBuiltin = useRef(new HeldBuiltinSubmission<BuiltinSubmissionCapture>()).current;
 	const abortInFlightTurn = useCallback(() => {
+		heldBuiltin.clear(); // Stop cancels a pending answer too
 		if (localStreamRef.current) stop();
 		void fetch("/api/activity/abort", {
 			method: "POST",
@@ -723,6 +728,10 @@ export function Chat({
 	};
 	const prepareBuiltin: PrepareBuiltinSubmission = ({ question, capture, isCurrent }: BuiltinSubmissionCapture) => {
 		const target = builtinTarget(question), original = pending;
+		// lh-osh: the dock is up while the turn that posed the question still streams (or the
+		// record is still syncing). Keep this press (the last wins) and replay it, through this
+		// same path, once the turn is over.
+		if (original && busyRef.current && !compacting) { heldBuiltin.hold({ question, capture, isCurrent }, original.key); return; }
 		if (!target || !original || busyRef.current || compacting) return;
 		void runSubmission(target, () => {
 			const raw = capture();
@@ -746,6 +755,12 @@ export function Chat({
 			return send({ type: "answer", toolCallId: original.toolCallId, occurrence: target.question.occurrence, answer: { ...answer, ...(images ? { images } : {}) } }, attempt.accepted, original.key, attempt.refused);
 		});
 	};
+	const prepareBuiltinRef = useRef(prepareBuiltin); prepareBuiltinRef.current = prepareBuiltin;
+	useEffect(() => { heldBuiltin.clear(); }, [chatId, heldBuiltin]);
+	useEffect(() => {
+		if (busy) return;
+		heldBuiltin.replay(() => pendingQuestionOf(submissionLive.current.nativeMessages)?.key, call => prepareBuiltinRef.current(call));
+	}, [busy, heldBuiltin]);
 	const thinkingTarget = (): Extract<PluginSubmissionTarget, { type: "thinking" }> | undefined => {
 		const occurrence = activeProblemOccurrenceOf(nativeMessages);
 		if (!surfaceTarget || !activeProblem || activeProblem.pluginProblem || !occurrence) return;
