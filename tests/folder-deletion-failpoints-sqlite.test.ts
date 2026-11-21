@@ -2,3 +2,4 @@
 process.env.LH_STORAGE = "sqlite";
 const { runFailpoints } = await import("./folder-deletion-failpoints.ts");
 runFailpoints("sqlite", 25);
+export {};

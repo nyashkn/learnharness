@@ -2,3 +2,4 @@
 process.env.LH_STORAGE = "file";
 const { runFailpoints } = await import("./folder-deletion-failpoints.ts");
 runFailpoints("file", 25);
+export {};
