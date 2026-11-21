@@ -105,9 +105,9 @@ function blockedIn(title: string | null, code: string, error: string): SourceDel
 /**
  * The sidebar's folder Delete (owner, 2026-11-18): the folder, every
  * subfolder, and every session inside (practice included) go; imported
- * notes and other non-session placements inside move out to the deleted
- * folder's parent (top level for a top-level folder), keeping their graph
- * contribution. `mode` is the session dialog's choice, applied to every
+ * notes inside move out to the deleted folder's parent (top level for a
+ * top-level folder), keeping their graph contribution. A placement whose
+ * session record is already gone goes with the sessions. `mode` is the session dialog's choice, applied to every
  * session: preserve-graph keeps their graph contributions, delete-nodes
  * removes their traces. The single-session choreography, batched: gates
  * (409, nothing touched) → the sessions' extraction runs cancelled and
@@ -154,10 +154,13 @@ export async function deleteFolderWithSessions(folderId: string, mode: ChatDelet
 	const state = structuredClone(directory.organization);
 	const folderIds = new Set(targets.folderIds);
 	const parentId = targets.parentId;
+	// A placement inside with no session record and no notes file left belongs to a session already removed
+	// (by an earlier Delete that failed part way): it goes like the folder's sessions, not to the parent.
+	const recorded = new Set(directory.sources.filter((source) => source.kind !== "missing").map((source) => source.id));
 	state.folders = state.folders.filter((f) => !folderIds.has(f.id));
 	state.placements = Object.fromEntries(Object.entries(state.placements).flatMap(([id, placement]) => {
 		if (chatIds.has(id)) return [];
-		if (placement.folderId !== null && folderIds.has(placement.folderId)) return [[id, { ...placement, folderId: parentId }]];
+		if (placement.folderId !== null && folderIds.has(placement.folderId)) return recorded.has(id) ? [[id, { ...placement, folderId: parentId }]] : [];
 		return [[id, placement]];
 	}));
 	stores.sourceOrganizationStore.write(state);

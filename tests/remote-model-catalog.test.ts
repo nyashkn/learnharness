@@ -38,14 +38,14 @@ const xai = {
 	inputLimits: { maxRequestBytes: 20_000_000, images: { maxPerRequest: 10, resize: { maxWidth: 1600, maxHeight: 1700, maxBytes: 2_000_000, jpegQuality: 85 } } },
 };
 
-function startupModels(snapshotPath: string) {
+function startupModels(snapshotPath: string, coordinates: (readonly [string, string])[] = [row, baseten, xai].map(({ provider, id }) => [provider, id] as const)) {
 	const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
 		let fetches = 0;
 		globalThis.fetch = () => { fetches++; throw new Error("startup must not fetch"); };
 		const { initializeModelCatalog } = await import("./src/server/remote-model-catalog.ts");
 		const { piModels } = await import("./src/agent/models.ts");
 		initializeModelCatalog();
-		const coordinates = ${JSON.stringify([row, baseten, xai].map(({ provider, id }) => [provider, id]))};
+		const coordinates = ${JSON.stringify(coordinates)};
 		const models = coordinates.map(([provider, id]) => piModels().getModel(provider, id));
 		if (fetches) throw new Error("startup attempted to fetch");
 		console.log(JSON.stringify(models));
@@ -207,7 +207,7 @@ test("wire behavior survives validated refresh and offline restore; mixed shard 
 	assert.deepEqual(startupModels(scratch), [null, null, null]);
 });
 
-test("a restored snapshot loads only when every row passes the TypeBox schema (one malformed row per check kind)", () => {
+test("a restored snapshot drops only the rows that fail the TypeBox schema; the same provider's good rows load (one malformed row per check kind)", () => {
 	const snapshotWith = (rows: unknown[]) => {
 		const dir = fs.mkdtempSync(path.join(scratch, "restore-"));
 		fs.writeFileSync(path.join(dir, "model-catalog.json"), JSON.stringify({ version: 1, providers: { openai: rows } }));
@@ -229,7 +229,12 @@ test("a restored snapshot loads only when every row passes the TypeBox schema (o
 		["name blank once trimmed", { name: "   " }],
 		["strict compat", { compat: { notAPiFlag: true } }],
 	] as const) {
-		const [model] = startupModels(snapshotWith([row, { ...row, id: "second-row", ...bad }]));
-		assert.equal(model, null, `${kind}: one malformed row drops the whole snapshot, so the good row does not load either`);
+		// The malformed row sits between two good rows of the same provider.
+		const malformed = { ...row, id: "second-row", ...bad };
+		const after = { ...row, id: "third-row", name: "Third row" };
+		const [first, dropped, third] = startupModels(snapshotWith([row, malformed, after]), [["openai", row.id], ["openai", malformed.id], ["openai", after.id]]);
+		assert.equal(first?.id, row.id, `${kind}: the good row before it loads`);
+		assert.equal(dropped, null, `${kind}: the malformed row drops alone`);
+		assert.equal(third?.id, after.id, `${kind}: the good row after it loads`);
 	}
 });
