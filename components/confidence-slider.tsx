@@ -2,6 +2,17 @@ import { cn } from "@/lib/utils";
 import { CONFIDENCE_STOPS } from "@/src/core";
 import { CONFIDENCE_COLORS, confidenceRailStyle } from "@/components/confidence-rail";
 
+/** The row's class tokens. The question dock's layout stand-in builds its
+ *  probe copy from these same tokens, so the measured row and the live row
+ *  cannot drift. Balanced gaps (owner): the rail is inset 8px in its track
+ *  on both ends, so label→rail is the 12px flex gap + 8px; the value slot
+ *  fits "100%" exactly, so rail→"100%" is that same 12px + 8px, and shorter
+ *  values sit centered in it. */
+export const CONFIDENCE_ROW_CLASS = "flex items-center gap-3";
+export const CONFIDENCE_LABEL_CLASS = "shrink-0 text-xs font-medium uppercase tracking-wide";
+export const CONFIDENCE_TRACK_CLASS = "relative h-4 min-w-0 flex-1";
+export const CONFIDENCE_VALUE_CLASS = "w-[4ch] shrink-0 text-center font-mono text-sm tabular-nums";
+
 /**
  * The confidence slider row, shared by the quiz dock and the practice dock
  * (lh-g5b) so the two controls cannot drift: a range input snapping to
@@ -23,16 +34,16 @@ export function ConfidenceSlider({
 	title: string;
 }) {
 	return (
-		<div className="flex items-center gap-3">
+		<div className={CONFIDENCE_ROW_CLASS}>
 			<span
 				className={cn(
-					"shrink-0 text-xs font-medium uppercase tracking-wide",
+					CONFIDENCE_LABEL_CLASS,
 					disabled ? "text-muted-foreground/50" : "text-muted-foreground",
 				)}
 			>
 				Confidence
 			</span>
-			<div className={cn("relative h-4 min-w-0 flex-1", disabled && "opacity-40")} data-testid="confidence-track">
+			<div className={cn(CONFIDENCE_TRACK_CLASS, disabled && "opacity-40")} data-testid="confidence-track">
 				{/* The RAIL is painted here, not on the input: this overlay spans exactly the
 					thumb-CENTER range (inset 8px = half the 16px disc), so the disc at 0 and 100
 					sits flush against the rail's ends. Both layers are absolute with the input
@@ -75,7 +86,7 @@ export function ConfidenceSlider({
 			</div>
 			<span
 				data-testid="confidence-value"
-				className={cn("w-9 shrink-0 text-right font-mono text-sm tabular-nums", disabled && "text-muted-foreground/50")}
+				className={cn(CONFIDENCE_VALUE_CLASS, disabled && "text-muted-foreground/50")}
 			>
 				{disabled ? "—" : `${CONFIDENCE_STOPS[index]}%`}
 			</span>

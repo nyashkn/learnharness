@@ -58,6 +58,8 @@ const serverStoreRule = (except) => ({
 
 const driverMessage = "Only src/store/sql/drivers may import node:sqlite or @dolthub/doltlite; src/seed gets a driver injected by scripts/seed.ts.";
 const driverModule = "node:sqlite|@dolthub/doltlite";
+// TypeBox, not zod, everywhere (lh-5mh; Njui 21 Nov: upstream's zod catalog schemas were ported, so no exception).
+const zodPattern = { regex: "^zod(/|$)", message: "Use TypeBox (typebox, typebox/value), not zod (fork rule, lh-5mh)." };
 const coreMessage = "src/core is pure: it imports no node:* builtin (or bare builtin name such as fs, path, crypto) except node:crypto.";
 // Bare builtin names from node:module, subpaths included ("fs/promises"); the node: forms are the other alternative.
 const bareBuiltins = builtinModules.filter((name) => !name.startsWith("node:") && !name.startsWith("_"));
@@ -106,7 +108,7 @@ export default defineConfig([
 		},
 		rules: {
 			...nextPlugin.configs.recommended.rules,
-			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }] }],
+			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, zodPattern] }],
 			"no-restricted-syntax": ["error", ...driverSyntax],
 			"import/no-restricted-paths": [
 				"error",
@@ -160,7 +162,7 @@ export default defineConfig([
 		files: ["scripts/**/*.{js,mjs,cjs,ts}", "electron/**/*.{js,mjs,cjs,ts}"],
 		languageOptions: { parser: tsParser, parserOptions: { ecmaVersion: "latest", sourceType: "module" } },
 		rules: {
-			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }] }],
+			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, zodPattern] }],
 			"no-restricted-syntax": ["error", ...driverSyntax],
 		},
 	},
@@ -172,13 +174,13 @@ export default defineConfig([
 		files: ["src/core/**"],
 		// replaces the base patterns, so the driver pattern repeats
 		rules: {
-			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, { regex: coreRegex, message: coreMessage }] }],
+			"no-restricted-imports": ["error", { patterns: [{ regex: `^(${driverModule})(/|$)`, message: driverMessage }, { regex: coreRegex, message: coreMessage }, zodPattern] }],
 			"no-restricted-syntax": ["error", ...driverSyntax, ...coreSyntax], // replaces the base list, so the driver selectors repeat
 		},
 	},
 	{
 		files: ["src/store/sql/drivers/**"],
-		rules: { "no-restricted-imports": "off", "no-restricted-syntax": "off" },
+		rules: { "no-restricted-imports": ["error", { patterns: [zodPattern] }], "no-restricted-syntax": "off" },
 	},
 	{
 		files: ["src/store/sql/migrations/**/[0-9]*.ts"],

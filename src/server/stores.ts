@@ -15,6 +15,7 @@ import { authStore } from "../store/auth.ts";
 import { promptOverrides } from "../store/prompt-overrides.ts";
 import { renderSettingsStore } from "../store/render-settings.ts";
 import { themeStore } from "../store/themes.ts";
+import { modelCatalogFile, writeModelCatalog } from "../store/model-catalog.ts";
 import { resolveSettings, type EffectiveSettings } from "../core/settings-resolution.ts";
 import { configureWorkerRequestAdmission } from "../agent/worker-request-admission.ts";
 import { PATHS } from "../../config.ts";
@@ -60,6 +61,9 @@ export { readSettings as readSettingsRecord, writeSettings as writeSettingsRecor
 // Plugin persistence (upstream v0.6.0): per-plugin record stores and data directories under the data folder.
 // plugins.ts builds one store per plugin directory, so the composition root hands it the factories.
 export { beforeWrite }; // plugins.ts binds it to PATHS.data for the host and inference writers
+/** The remote model catalog snapshot (remote-model-catalog.ts), written behind the first-write gate. */
+export const MODEL_CATALOG_FILE = modelCatalogFile(PATHS.data);
+export const writeModelCatalogSnapshot = (text: string): void => { writeModelCatalog(PATHS.data, text); };
 export { createPluginAgentRecordStore } from "../store/plugin-agent-records.ts";
 export { createPluginTaskRecordStore, readPluginTaskRecord, recoverPluginTaskRecords } from "../store/plugin-task-records.ts";
 export { safePluginDataDirectory } from "../store/plugin-data-paths.ts";
