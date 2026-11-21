@@ -206,3 +206,30 @@ test("wire behavior survives validated refresh and offline restore; mixed shard 
 	fs.writeFileSync(snapshot, "invalid json");
 	assert.deepEqual(startupModels(scratch), [null, null, null]);
 });
+
+test("a restored snapshot loads only when every row passes the TypeBox schema (one malformed row per check kind)", () => {
+	const snapshotWith = (rows: unknown[]) => {
+		const dir = fs.mkdtempSync(path.join(scratch, "restore-"));
+		fs.writeFileSync(path.join(dir, "model-catalog.json"), JSON.stringify({ version: 1, providers: { openai: rows } }));
+		return dir;
+	};
+	// Good: unknown keys are stripped (headers never reach a model), the name is trimmed, null thinking levels stay.
+	const [loaded] = startupModels(snapshotWith([{ ...row, name: "  Trimmed vision  ", headers: { Authorization: "never-retain" }, extra: 1 }]));
+	assert.equal(loaded.id, row.id);
+	assert.equal(loaded.name, "Trimmed vision");
+	assert.equal(loaded.headers, undefined);
+	assert.equal(Object.hasOwn(loaded, "extra"), false);
+	assert.equal(loaded.thinkingLevelMap.minimal, null);
+	for (const [kind, bad] of [
+		["numeric bound", { cost: { ...row.cost, input: -1 } }],
+		["pattern", { id: "has space" }],
+		["strict object", { inputLimits: { unexpected: 1 } }],
+		["id dot segment", { id: "a/../b" }],
+		["input without text", { input: ["image"] }],
+		["name blank once trimmed", { name: "   " }],
+		["strict compat", { compat: { notAPiFlag: true } }],
+	] as const) {
+		const [model] = startupModels(snapshotWith([row, { ...row, id: "second-row", ...bad }]));
+		assert.equal(model, null, `${kind}: one malformed row drops the whole snapshot, so the good row does not load either`);
+	}
+});

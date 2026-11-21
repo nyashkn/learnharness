@@ -2,7 +2,8 @@ import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { hasApi, type Api, type Model } from "@earendil-works/pi-ai";
-import { z } from "zod";
+import { Type, type Static, type TSchema } from "typebox";
+import { Value } from "typebox/value";
 import { setModelCatalogOverlay } from "../agent/models.ts";
 import { AUTH_PROVIDER_KEYS } from "../core/auth-keys.ts";
 import type { ModelCatalogRefreshOutcome } from "../core/contracts/models.ts";
@@ -25,75 +26,105 @@ const builtins = new Map(builtinProviders().flatMap((provider) => {
 		? [[provider.id, models] as const] : [];
 }));
 
-const id = z.string().min(1).max(256).regex(/^[\w.~:@-]+(?:\/[\w.~:@-]+)*$/)
-	.refine((value) => !value.split("/").some((part) => part === "." || part === ".."));
-const rate = z.number().min(0).max(1_000_000);
-const rates = z.object({ input: rate, output: rate, cacheRead: rate, cacheWrite: rate });
-const tokens = z.number().int().positive().max(100_000_000);
-const thinking = z.string().max(32).regex(/^[\w-]*$/).nullable().optional();
-const byteLimit = z.number().int().positive().max(1024 ** 3).optional();
-const imageDimension = z.number().int().positive().max(8192).optional();
-const imageCount = z.number().int().positive().max(10_000).optional();
-const cacheSeconds = z.number().positive().max(30 * 24 * 3600).optional();
-const rowSchema = z.object({
-	type: z.literal("chat").optional(),
+// TypeBox, not zod (fork rule; ported from upstream's zod schemas with the same bounds). Plain objects keep
+// zod's z.object behaviour: unknown keys are allowed by the check, then stripped (`strip`), so a feed cannot
+// carry extra fields (headers, routing) into a model. `strict` objects reject unknown keys, as z.strictObject did.
+const strict = { additionalProperties: false } as const;
+const oneOf = <T extends string>(...values: T[]) => Type.Union(values.map((value) => Type.Literal(value)));
+const id = Type.String({ minLength: 1, maxLength: 256, pattern: "^[\\w.~:@-]+(?:/[\\w.~:@-]+)*$" });
+const rate = Type.Number({ minimum: 0, maximum: 1_000_000 });
+const rates = { input: rate, output: rate, cacheRead: rate, cacheWrite: rate };
+const tokens = Type.Integer({ exclusiveMinimum: 0, maximum: 100_000_000 });
+const thinking = Type.Optional(Type.Union([Type.String({ maxLength: 32, pattern: "^[\\w-]*$" }), Type.Null()]));
+const byteLimit = Type.Optional(Type.Integer({ exclusiveMinimum: 0, maximum: 1024 ** 3 }));
+const imageDimension = Type.Optional(Type.Integer({ exclusiveMinimum: 0, maximum: 8192 }));
+const imageCount = Type.Optional(Type.Integer({ exclusiveMinimum: 0, maximum: 10_000 }));
+const cacheSeconds = Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 30 * 24 * 3600 }));
+const rowSchema = Type.Object({
+	type: Type.Optional(Type.Literal("chat")),
 	id,
-	name: z.string().trim().min(1).max(256).regex(/^[^\x00-\x1f\x7f]*$/),
-	api: z.string(),
-	baseUrl: z.string(),
-	reasoning: z.boolean(),
-	thinkingLevelMap: z.object({ off: thinking, minimal: thinking, low: thinking, medium: thinking, high: thinking, xhigh: thinking, max: thinking }).optional(),
-	input: z.array(z.enum(["text", "image"])).min(1).max(2).refine((values) => values.includes("text") && new Set(values).size === values.length),
-	inputLimits: z.strictObject({
+	name: Type.String(), // trimmed first, then bounded: see checkedRow (zod's .trim().min().max().regex() order)
+	api: Type.String(),
+	baseUrl: Type.String(),
+	reasoning: Type.Boolean(),
+	thinkingLevelMap: Type.Optional(Type.Object({ off: thinking, minimal: thinking, low: thinking, medium: thinking, high: thinking, xhigh: thinking, max: thinking })),
+	input: Type.Array(oneOf("text", "image"), { minItems: 1, maxItems: 2 }),
+	inputLimits: Type.Optional(Type.Object({
 		maxRequestBytes: byteLimit,
-		images: z.strictObject({
+		images: Type.Optional(Type.Object({
 			maxPerMessage: imageCount, maxPerRequest: imageCount,
-			resize: z.strictObject({ maxWidth: imageDimension, maxHeight: imageDimension, maxBytes: byteLimit, jpegQuality: z.number().int().min(1).max(100).optional() }).optional(),
-		}).optional(),
-	}).optional(),
-	promptCache: z.strictObject({ short: cacheSeconds, long: cacheSeconds }).optional(),
-	cost: rates.extend({ tiers: z.array(rates.extend({ inputTokensAbove: tokens })).max(8).optional() }),
+			resize: Type.Optional(Type.Object({ maxWidth: imageDimension, maxHeight: imageDimension, maxBytes: byteLimit, jpegQuality: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, strict)),
+		}, strict)),
+	}, strict)),
+	promptCache: Type.Optional(Type.Object({ short: cacheSeconds, long: cacheSeconds }, strict)),
+	cost: Type.Object({ ...rates, tiers: Type.Optional(Type.Array(Type.Object({ ...rates, inputTokensAbove: tokens }), { maxItems: 8 })) }),
 	contextWindow: tokens,
 	maxTokens: tokens,
 });
 
 // Pi 1.5.2 wire flags, per transport. Unknown behavior fails closed; the
 // descriptors below are bounded values, never arbitrary request arguments.
-const flag = z.boolean().optional();
-const sessionAffinity = z.enum(["openai", "openai-nosession", "openrouter"]).optional();
-const cacheKeyMode = z.enum(["auto", "enabled", "disabled"]).optional();
+const flag = Type.Optional(Type.Boolean());
+const sessionAffinity = Type.Optional(oneOf("openai", "openai-nosession", "openrouter"));
+const cacheKeyMode = Type.Optional(oneOf("auto", "enabled", "disabled"));
 const commonOpenAI = {
 	supportsDeveloperRole: flag, supportsMidConvoSystemMessages: flag, supportsStrictMode: flag,
 	supportsOpenAIGrammarTools: flag, supportsLongCacheRetention: flag,
 	sessionAffinityFormat: sessionAffinity, promptCacheKeyMode: cacheKeyMode,
 };
-const completionsCompat = z.strictObject({
+const completionsCompat = Type.Object({
 	...commonOpenAI,
 	supportsStore: flag, supportsReasoningEffort: flag, supportsUsageInStreaming: flag, supportsFinishReason: flag,
 	requiresToolResultName: flag, requiresAssistantAfterToolResult: flag, requiresNonNullAssistantContent: flag,
 	requiresToolsWithToolHistory: flag, requiresThinkingAsText: flag, requiresReasoningContentOnAssistantMessages: flag,
-	maxTokensField: z.enum(["max_tokens", "max_completion_tokens"]).optional(),
-	thinkingFormat: z.enum(["openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"]).optional(),
+	maxTokensField: Type.Optional(oneOf("max_tokens", "max_completion_tokens")),
+	thinkingFormat: Type.Optional(oneOf("openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling")),
 	zaiToolStream: flag, supportsThinkingTokenBudget: flag, supportsMidConvoToolAdditions: flag, sendSessionAffinityHeaders: flag,
-	thinkingTokenBudgetField: z.enum(["thinking_token_budget", "thinking_budget", "thinking_budget_tokens"]).optional(),
-	cacheControlFormat: z.literal("anthropic").optional(),
-	vllmPriority: z.number().int().min(-1000).max(1000).optional(),
-});
-const responsesCompat = z.strictObject({
+	thinkingTokenBudgetField: Type.Optional(oneOf("thinking_token_budget", "thinking_budget", "thinking_budget_tokens")),
+	cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
+	vllmPriority: Type.Optional(Type.Integer({ minimum: -1000, maximum: 1000 })),
+}, strict);
+const responsesCompat = Type.Object({
 	...commonOpenAI,
 	supportsAdditionalTools: flag, supportsToolSearch: flag, supportsExplicitPromptCacheMode: flag,
 	supportsMidConvoEffort: flag, supportsMaxOutputTokens: flag,
 	// Present in bundled data for xAI, even though today's Responses adapter ignores it.
 	supportsReasoningEffort: flag,
-});
-const anthropicCompat = z.strictObject({
+}, strict);
+const anthropicCompat = Type.Object({
 	forceAdaptiveThinking: flag, supportsTemperature: flag, supportsEagerToolInputStreaming: flag, supportsCacheControlOnTools: flag,
-	supportsLongCacheRetention: flag, sendSessionAffinityHeaders: flag, sessionAffinityFormat: z.literal("openrouter").optional(),
+	supportsLongCacheRetention: flag, sendSessionAffinityHeaders: flag, sessionAffinityFormat: Type.Optional(Type.Literal("openrouter")),
 	allowEmptySignature: flag, supportsStrictTools: flag, supportsMidConvoEffort: flag,
 	supportsMidConvoSystemMessages: flag, supportsMidConvoToolChanges: flag, supportsMessageThreads: flag,
-});
-const mistralCompat = z.strictObject({ supportsMidConvoSystemMessages: flag });
-const noCompat = z.strictObject({});
+}, strict);
+const mistralCompat = Type.Object({ supportsMidConvoSystemMessages: flag }, strict);
+const noCompat = Type.Object({}, strict);
+
+/** Keep only the keys a schema declares, recursively (zod's z.object strip). */
+function strip(schema: TSchema, value: unknown): unknown {
+	const s = schema as { properties?: Record<string, TSchema>; items?: TSchema };
+	if (Array.isArray(value) && s.items) return value.map((item) => strip(s.items!, item));
+	if (record(value) && s.properties) {
+		return Object.fromEntries(Object.entries(s.properties).flatMap(([key, child]) => (key in value ? [[key, strip(child, value[key])]] : [])));
+	}
+	return value;
+}
+
+/** Value.Check at the trust boundary, then the declared keys only. */
+function parse<T extends TSchema>(schema: T, value: unknown, what: string): Static<T> {
+	if (!Value.Check(schema, value)) throw new Error(`Invalid pi.dev ${what}`);
+	return strip(schema, value) as Static<T>;
+}
+
+/** The row checks JSON Schema cannot say: the trimmed name, no dot segments in the id, text input without duplicates. */
+function checkedRow(row: unknown) {
+	const parsed = parse(rowSchema, row, "model");
+	const name = parsed.name.trim();
+	if (!name || name.length > 256 || !/^[^\x00-\x1f\x7f]*$/.test(name)) throw new Error("Invalid pi.dev model name");
+	if (parsed.id.split("/").some((part) => part === "." || part === "..")) throw new Error("Invalid pi.dev model id");
+	if (!parsed.input.includes("text") || new Set(parsed.input).size !== parsed.input.length) throw new Error("Invalid pi.dev model input");
+	return { ...parsed, name };
+}
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -115,7 +146,7 @@ function checkedCompat(api: Api, baselines: readonly Model<Api>[], raw: unknown)
 	const { openRouterRouting: _or, vercelGatewayRouting: _vg, allowedFallbackModels: _af, chatTemplateArgs, chatTemplateKwargs, ...claims } = raw;
 	switch (api) {
 		case "openai-completions": {
-			const flags = completionsCompat.parse(claims);
+			const flags = parse(completionsCompat, claims, "model compatibility");
 			if (flags.thinkingFormat === "baseten" || flags.thinkingFormat === "chat-template" || chatTemplateArgs !== undefined || chatTemplateKwargs !== undefined) {
 				const trusted = baselines.filter((model) => hasApi(model, "openai-completions")).find((model) =>
 					model.compat?.thinkingFormat === flags.thinkingFormat
@@ -128,10 +159,10 @@ function checkedCompat(api: Api, baselines: readonly Model<Api>[], raw: unknown)
 		}
 		default:
 			if (chatTemplateArgs !== undefined || chatTemplateKwargs !== undefined) throw new Error("Unexpected pi.dev model template");
-			if (api === "openai-responses") return responsesCompat.parse(claims);
-			if (api === "anthropic-messages") return anthropicCompat.parse(claims);
-			if (api === "mistral-conversations") return mistralCompat.parse(claims);
-			noCompat.parse(claims);
+			if (api === "openai-responses") return parse(responsesCompat, claims, "model compatibility");
+			if (api === "anthropic-messages") return parse(anthropicCompat, claims, "model compatibility");
+			if (api === "mistral-conversations") return parse(mistralCompat, claims, "model compatibility");
+			parse(noCompat, claims, "model compatibility");
 			return undefined;
 	}
 }
@@ -150,7 +181,7 @@ function checkedModels(provider: string, rows: readonly unknown[]): Model<Api>[]
 		const routes = baseline.filter((model) => model.api === row.api && model.baseUrl === row.baseUrl);
 		const route = routes[0];
 		if (!route) continue;
-		const { id, api: _api, baseUrl: _baseUrl, ...metadata } = rowSchema.parse(row);
+		const { id, api: _api, baseUrl: _baseUrl, ...metadata } = checkedRow(row);
 		if ((row.provider !== undefined && row.provider !== provider) || models.has(id) || (route.api === "google-generative-ai" && id.includes(":"))) {
 			throw new Error("Invalid pi.dev model identity");
 		}

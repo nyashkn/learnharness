@@ -9,7 +9,8 @@
  *  - no orphans: a session that is gone has no graph traces left (delete-nodes);
  *  - no half-deleted folder: the folder stays while any of its sessions survives;
  *  - nothing outside the scope is touched, and the folder's notes are never lost;
- *  - the graph failpoint touches nothing at all.
+ *  - a removed practice session's reviews are always logged first (the review ledger outlives the chat);
+ *  - the review failpoint touches nothing at all; the graph failpoint touches nothing but those review lines.
  * The expected final state comes from a model built from the setup inputs, never from the code under test.
  */
 import assert from "node:assert/strict";
@@ -19,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { folderDeletionScope, type ChatDeleteMode, type GraphNode } from "../src/core/index.ts";
+import { recordOf } from "./helpers/review-fixtures.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "lh-folder-failpoints-"));
 const data = path.join(root, "data");
@@ -33,7 +35,7 @@ const { releaseGraphDb } = await import("../src/store/sql/open.ts");
 const { releaseStoreLock } = await import("../src/store/marker.ts");
 after(() => { releaseGraphDb(data); releaseStoreLock(data); fs.rmSync(root, { recursive: true, force: true }); });
 
-type Fail = "none" | "graph" | "org" | number; // a number = the index (in scope order) of the session record whose delete fails
+type Fail = "none" | "review" | "graph" | "org" | number; // a number = the index (in scope order) of the session record whose delete fails
 interface Case { sessions: number; notes: number; nested: boolean; mode: ChatDeleteMode; fail: Fail }
 
 const node = (id: string, sources: string[]): GraphNode =>
@@ -45,6 +47,9 @@ function setup(c: Case) {
 	const del = `${p}_del`, sub = `${p}_sub`, top = `${p}_top`;
 	const sessions = Array.from({ length: c.sessions }, (_, i) => stores.chatStore.createChat(`${p} session ${i}`, i === 1 ? "practice" : undefined).id);
 	const kept = stores.chatStore.createChat(`${p} kept`).id;
+	// Session 1 is a practice session with one concluded problem: its review is logged on delete.
+	const practice = sessions[1];
+	if (practice) stores.chatStore.saveMessages(practice, recordOf([{ id: "x", tagged: true, concluded: true, outcome: "solved" }]));
 	const notes = Array.from({ length: c.notes }, (_, i) => `${p}_note${i}`);
 	for (const id of notes) stores.graphStore.upsertSource({ id, filePath: `${id}.md`, importedAt: "2026-11-21" });
 	for (const s of sessions) stores.graphStore.appendNode(node(`${p}_only_${s}`, [s]));
@@ -66,7 +71,8 @@ function setup(c: Case) {
 	const folders = c.nested ? [top, del, sub] : [top, del];
 	const ids = [...sessions, kept, ...notes];
 	const nodeIds = [...sessions.map((s) => `${p}_only_${s}`), `${p}_shared`, ...notes.map((n) => `${p}_from_${n}`)];
-	return { p, del, top, sessions, kept, notes, folders, ids, nodeIds };
+	const reviewIds = practice ? [`${practice}:p_x`] : [];
+	return { p, del, top, sessions, practice, kept, notes, folders, ids, nodeIds, reviewIds };
 }
 type Setup = ReturnType<typeof setup>;
 
@@ -80,6 +86,7 @@ function observe(s: Setup) {
 		placements: Object.fromEntries(Object.entries(org.placements).filter(([id]) => s.ids.includes(id)).sort(([a], [b]) => a.localeCompare(b))),
 		nodes: Object.fromEntries(s.nodeIds.filter((id) => nodes.has(id)).map((id) => [id, nodes.get(id)!.provenance.map((x) => x.chatId).sort()])),
 		noteSources: stores.graphStore.readSources().map((x) => x.id).filter((id) => s.notes.includes(id)).sort(),
+		reviews: stores.graphStore.readReviews().map((r) => r.id).filter((id) => s.reviewIds.includes(id)).sort(),
 	};
 }
 
@@ -97,6 +104,7 @@ function model(s: Setup, mode: ChatDeleteMode) {
 			.filter(([id]) => !gone.has(id)).sort(([a], [b]) => a.localeCompare(b))),
 		nodes: Object.fromEntries(s.nodeIds.filter((id) => id in nodes).map((id) => [id, nodes[id]!])),
 		noteSources: [...s.notes].sort(),
+		reviews: [...s.reviewIds],
 	};
 }
 
@@ -109,6 +117,11 @@ async function patched<T extends object, K extends keyof T>(obj: T, key: K, impl
 
 function inject(fail: Fail, attempt: () => Promise<unknown>): Promise<unknown> {
 	if (fail === "none") return attempt();
+	if (fail === "review") {
+		const gs = stores.graphStore, real = gs.transact.bind(gs);
+		return patched(gs, "transact", ((label: string, fn: () => unknown) => label.startsWith("review chat:")
+			? (() => { throw new Error("injected: review sync"); })() : real(label, fn)) as typeof gs.transact, attempt);
+	}
 	if (fail === "graph") {
 		const gs = stores.graphStore, real = gs.transact.bind(gs);
 		// The traces' transaction does its writes, then fails at the end: the commit never happens.
@@ -127,7 +140,8 @@ function inject(fail: Fail, attempt: () => Promise<unknown>): Promise<unknown> {
 
 export function runFailpoints(backend: "file" | "sqlite" | "doltlite", numRuns: number): void {
 	test(`folder Delete failpoints on ${backend}: no orphans, no half-deleted folder, and the retry completes`, async () => {
-		const failArb = (n: number) => fc.oneof(fc.constantFrom<Fail>("none", "graph", "org"), fc.integer({ min: 0, max: n - 1 }));
+		// "review" needs the practice session, which exists from two sessions up.
+		const failArb = (n: number) => fc.oneof(fc.constantFrom<Fail>("none", "graph", "org", ...(n >= 2 ? ["review" as const] : [])), fc.integer({ min: 0, max: n - 1 }));
 		const caseArb = fc.integer({ min: 1, max: 3 }).chain((sessions) => fc.record<Case>({
 			sessions: fc.constant(sessions), notes: fc.integer({ min: 0, max: 2 }), nested: fc.boolean(),
 			mode: fc.constantFrom<ChatDeleteMode>("preserve-graph", "delete-nodes"), fail: failArb(sessions),
@@ -143,9 +157,11 @@ export function runFailpoints(backend: "file" | "sqlite" | "doltlite", numRuns: 
 				assert.deepEqual(observe(s), expected);
 				return;
 			}
-			await assert.rejects(inject(c.fail, () => deleteFolderWithSessions(s.del, c.mode, scope())), /injected|Could not remove/);
+			await assert.rejects(inject(c.fail, () => deleteFolderWithSessions(s.del, c.mode, scope())), /injected|Could not remove|practice reviews/);
 			const mid = observe(s);
-			if (c.fail === "graph") assert.deepEqual(mid, before, "a failed graph transaction touches nothing");
+			if (c.fail === "review") assert.deepEqual(mid, before, "a failed review sync touches nothing");
+			if (c.fail === "graph") assert.deepEqual({ ...mid, reviews: before.reviews }, before, "a failed graph transaction touches nothing but the logged reviews");
+			if (s.practice && !mid.chats.includes(s.practice)) assert.deepEqual(mid.reviews, s.reviewIds, "a removed practice session's review was logged first");
 			assert.ok(mid.chats.includes(s.kept), "a session outside the folder is untouched");
 			assert.deepEqual(mid.placements[s.kept], { folderId: s.top });
 			assert.deepEqual(mid.noteSources, expected.noteSources, "the folder's notes are never lost");

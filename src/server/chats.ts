@@ -169,7 +169,7 @@ export function deleteIdleChatRecord(chatId: string): Extract<ChatDeleteOutcome,
 
 /** The review ledger outlives the chat: fold not-yet-logged reviews in BEFORE anything is purged.
  *  A failed sync refuses the delete (503) with everything untouched; the caller retries. */
-function syncReviewsBeforeDelete(chatId: string): Extract<ChatDeleteOutcome, { status: 503 }> | null {
+export function syncReviewsBeforeDelete(chatId: string): Extract<ChatDeleteOutcome, { status: 503 }> | null {
 	try {
 		syncChatReviews(chatId);
 		return null;

@@ -4,7 +4,7 @@ import { folderDeletionScope, type FolderDeletionScope } from "../core/session-f
 import { extractionStatuses } from "../agent/subagents/extraction.ts";
 import { stores } from "./stores.ts";
 import { sourceDirectory } from "./source-organization.ts";
-import { deleteIdleChatRecord, runningWorkBlocker, settleChatsForDeletion } from "./chats.ts";
+import { deleteIdleChatRecord, runningWorkBlocker, settleChatsForDeletion, syncReviewsBeforeDelete } from "./chats.ts";
 import { graphRevision } from "./graph.ts";
 
 export class SourceDeletionError extends Error {
@@ -140,6 +140,12 @@ export async function deleteFolderWithSessions(folderId: string, mode: ChatDelet
 		if (running.has(id)) throw blockedIn(title, "extraction_winding_down", "");
 	}
 	const chatIds = new Set(targets.chatIds);
+	// Every session's practice reviews are logged before the first destructive write: a failed sync
+	// refuses (503) with nothing deleted, and deleteIdleChatRecord's own sync below finds nothing new.
+	for (const id of chatIds) {
+		const refused = syncReviewsBeforeDelete(id);
+		if (refused) throw new SourceDeletionError(refused.error, refused.status, refused.code);
+	}
 	deleteSourcesTraces(stores.graphStore, chatIds, mode);
 	for (const id of chatIds) {
 		const outcome = deleteIdleChatRecord(id);
