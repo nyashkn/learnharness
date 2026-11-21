@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { hasApi, type Api, type Model } from "@earendil-works/pi-ai";
@@ -7,11 +6,10 @@ import { Value } from "typebox/value";
 import { setModelCatalogOverlay } from "../agent/models.ts";
 import { AUTH_PROVIDER_KEYS } from "../core/auth-keys.ts";
 import type { ModelCatalogRefreshOutcome } from "../core/contracts/models.ts";
-import { MODEL_CATALOG_FILE, writeModelCatalogSnapshot } from "./stores.ts";
+import { readModelCatalogSnapshot, writeModelCatalogSnapshot } from "./stores.ts";
 import { keyValue } from "./keys.ts";
 import { readBoundedJson } from "./custom-provider-body.ts";
 
-const FILE = MODEL_CATALOG_FILE;
 const MAX_SHARD_BYTES = 2 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const MAX_SHARD_ROWS = 2000;
@@ -204,14 +202,28 @@ interface State { snapshot: Catalog; refreshing?: Promise<ModelCatalogRefreshOut
 const STATE_KEY = Symbol.for("lh.remote-model-catalog");
 const catalogGlobal = globalThis as typeof globalThis & { [STATE_KEY]?: State };
 
+/** One saved row that no longer passes drops alone (fork): the provider's good rows still load, so the next refresh
+ *  does not rewrite the file without them. A pi.dev shard stays all-or-nothing (fetchShard). */
+function restoredModels(provider: string, rows: readonly unknown[]): Model<Api>[] {
+	if (rows.length > MAX_SHARD_ROWS) return [];
+	const models = new Map<string, Model<Api>>();
+	for (const row of rows) {
+		try {
+			for (const model of checkedModels(provider, [row])) if (!models.has(model.id)) models.set(model.id, model);
+		} catch { /* this row only */ }
+	}
+	return [...models.values()];
+}
+
 function restoreSnapshot(): Catalog {
 	try {
-		if (fs.statSync(FILE).size > MAX_SNAPSHOT_BYTES) return new Map();
-		const saved: unknown = JSON.parse(fs.readFileSync(FILE, "utf-8"));
+		const text = readModelCatalogSnapshot(MAX_SNAPSHOT_BYTES);
+		if (text === null) return new Map();
+		const saved: unknown = JSON.parse(text);
 		if (record(saved) && saved.version === 1 && record(saved.providers)) {
 			return new Map([...builtins.keys()].flatMap((provider) => {
 				const rows = saved.providers as Record<string, unknown>;
-				const models = Array.isArray(rows[provider]) ? checkedModels(provider, catalogRows(rows[provider])) : [];
+				const models = Array.isArray(rows[provider]) ? restoredModels(provider, rows[provider]) : [];
 				return models.length ? [[provider, models] as const] : [];
 			}));
 		}

@@ -1475,3 +1475,22 @@ describe("G test helpers stay narrow (lh-16g 15)", () => {
 		assert.deepEqual(tree(dir), before);
 	});
 });
+
+describe("K the model catalog cache beside the store", () => {
+	// model-catalog.json is a data-folder cache outside the graph: migrate and export must leave it where it is, byte for byte.
+	for (const [from, to] of DIRS) {
+		test(`K ${from} -> ${to}: migrate, then export, leave model-catalog.json in place`, () => {
+			const dir = mk();
+			buildState(dir, from, to);
+			const file = path.join(dir, "model-catalog.json");
+			const text = `${JSON.stringify({ version: 1, providers: { openai: [{ id: `kept-${from}-${to}` }] } })}\n`;
+			fs.writeFileSync(file, text);
+			const mtime = fs.statSync(file).mtimeMs;
+			mig(dir, to, { now });
+			assert.equal(fs.readFileSync(file, "utf8"), text, "migrate leaves it");
+			exportStore(dir, path.join(mk(), "export"), { now });
+			assert.equal(fs.readFileSync(file, "utf8"), text, "export leaves it");
+			assert.equal(fs.statSync(file).mtimeMs, mtime, "neither rewrites it");
+		});
+	}
+});
