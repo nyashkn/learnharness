@@ -30,7 +30,6 @@ const builtins = new Map(builtinProviders().flatMap((provider) => {
 // zod's z.object behaviour: unknown keys are allowed by the check, then stripped (`strip`), so a feed cannot
 // carry extra fields (headers, routing) into a model. `strict` objects reject unknown keys, as z.strictObject did.
 const strict = { additionalProperties: false } as const;
-const oneOf = <T extends string>(...values: T[]) => Type.Union(values.map((value) => Type.Literal(value)));
 const id = Type.String({ minLength: 1, maxLength: 256, pattern: "^[\\w.~:@-]+(?:/[\\w.~:@-]+)*$" });
 const rate = Type.Number({ minimum: 0, maximum: 1_000_000 });
 const rates = { input: rate, output: rate, cacheRead: rate, cacheWrite: rate };
@@ -48,7 +47,7 @@ const rowSchema = Type.Object({
 	baseUrl: Type.String(),
 	reasoning: Type.Boolean(),
 	thinkingLevelMap: Type.Optional(Type.Object({ off: thinking, minimal: thinking, low: thinking, medium: thinking, high: thinking, xhigh: thinking, max: thinking })),
-	input: Type.Array(oneOf("text", "image"), { minItems: 1, maxItems: 2 }),
+	input: Type.Array(Type.Enum(["text", "image"]), { minItems: 1, maxItems: 2 }),
 	inputLimits: Type.Optional(Type.Object({
 		maxRequestBytes: byteLimit,
 		images: Type.Optional(Type.Object({
@@ -65,8 +64,8 @@ const rowSchema = Type.Object({
 // Pi 1.5.2 wire flags, per transport. Unknown behavior fails closed; the
 // descriptors below are bounded values, never arbitrary request arguments.
 const flag = Type.Optional(Type.Boolean());
-const sessionAffinity = Type.Optional(oneOf("openai", "openai-nosession", "openrouter"));
-const cacheKeyMode = Type.Optional(oneOf("auto", "enabled", "disabled"));
+const sessionAffinity = Type.Optional(Type.Enum(["openai", "openai-nosession", "openrouter"]));
+const cacheKeyMode = Type.Optional(Type.Enum(["auto", "enabled", "disabled"]));
 const commonOpenAI = {
 	supportsDeveloperRole: flag, supportsMidConvoSystemMessages: flag, supportsStrictMode: flag,
 	supportsOpenAIGrammarTools: flag, supportsLongCacheRetention: flag,
@@ -77,10 +76,10 @@ const completionsCompat = Type.Object({
 	supportsStore: flag, supportsReasoningEffort: flag, supportsUsageInStreaming: flag, supportsFinishReason: flag,
 	requiresToolResultName: flag, requiresAssistantAfterToolResult: flag, requiresNonNullAssistantContent: flag,
 	requiresToolsWithToolHistory: flag, requiresThinkingAsText: flag, requiresReasoningContentOnAssistantMessages: flag,
-	maxTokensField: Type.Optional(oneOf("max_tokens", "max_completion_tokens")),
-	thinkingFormat: Type.Optional(oneOf("openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling")),
+	maxTokensField: Type.Optional(Type.Enum(["max_tokens", "max_completion_tokens"])),
+	thinkingFormat: Type.Optional(Type.Enum(["openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"])),
 	zaiToolStream: flag, supportsThinkingTokenBudget: flag, supportsMidConvoToolAdditions: flag, sendSessionAffinityHeaders: flag,
-	thinkingTokenBudgetField: Type.Optional(oneOf("thinking_token_budget", "thinking_budget", "thinking_budget_tokens")),
+	thinkingTokenBudgetField: Type.Optional(Type.Enum(["thinking_token_budget", "thinking_budget", "thinking_budget_tokens"])),
 	cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
 	vllmPriority: Type.Optional(Type.Integer({ minimum: -1000, maximum: 1000 })),
 }, strict);
