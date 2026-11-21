@@ -10,7 +10,9 @@
  *  - no half-deleted folder: the folder stays while any of its sessions survives;
  *  - nothing outside the scope is touched, and the folder's notes are never lost;
  *  - a removed practice session's reviews are always logged first (the review ledger outlives the chat);
- *  - the review failpoint touches nothing at all; the graph failpoint touches nothing but those review lines.
+ *  - the review failpoint touches nothing at all; the graph failpoint touches nothing but those review lines;
+ *  - a placement inside whose session is already gone (deleted on its own earlier, or by the failed attempt) goes
+ *    like the folder's sessions do, never to the parent.
  * The expected final state comes from a model built from the setup inputs, never from the code under test.
  */
 import assert from "node:assert/strict";
@@ -31,22 +33,25 @@ fs.writeFileSync(process.env.LH_AUTH_FILE, "{}\n");
 const { stores, storageBackend } = await import("../src/server/stores.ts");
 const { sourceDirectory } = await import("../src/server/source-organization.ts");
 const { deleteFolderWithSessions } = await import("../src/server/source-deletion.ts");
+const { deleteChatSession } = await import("../src/server/chats.ts");
 const { releaseGraphDb } = await import("../src/store/sql/open.ts");
 const { releaseStoreLock } = await import("../src/store/marker.ts");
 after(() => { releaseGraphDb(data); releaseStoreLock(data); fs.rmSync(root, { recursive: true, force: true }); });
 
 type Fail = "none" | "review" | "graph" | "org" | number; // a number = the index (in scope order) of the session record whose delete fails
-interface Case { sessions: number; notes: number; nested: boolean; mode: ChatDeleteMode; fail: Fail }
+/** `leftover`: a session in the folder deleted on its own before the folder Delete, with that one-session Delete's mode. */
+interface Case { sessions: number; notes: number; nested: boolean; leftover: ChatDeleteMode | null; mode: ChatDeleteMode; fail: Fail }
 
 const node = (id: string, sources: string[]): GraphNode =>
 	({ id, name: id, statement: `${id} statement`, aliases: [], createdAt: "2026-11-21", provenance: sources.map((chatId) => ({ chatId, messageId: "m" })) });
 
 let run = 0;
-function setup(c: Case) {
+async function setup(c: Case) {
 	const p = `r${run++}`;
 	const del = `${p}_del`, sub = `${p}_sub`, top = `${p}_top`;
 	const sessions = Array.from({ length: c.sessions }, (_, i) => stores.chatStore.createChat(`${p} session ${i}`, i === 1 ? "practice" : undefined).id);
 	const kept = stores.chatStore.createChat(`${p} kept`).id;
+	const leftover = c.leftover ? stores.chatStore.createChat(`${p} leftover`).id : null;
 	// Session 1 is a practice session with one concluded problem: its review is logged on delete.
 	const practice = sessions[1];
 	if (practice) stores.chatStore.saveMessages(practice, recordOf([{ id: "x", tagged: true, concluded: true, outcome: "solved" }]));
@@ -55,6 +60,7 @@ function setup(c: Case) {
 	for (const s of sessions) stores.graphStore.appendNode(node(`${p}_only_${s}`, [s]));
 	stores.graphStore.appendNode(node(`${p}_shared`, [sessions[0]!, kept]));
 	for (const n of notes) stores.graphStore.appendNode(node(`${p}_from_${n}`, [n]));
+	if (leftover) stores.graphStore.appendNode(node(`${p}_left`, [leftover]));
 	const inner = (i: number) => (c.nested && i % 2 === 1 ? sub : del);
 	const org = stores.sourceOrganizationStore.read();
 	stores.sourceOrganizationStore.write({
@@ -66,15 +72,18 @@ function setup(c: Case) {
 		placements: { ...org.placements,
 			[kept]: { folderId: top },
 			...Object.fromEntries(sessions.map((s, i) => [s, { folderId: inner(i) }])),
-			...Object.fromEntries(notes.map((n, i) => [n, { folderId: inner(i), name: `Note ${i}` }])) },
+			...Object.fromEntries(notes.map((n, i) => [n, { folderId: inner(i), name: `Note ${i}` }])),
+			...(leftover ? { [leftover]: { folderId: inner(1) } } : {}) },
 	});
+	// The one-session Delete leaves the organization alone, so the leftover keeps its placement inside the folder.
+	if (leftover && c.leftover) assert.equal((await deleteChatSession(leftover, c.leftover)).ok, true);
 	const folders = c.nested ? [top, del, sub] : [top, del];
-	const ids = [...sessions, kept, ...notes];
-	const nodeIds = [...sessions.map((s) => `${p}_only_${s}`), `${p}_shared`, ...notes.map((n) => `${p}_from_${n}`)];
+	const ids = [...sessions, kept, ...notes, ...(leftover ? [leftover] : [])];
+	const nodeIds = [...sessions.map((s) => `${p}_only_${s}`), `${p}_shared`, ...notes.map((n) => `${p}_from_${n}`), ...(leftover ? [`${p}_left`] : [])];
 	const reviewIds = practice ? [`${practice}:p_x`] : [];
-	return { p, del, top, sessions, practice, kept, notes, folders, ids, nodeIds, reviewIds };
+	return { p, del, top, sessions, practice, kept, leftover, notes, folders, ids, nodeIds, reviewIds };
 }
-type Setup = ReturnType<typeof setup>;
+type Setup = Awaited<ReturnType<typeof setup>>;
 
 /** Everything this run owns, as plain data. */
 function observe(s: Setup) {
@@ -91,12 +100,14 @@ function observe(s: Setup) {
 }
 
 /** The model: what a completed Delete leaves, from the setup inputs alone. */
-function model(s: Setup, mode: ChatDeleteMode) {
+function model(s: Setup, mode: ChatDeleteMode, leftover: ChatDeleteMode | null) {
 	const gone = new Set(s.sessions);
 	const nodes: Record<string, string[]> = {};
 	for (const sId of s.sessions) if (mode === "preserve-graph") nodes[`${s.p}_only_${sId}`] = [sId];
 	nodes[`${s.p}_shared`] = mode === "preserve-graph" ? [s.sessions[0]!, s.kept].sort() : [s.kept];
 	for (const n of s.notes) nodes[`${s.p}_from_${n}`] = [n];
+	// The folder Delete never touches the leftover's traces: only its own one-session Delete chose for them.
+	if (s.leftover && leftover === "preserve-graph") nodes[`${s.p}_left`] = [s.leftover];
 	return {
 		chats: [s.kept],
 		folders: [s.top],
@@ -144,14 +155,15 @@ export function runFailpoints(backend: "file" | "sqlite" | "doltlite", numRuns: 
 		const failArb = (n: number) => fc.oneof(fc.constantFrom<Fail>("none", "graph", "org", ...(n >= 2 ? ["review" as const] : [])), fc.integer({ min: 0, max: n - 1 }));
 		const caseArb = fc.integer({ min: 1, max: 3 }).chain((sessions) => fc.record<Case>({
 			sessions: fc.constant(sessions), notes: fc.integer({ min: 0, max: 2 }), nested: fc.boolean(),
+			leftover: fc.constantFrom<ChatDeleteMode | null>(null, "preserve-graph", "delete-nodes"),
 			mode: fc.constantFrom<ChatDeleteMode>("preserve-graph", "delete-nodes"), fail: failArb(sessions),
 		}));
 		await fc.assert(fc.asyncProperty(caseArb, async (c) => {
-			const s = setup(c);
+			const s = await setup(c);
 			assert.equal(storageBackend, backend, "the stores run on the backend under test");
 			const before = observe(s);
 			const scope = () => folderDeletionScope(sourceDirectory.read(), s.del);
-			const expected = model(s, c.mode);
+			const expected = model(s, c.mode, c.leftover);
 			if (c.fail === "none") {
 				await deleteFolderWithSessions(s.del, c.mode, scope());
 				assert.deepEqual(observe(s), expected);
@@ -171,15 +183,13 @@ export function runFailpoints(backend: "file" | "sqlite" | "doltlite", numRuns: 
 				assert.ok(Object.values(mid.nodes).every((sources) => !sources.includes(id)), `no orphan traces: session ${id} is gone, so are its traces`);
 			}
 			await deleteFolderWithSessions(s.del, c.mode, scope()); // the retry, after a fresh review
-			// Known gap (triage): a session the failed attempt already removed is no longer a session to the retry,
-			// so its placement moves to the parent like any other non-session placement instead of being dropped.
-			const removedEarlier = new Set(s.sessions.filter((id) => !mid.chats.includes(id)));
-			const final = observe(s);
-			for (const [id, placement] of Object.entries(final.placements)) if (removedEarlier.has(id)) {
-				assert.deepEqual(placement, { folderId: s.top }, `a leftover placement of ${id} sits at the parent`);
-				delete final.placements[id];
-			}
-			assert.deepEqual(final, expected);
-		}), { numRuns });
+			// A session the failed attempt already removed is no session to the retry, yet its placement goes as a clean run's does.
+			assert.deepEqual(observe(s), expected);
+		}), { numRuns, examples: [
+			// Shrunk counterexample of the retry gap: the failed organization write left both sessions' placements behind.
+			[{ sessions: 2, notes: 0, nested: false, leftover: null, mode: "preserve-graph", fail: "org" }],
+			// A clean run over a leftover kept by its one-session Delete's preserve-graph choice, notes beside it.
+			[{ sessions: 1, notes: 1, nested: true, leftover: "preserve-graph", mode: "preserve-graph", fail: "none" }],
+		] });
 	});
 }
