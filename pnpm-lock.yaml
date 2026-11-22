@@ -233,8 +233,8 @@ importers:
         version: 5.9.3
     optionalDependencies:
       '@dolthub/doltlite':
-        specifier: 0.51.9
-        version: 0.51.9
+        specifier: 0.51.15
+        version: 0.51.15
 
 packages:
 
@@ -344,8 +344,8 @@ packages:
   '@chevrotain/types@11.1.2':
     resolution: {integrity: sha512-U+HFai5+zmJCkK86QsaJtoITlboZHBqrVketcO2ROv865xfCMSFpELQoz1GkX5GzME8pTa+3kbKrZHQtI0gdbw==}
 
-  '@dolthub/doltlite@0.51.9':
-    resolution: {integrity: sha512-1FxBc80qd8Qeg57UF7Dy2phz9Nw+3PTN7dP0FTpUdaD1CQZPxL6CvZ5+rS0Pdm7yaDkaYOUWRX3cTC+GrvtIRg==}
+  '@dolthub/doltlite@0.51.15':
+    resolution: {integrity: sha512-pnMb38FqzBjD73VnxAIj0TUJH4zkQ3R2a8tcuoCR2X0YUlEuTGqIs1EQjJ9LUcSuJVDTmiWpoMdSThGmuU/Zaw==}
     engines: {node: '>=18.0.0'}
 
   '@earendil-works/pi-agent-core@1.5.2':
@@ -5892,7 +5892,7 @@ snapshots:
 
   '@chevrotain/types@11.1.2': {}
 
-  '@dolthub/doltlite@0.51.9':
+  '@dolthub/doltlite@0.51.15':
     dependencies:
       node-addon-api: 8.9.2
     optional: true

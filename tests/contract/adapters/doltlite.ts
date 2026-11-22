@@ -9,8 +9,6 @@
 import { CURRENT_GRAPH_FORMAT_VERSION } from "../../../src/core/contracts/graph.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import v8 from "node:v8";
-import vm from "node:vm";
 import { emit, subscribe } from "../../../src/core/events.ts";
 import { createFileStores } from "../../../src/store/file-stores.ts";
 import { graphPaths } from "../../../src/store/graph.ts";
@@ -38,15 +36,6 @@ const lockFor = (dir: string): StoreLock => {
 /** reopen does not dispose the earlier bundle; two live writable connections on one file are not what the app does, so a reopen closes the earlier driver first. */
 const driversByDir = new Map<string, SqlDriver>();
 
-/** FACT: the addon keeps its file descriptors (about 8 per store on the app path) until the statements that read the store are garbage collected AND the finalizers ran,
- *  and finalizers run on a later event-loop turn, which a property loop awaiting only promises never gives. V8 does not feel fd pressure either, so a suite making
- *  thousands of stores hits EMFILE (seen at the last test, J1). So: a full GC every 20 disposals, and the next open yields one macrotask. */
-v8.setFlagsFromString("--expose-gc");
-const collect = vm.runInNewContext("gc") as () => void;
-let disposed = 0;
-let yieldNext = false;
-const afterDispose = (): void => { if (++disposed % 20 === 0) { collect(); yieldNext = true; } };
-const letFinalizersRun = async (): Promise<void> => { if (yieldNext) { yieldNext = false; await new Promise<void>((r) => setImmediate(r)); } };
 /** DoltLite fsyncs every commit, so the heavy properties (N1) need more than the 70 s the others get. */
 const SLOW_MS = 300_000;
 
@@ -63,7 +52,6 @@ const direct: AdapterFactory = {
 	propertyTimeoutMs: SLOW_MS,
 	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true, commits: true },
 	async open(dir): Promise<StoreBundle> {
-		await letFinalizersRun();
 		const base = await fileFactory.open(dir);
 		const file = doltliteDbFile(dir);
 		driversByDir.get(dir)?.close();
@@ -101,7 +89,6 @@ const direct: AdapterFactory = {
 						driversByDir.delete(dir);
 						locksByDir.get(dir)?.release();
 						locksByDir.delete(dir);
-						afterDispose();
 					}
 				}
 			},
@@ -126,7 +113,6 @@ const app: AdapterFactory = {
 	propertyTimeoutMs: SLOW_MS,
 	capabilities: { revision: true, corruptLines: true, refusesAtOpen: true, commits: true },
 	async open(dir): Promise<StoreBundle> {
-		await letFinalizersRun();
 		const s = openAsDoltlite(dir);
 		const formatFile = graphPaths(path.join(dir, "graph")).format;
 		/** A second connection, as a hook is not a store write. `beforeWrite` first: the file exists only after a first write, and it returns the store lock. */
@@ -149,7 +135,7 @@ const app: AdapterFactory = {
 				clearFormatStamp: () => { fs.rmSync(formatFile, { force: true }); setLineFormat(CURRENT_GRAPH_FORMAT_VERSION); },
 				commitMessages: () => commitMessagesOf(dir),
 			},
-			dispose: () => { try { releaseGraphDb(dir); } finally { releaseStoreLock(dir); afterDispose(); } },
+			dispose: () => { try { releaseGraphDb(dir); } finally { releaseStoreLock(dir); } },
 		};
 	},
 };

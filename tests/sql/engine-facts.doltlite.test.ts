@@ -4,7 +4,7 @@
  * file@hash readers, VACUUM INTO, growth per commit, dolt_diff.
  * The pin in package.json optionalDependencies must equal the version on the next line (scripts/check-version-pins.ts):
  *
- * DoltLite version under test: 0.51.9
+ * DoltLite version under test: 0.51.15
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -34,6 +34,8 @@ after(() => {
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 const fresh = () => path.join(dir, `s${n++}.db`);
+/** Where this process lists its open file descriptors (none on Windows). */
+const FD_DIR = ["/proc/self/fd", "/dev/fd"].find((d) => fs.existsSync(d));
 const open = (file = fresh()) => openDoltlite(file, { busyTimeoutMs: 0 });
 /** A REAL store lock (one per file, reused while held): a plain object could never show a lock is held. */
 const lockOf = (file: string): StoreLock => {
@@ -93,9 +95,9 @@ describe("engine facts: DoltLite", () => {
 		assert.match(h as string, HASH);
 		assert.equal(db.head(), h);
 		db.close();
-		// TRAP: the addon's own version string is not a version.
+		// doltVersion() is the package version with a "v" (through 0.51.9 it was the literal "doltlite-amalgamation", so the driver reads package.json).
 		const raw = new (nodeRequire("@dolthub/doltlite").DatabaseSync)(":memory:");
-		assert.equal(raw.doltVersion(), "doltlite-amalgamation");
+		assert.equal(raw.doltVersion(), `v${pinned}`);
 		raw.close();
 	});
 
@@ -174,14 +176,16 @@ describe("engine facts: DoltLite", () => {
 				text = (e as Error).message;
 			}
 			assert.equal(count(b), 0, "reader sees the last committed state, not pending writes");
-			let bare = "";
+			let bare: Record<string, unknown> = {};
 			try {
 				b.run("INSERT INTO ledger(line_json) VALUES ('x')");
 			} catch (e) {
-				bare = (e as Error).message;
+				const { message, code, errcode, operation } = e as Error & Record<string, unknown>;
+				bare = { message, code, errcode, operation };
 			}
-			console.log(`FACT busy error text of a bare write: ${JSON.stringify(bare)}`);
-			assert.equal(bare, "run: database is locked", "the addon prefixes the failing method on prepared statements");
+			console.log(`FACT busy error of a bare write: ${JSON.stringify(bare)}`);
+			// Since 0.51.15 the message has no "run: " prefix; the method is in `operation`, and errcode 5 is SQLITE_BUSY (node:sqlite's shape).
+			assert.deepEqual(bare, { message: "database is locked", code: "ERR_SQLITE_ERROR", errcode: 5, operation: "run" });
 		});
 		console.log(`FACT busy error text: ${JSON.stringify(text)}`);
 		assert.equal(text, "database is locked");
@@ -491,7 +495,30 @@ db.transaction(()=>db.run("INSERT INTO ledger(line_json) VALUES ('child')"));con
 		for (const id of inserted) db.run("INSERT INTO t(id, v) VALUES (?, 1)", id);
 		const got = db.all<{ id: string }>("SELECT id FROM t ORDER BY rowid").map((r) => r.id);
 		assert.notDeepEqual(got, inserted);
-		assert.deepEqual(got, ["mm", "aa", "bb", "zz"], "observed on 0.51.9; the order is the engine's key order, not ours to rely on");
+		assert.deepEqual(got, ["mm", "aa", "bb", "zz"], "observed on 0.51.9 and 0.51.15; the order is the engine's key order, not ours to rely on");
+	});
+	test("F23 close() frees the store's file descriptors at once, with no GC (dolthub/doltlite-node#13, fixed in 0.51.15): writable, read-only and file@hash", { skip: FD_DIR === undefined ? "no fd directory on this host" : false }, () => {
+		const file = fresh();
+		const setup = open(file);
+		setup.exec(LEDGER);
+		setup.seal("ledger");
+		setup.close();
+		const fds = () => fs.readdirSync(FD_DIR as string).length;
+		const before = fds();
+		for (let i = 0; i < 50; i++) {
+			const db = open(file);
+			db.run("INSERT INTO ledger(line_json) VALUES (?)", `l${i}`);
+			db.all("SELECT seq FROM ledger");
+			const h = db.seal(`c${i}`) as string;
+			db.close();
+			const ro = openDoltlite(file, { readOnly: true });
+			ro.get("SELECT count(*) AS n FROM ledger");
+			ro.close();
+			const at = openReaderAt(file, h);
+			at.all("SELECT seq FROM ledger");
+			at.close();
+		}
+		assert.equal(fds() - before, 0, "file descriptors left open after 50 open/query/close cycles of each kind");
 	});
 });
 
@@ -710,14 +737,17 @@ process.kill(process.pid,"SIGKILL");`,
 			db.seal(`warm ${i}`);
 		}
 		const total = () => fs.readdirSync(dir).filter((f) => f === path.basename(file) || f.startsWith(`${path.basename(file)}-`)).reduce((sum, f) => sum + fs.statSync(path.join(dir, f)).size, 0);
+		// Sizes are read with the store closed: since 0.51.15 the engine grows the file ahead while it is open and trims it at close.
+		db.close();
 		const start = total();
+		const again = open(file);
 		const N = 200;
 		for (let i = 0; i < N; i++) {
-			db.run("INSERT INTO ledger(line_json) VALUES (?)", line(i));
-			db.seal(`c ${i}`);
+			again.run("INSERT INTO ledger(line_json) VALUES (?)", line(i));
+			again.seal(`c ${i}`);
 		}
+		again.close();
 		const perCommit = (total() - start) / N;
-		db.close();
 		console.log(`FACT growth per commit: ${perCommit.toFixed(0)} bytes (one ~190 byte row + one commit; ${N} commits, file+wal+shm)`);
 		assert.ok(perCommit > 0, "measured something");
 		assert.ok(perCommit < 64 * 1024, `bytes per commit ${perCommit} is beyond the generous 64 KiB bound`);

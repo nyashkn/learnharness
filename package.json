@@ -115,6 +115,6 @@
 		"typescript": "^5.6.0"
 	},
 	"optionalDependencies": {
-		"@dolthub/doltlite": "0.51.9"
+		"@dolthub/doltlite": "0.51.15"
 	}
 }
