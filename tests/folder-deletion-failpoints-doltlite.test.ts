@@ -2,7 +2,7 @@
 import { test } from "node:test";
 
 // A hardcoded literal on purpose: the expected hosts must not be derived from the code under test.
-if (["darwin-arm64", "linux-x64"].includes(`${process.platform}-${process.arch}`)) {
+if (["darwin-arm64", "linux-x64", "win32-x64"].includes(`${process.platform}-${process.arch}`)) {
 	process.env.LH_STORAGE = "doltlite";
 	const { runFailpoints } = await import("./folder-deletion-failpoints.ts");
 	runFailpoints("doltlite", 15);
