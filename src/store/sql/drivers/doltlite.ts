@@ -31,7 +31,7 @@ function loadAddon(): Addon {
 		// trace. next.config.ts outputFileTracingIncludes ships exactly index.js, package.json and this
 		// platform's addon; scripts/build-server.mjs refuses anything else.
 		const mod = require(/* turbopackIgnore: true */ "@dolthub/doltlite") as { DatabaseSync: typeof DoltDatabase };
-		// doltVersion() returns the literal "doltlite-amalgamation", so the package version is the engine version.
+		// The package version is the engine version. doltVersion() returned the literal "doltlite-amalgamation" through 0.51.9 (since 0.51.15 it is "v<version>").
 		const version = (require(/* turbopackIgnore: true */ "@dolthub/doltlite/package.json") as { version: string }).version;
 		addon = { DatabaseSync: mod.DatabaseSync, version };
 		return addon;

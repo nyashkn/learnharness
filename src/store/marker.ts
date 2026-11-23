@@ -16,7 +16,7 @@
  *    lock of its own file recover. Marker lock first, store lock second, released in reverse.
  *
  * This build wires file, sqlite and doltlite. `adapterFor` is the ONE place an adapter is registered;
- * doltlite ships on darwin-arm64 and linux-x64 only and is refused elsewhere with NoAdapterError (win32-x64 waits on dolthub/doltlite-node#13: close() keeps the store's files open until GC, and Windows refuses rm/rename of an open file).
+ * doltlite ships on darwin-arm64 and linux-x64 only and is refused elsewhere with NoAdapterError (win32-x64 waits on lh-iwm: on @dolthub/doltlite 0.51.15 the app-path contract run on Windows exits early or hangs, cause not found yet).
  * A first write that picks sqlite or doltlite takes the locks, creates and migrates the store
  * (`graph.sqlite`, `graph.doltlite`), and only then writes the marker, so the marker never names a missing store.
  */
@@ -54,7 +54,7 @@ const isBackend = (v: unknown): v is Backend => typeof v === "string" && (BACKEN
 /** The backends this build can run. */
 export type RunnableBackend = "file" | "sqlite" | "doltlite";
 
-/** Hosts the app runs DoltLite on. D5 packaged the addon for win32-x64 too, but win32-x64 waits on dolthub/doltlite-node#13: close() keeps the store's files open until GC, and Windows refuses rm/rename of an open file. */
+/** Hosts the app runs DoltLite on. D5 packaged the addon for win32-x64 too, but win32-x64 waits on lh-iwm: on @dolthub/doltlite 0.51.15 the app-path contract run on Windows exits early or hangs, cause not found yet. */
 const DOLTLITE_HOSTS = new Set(["darwin-arm64", "linux-x64"]);
 
 /** The one place adapters are registered. doltlite only on DOLTLITE_HOSTS. `host` is for tests. */

@@ -43,7 +43,7 @@ const writableSince = (mark: number): number => opens.slice(mark).filter((o) => 
 
 describe("adapterFor: doltlite runs on darwin-arm64 and linux-x64 only", () => {
 	const file = "/x/storage.json";
-	it("win32/x64 (held for doltlite-node#13), linux/arm64, darwin/x64, win32/arm64 and other hosts are refused with NoAdapterError naming the backend", () => {
+	it("win32/x64 (held for lh-iwm), linux/arm64, darwin/x64, win32/arm64 and other hosts are refused with NoAdapterError naming the backend", () => {
 		for (const host of [{ platform: "win32", arch: "x64" }, { platform: "linux", arch: "arm64" }, { platform: "darwin", arch: "x64" }, { platform: "win32", arch: "arm64" }, { platform: "win32", arch: "ia32" }, { platform: "freebsd", arch: "x64" }]) {
 			assert.throws(() => marker.adapterFor("doltlite", file, host), (e: unknown) => e instanceof marker.NoAdapterError && e.backend === "doltlite" && e.file === file, `${host.platform}/${host.arch}`);
 		}

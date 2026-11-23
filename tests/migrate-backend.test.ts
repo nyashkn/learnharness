@@ -11,10 +11,8 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, afterEach, describe, test } from "node:test";
+import { after, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import v8 from "node:v8";
-import vm from "node:vm";
 import fc from "fast-check";
 import { runCli } from "../scripts/lh-storage";
 import { StorageVersionError } from "../src/store/graph-format";
@@ -37,14 +35,6 @@ const mk = (): string => {
 	return d;
 };
 after(() => fs.rmSync(root, { recursive: true, force: true }));
-// lh-8jh: the DoltLite addon frees a closed store's fds only after a GC and a later event-loop turn. This file opens
-// hundreds of stores, so a 1024-fd Linux sandbox hit EMFILE late in the run. Collect between tests (the contract adapter does the same).
-v8.setFlagsFromString("--expose-gc");
-const collect = vm.runInNewContext("gc") as () => void;
-afterEach(async () => {
-	collect();
-	await new Promise<void>((resolve) => setImmediate(resolve));
-});
 
 let clock = Date.UTC(2026, 0, 1);
 /** Every call a new stamp: two fresh runs in one folder never share a backup dir. */
