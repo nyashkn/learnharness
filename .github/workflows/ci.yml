@@ -116,9 +116,13 @@ jobs:
       - name: DoltLite app-path contract and backend tests
         env:
           NODE_ENV: test
+          # TAP on Windows: results stream as tests finish, and a crashed test file reports its exitCode (spec prints only 'test failed').
+          REPORTER: ${{ matrix.platform == 'windows-x64' && '--test-reporter=tap' || '--test-reporter=spec' }}
         run: |
-          pnpm exec tsx --test --test-name-pattern='^doltlite-app' "tests/contract/*.contract.ts"
-          pnpm exec tsx --test tests/doltlite-backend.test.ts
+          rc=0
+          pnpm exec tsx --test $REPORTER --test-name-pattern='^doltlite-app' "tests/contract/*.contract.ts" || rc=$?
+          pnpm exec tsx --test $REPORTER tests/doltlite-backend.test.ts || rc=$?
+          exit $rc
       - run: pnpm run build
       # Check the fresh trace before any static copying/curation.
       - run: node scripts/smoke-provider-runtime.mjs
