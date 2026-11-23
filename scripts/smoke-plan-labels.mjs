@@ -243,11 +243,12 @@ async function setFont(page, stack, size) {
 				document.head.appendChild(rule);
 			}
 			// The matrix reads every plan block, including offscreen ones. Lay out
-			// just those older rows while forcing sizes so their probes observe
-			// the new metrics before we compare the labels with their boxes.
-			rule.textContent = z ? `
+			// just those older rows while forcing a font or a size so their probes
+			// observe the new metrics before we compare the labels with their boxes
+			// (a skipped row gets no ResizeObserver callback until it is shown).
+			rule.textContent = s || z ? `
 				[data-older-transcript-row]:has([data-testid="plan-block-full"]) { content-visibility: visible; }
-				:is(svg[aria-label="Plan diagram"], svg[data-plan-probe]) .text-xs { font-size: ${z} !important; }
+				${z ? `:is(svg[aria-label="Plan diagram"], svg[data-plan-probe]) .text-xs { font-size: ${z} !important; }` : ""}
 			` : "";
 		},
 		stack,
